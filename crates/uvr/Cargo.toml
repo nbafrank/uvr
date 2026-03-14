@@ -1,0 +1,28 @@
+[package]
+name = "uvr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "uv-style project-centric dependency manager for R"
+
+[[bin]]
+name = "uvr"
+path = "src/main.rs"
+
+[dependencies]
+uvr-core = { path = "../uvr-core" }
+tokio.workspace = true
+reqwest.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+console.workspace = true
+indicatif.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

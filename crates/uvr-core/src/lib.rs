@@ -1,0 +1,9 @@
+pub mod checksum;
+pub mod error;
+pub mod installer;
+pub mod lockfile;
+pub mod manifest;
+pub mod project;
+pub mod r_version;
+pub mod registry;
+pub mod resolver;

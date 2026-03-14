@@ -1,0 +1,185 @@
+use clap::{Parser, Subcommand, Args};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "uvr",
+    version,
+    about = "Fast, reproducible R package management",
+    long_about = None,
+)]
+pub struct Cli {
+    /// Enable verbose output
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
+    /// Suppress all output except errors
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Create a new uvr project in the current directory
+    Init(InitArgs),
+
+    /// Add one or more packages to the project
+    Add(AddArgs),
+
+    /// Remove one or more packages from the project
+    Remove(RemoveArgs),
+
+    /// Install all packages from the lockfile
+    Sync(SyncArgs),
+
+    /// Run an R script within the project environment
+    Run(RunArgs),
+
+    /// Update the lockfile without installing
+    Lock(LockArgs),
+
+    /// Manage R versions
+    #[command(name = "r")]
+    R(RArgs),
+}
+
+// ────────────────────────────────────────────────────────────
+//  init
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Project name (defaults to current directory name)
+    pub name: Option<String>,
+
+    /// R version constraint, e.g. ">=4.3.0"
+    #[arg(long = "r-version", value_name = "CONSTRAINT")]
+    pub r_version: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  add
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    /// Packages to add, e.g. `ggplot2`, `ggplot2@>=3.0.0`, `user/repo@ref`
+    #[arg(required = true, value_name = "PKG[@VERSION|user/repo@REF]")]
+    pub packages: Vec<String>,
+
+    /// Add as dev dependency
+    #[arg(long)]
+    pub dev: bool,
+
+    /// Package comes from Bioconductor
+    #[arg(long)]
+    pub bioc: bool,
+
+    /// Number of parallel download jobs
+    #[arg(short, long, default_value = "4", value_name = "N")]
+    pub jobs: usize,
+}
+
+// ────────────────────────────────────────────────────────────
+//  remove
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Package names to remove
+    #[arg(required = true)]
+    pub packages: Vec<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  sync
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Fail if the lockfile is out of date (CI mode)
+    #[arg(long)]
+    pub frozen: bool,
+
+    /// Number of parallel download jobs
+    #[arg(short, long, default_value = "4", value_name = "N")]
+    pub jobs: usize,
+}
+
+// ────────────────────────────────────────────────────────────
+//  run
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// R script to execute
+    pub script: Option<String>,
+
+    /// Arguments forwarded to the script
+    #[arg(last = true)]
+    pub args: Vec<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  lock
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct LockArgs {
+    /// Re-resolve and upgrade all packages to their latest allowed versions
+    #[arg(long)]
+    pub upgrade: bool,
+}
+
+// ────────────────────────────────────────────────────────────
+//  r (subcommand group)
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct RArgs {
+    #[command(subcommand)]
+    pub command: RCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RCommands {
+    /// Download and install a specific R version
+    Install(RInstallArgs),
+
+    /// List installed R versions
+    List(RListArgs),
+
+    /// Set the R version constraint in uvr.toml and write .r-version
+    Use(RUseArgs),
+
+    /// Write an exact R version to .r-version (like uv python pin)
+    Pin(RPinArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RInstallArgs {
+    /// R version to install, e.g. "4.3.2"
+    pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RListArgs {
+    /// Show all available versions (requires network)
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RUseArgs {
+    /// R version constraint to set in uvr.toml, e.g. ">=4.3.0"
+    pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RPinArgs {
+    /// Exact R version to pin in .r-version (e.g. "4.3.2").
+    /// If omitted, uses the currently active R version.
+    pub version: Option<String>,
+}
