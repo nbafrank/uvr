@@ -153,6 +153,7 @@ impl PackageRegistry for CranRegistry {
             },
             requires: entry.requires_as_deps(),
             url: entry.tarball_url(),
+            raw_version: Some(entry.raw_version.clone()),
         })
     }
 }

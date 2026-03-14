@@ -63,6 +63,7 @@ pub async fn resolve_github_package(
         checksum: Some(format!("git:{commit_sha}")),
         requires,
         url,
+        raw_version: None, // GitHub packages don't have CRAN-style dash versions
     })
 }
 

@@ -22,6 +22,7 @@ pub struct ResolvedPackage {
     /// Dep names only (stored in lockfile).
     pub requires: Vec<String>,
     pub url: String,
+    pub raw_version: Option<String>,
 }
 
 /// Trait to abstract over CRAN / Bioconductor / GitHub registries.
@@ -130,6 +131,7 @@ impl<'a> Resolver<'a> {
                     checksum: info.checksum,
                     requires: info.requires.iter().map(|d| d.name.clone()).collect(),
                     url: info.url,
+                    raw_version: info.raw_version,
                 },
             );
         }
@@ -144,6 +146,7 @@ impl<'a> Resolver<'a> {
                 name: r.name,
                 version: r.version.to_string(),
                 source: r.source,
+                raw_version: r.raw_version,
                 url: Some(r.url),
                 checksum: r.checksum,
                 requires: r.requires,
@@ -268,6 +271,7 @@ mod tests {
                     .map(|(n, c)| Dep { name: n.to_string(), constraint: c.map(str::to_string) })
                     .collect(),
                 url: format!("https://cran.r-project.org/{name}_{version}.tar.gz"),
+                raw_version: None,
             },
         )
     }
@@ -363,17 +367,17 @@ mod tests {
         let packages = vec![
             LockedPackage {
                 name: "ggplot2".into(), version: "3.4.4".into(),
-                source: PackageSource::Cran, url: None, checksum: None,
+                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
                 requires: vec!["dplyr".into(), "rlang".into()],
             },
             LockedPackage {
                 name: "dplyr".into(), version: "1.1.4".into(),
-                source: PackageSource::Cran, url: None, checksum: None,
+                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
                 requires: vec!["rlang".into()],
             },
             LockedPackage {
                 name: "rlang".into(), version: "1.1.4".into(),
-                source: PackageSource::Cran, url: None, checksum: None,
+                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
                 requires: vec![],
             },
         ];

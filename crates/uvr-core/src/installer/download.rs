@@ -90,8 +90,21 @@ async fn download_one(
     let dest = cache_dir.join(&filename);
 
     if dest.exists() {
-        debug!("Cache hit: {filename}");
-        return Ok(dest);
+        // Verify the cached file when we have a checksum — a corrupted or
+        // tampered cache entry must not silently bypass integrity checks.
+        if let Some(expected) = expected_checksum {
+            let cached = std::fs::read(&dest)?;
+            if checksum::verify(expected, &cached, name).is_ok() {
+                debug!("Cache hit (verified): {filename}");
+                return Ok(dest);
+            }
+            debug!("Cache corrupt for {name}, re-downloading");
+            let _ = std::fs::remove_file(&dest); // best-effort removal
+            // fall through to re-download
+        } else {
+            debug!("Cache hit: {filename}");
+            return Ok(dest);
+        }
     }
 
     std::fs::create_dir_all(cache_dir)?;

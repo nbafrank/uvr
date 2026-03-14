@@ -25,6 +25,11 @@ pub struct LockedPackage {
     pub version: String,
     pub source: PackageSource,
 
+    /// Raw (un-normalized) version string from the registry (e.g. `"1.1-3"`).
+    /// Used to reconstruct correct tarball filenames when `url` is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_version: Option<String>,
+
     /// Canonical download URL. Stored so `sync` never has to reconstruct it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,

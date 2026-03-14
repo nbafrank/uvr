@@ -24,7 +24,11 @@ pub async fn run(frozen: bool, jobs: usize) -> Result<()> {
 ///
 /// Does NOT re-resolve — the lockfile is the source of truth.
 /// Use `uvr lock` or `uvr add` to update the lockfile.
-pub async fn run_inner(project: &Project, _frozen: bool, jobs: usize) -> Result<()> {
+///
+/// With `frozen = true` (CI mode): first verify that the lockfile is consistent
+/// with the current manifest. If the manifest has diverged, exit with an error
+/// rather than silently installing a stale environment.
+pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<()> {
     project.ensure_library_dir().context("Failed to create .uvr/library/")?;
 
     let lockfile = project
@@ -33,6 +37,18 @@ pub async fn run_inner(project: &Project, _frozen: bool, jobs: usize) -> Result<
         .ok_or_else(|| anyhow::anyhow!(
             "No lockfile found. Run `uvr lock` to generate one."
         ))?;
+
+    if frozen {
+        let fresh = crate::commands::lock::resolve_only(project)
+            .await
+            .context("Failed to re-resolve dependencies for --frozen check")?;
+        if !lockfiles_equivalent(&lockfile, &fresh) {
+            anyhow::bail!(
+                "Lockfile is out of date with the current manifest.\n\
+                 Run `uvr lock` to update it, then commit the result."
+            );
+        }
+    }
 
     install_from_lockfile(project, &lockfile, jobs).await
 }
@@ -225,6 +241,22 @@ fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
     library.join(&pkg.name).join("DESCRIPTION").exists()
 }
 
+/// Compare two lockfiles for semantic equivalence, ignoring fields that can
+/// legitimately differ between lockfile versions (e.g. `url`, `checksum`).
+/// Compares: R major.minor version + set of (name, version, source) triples.
+fn lockfiles_equivalent(a: &uvr_core::lockfile::Lockfile, b: &uvr_core::lockfile::Lockfile) -> bool {
+    if r_minor(&a.r.version) != r_minor(&b.r.version) {
+        return false;
+    }
+    if a.packages.len() != b.packages.len() {
+        return false;
+    }
+    // Both are sorted alphabetically by the resolver, so zip is safe.
+    a.packages.iter().zip(b.packages.iter()).all(|(ap, bp)| {
+        ap.name == bp.name && ap.version == bp.version && ap.source == bp.source
+    })
+}
+
 /// Return true only if `s` looks like an actual version number (e.g. `"4.5.3"`),
 /// not a semver constraint (`">=4.0.0"`) or wildcard (`"*"`).
 /// Used to guard the version-mismatch wipe so that old lockfiles with constraint
@@ -245,19 +277,22 @@ fn r_minor(version: &str) -> String {
 
 /// Return the source download URL for a locked package.
 /// Prefers the stored `url` field; falls back to reconstructing it.
+/// Uses `raw_version` (e.g. `"1.1-3"`) when available so the reconstructed
+/// filename matches the actual CRAN tarball (e.g. `scales_1.1-3.tar.gz`).
 fn source_url(pkg: &LockedPackage) -> String {
     if let Some(url) = &pkg.url {
         return url.clone();
     }
+    let ver = pkg.raw_version.as_deref().unwrap_or(&pkg.version);
     use uvr_core::lockfile::PackageSource;
     match pkg.source {
         PackageSource::Cran => format!(
             "https://cran.r-project.org/src/contrib/{}_{}.tar.gz",
-            pkg.name, pkg.version
+            pkg.name, ver
         ),
         PackageSource::Bioconductor => format!(
             "https://bioconductor.org/packages/release/bioc/src/contrib/{}_{}.tar.gz",
-            pkg.name, pkg.version
+            pkg.name, ver
         ),
         PackageSource::GitHub | PackageSource::Local => String::new(),
     }

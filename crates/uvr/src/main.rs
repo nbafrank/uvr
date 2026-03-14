@@ -45,7 +45,7 @@ async fn run() -> Result<()> {
             commands::add::run(args.packages, args.dev, args.bioc, args.jobs).await?;
         }
         Commands::Remove(args) => {
-            commands::remove::run(args.packages)?;
+            commands::remove::run(args.packages).await?;
         }
         Commands::Sync(args) => {
             commands::sync::run(args.frozen, args.jobs).await?;
