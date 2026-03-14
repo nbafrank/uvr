@@ -177,7 +177,14 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     // it can find the library at its new location without needing DYLD_LIBRARY_PATH.
     fix_libr_install_name(dest);
 
-    // Step 9: write etc/Renviron.site so that DYLD_LIBRARY_PATH is set for every
+    // Step 9(a): patch ALL sibling dylibs (libRlapack, libRblas, libgfortran, …)
+    // so they reference each other via managed-R paths rather than the original
+    // CRAN framework paths.  Without this, symbols like `_dgebal_` (LAPACK) that
+    // live in libRlapack/libRblas are invisible to R and packages like Matrix fail
+    // to load with "Symbol not found: _dgebal_".
+    patch_r_dylibs(dest);
+
+    // Step 9(b): write etc/Renviron.site so that DYLD_LIBRARY_PATH is set for every
     // R process this installation spawns — including the fresh `R --slave` sessions
     // used by R CMD INSTALL for byte-compilation.  On macOS 15+ (SIP), DYLD_*
     // variables are stripped when inherited through /bin/sh, so setting the env
@@ -285,6 +292,94 @@ fn fix_libr_install_name(dest: &Path) {
         let _ = Command::new("codesign")
             .args(["--force", "--sign", "-", &new_id])
             .status();
+    }
+}
+
+/// Patch all `.dylib` install names in `<r_home>/lib/` to use the managed-R
+/// path instead of the original CRAN framework path.
+///
+/// The CRAN macOS `.pkg` compiles every dylib with an install name pointing
+/// to `/Library/Frameworks/R.framework/…`. After extraction to
+/// `~/.uvr/r-versions/<ver>/`, those absolute paths don't exist, so
+/// `libRblas`/`libRlapack`/`libgfortran` are never found by the dynamic linker.
+/// Packages compiled against system R (e.g. `Matrix`) expect LAPACK symbols
+/// from `libR.dylib`'s load chain — if `libRlapack.dylib` is never loaded,
+/// those symbols are absent and `dlopen` fails.
+///
+/// This function is idempotent: if all paths already point to the managed-R
+/// lib dir the `install_name_tool` calls succeed silently.
+pub fn patch_r_dylibs(r_home: &Path) {
+    let lib_dir = r_home.join("lib");
+    if !lib_dir.exists() {
+        return;
+    }
+    let lib_str = lib_dir.to_string_lossy().to_string();
+
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else { return };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("dylib") {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+
+        // Fix the dylib's own install name if it still points to the framework.
+        let old_id = Command::new("otool")
+            .args(["-D", &path_str])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8(o.stdout).ok().and_then(|t| {
+                    t.lines().nth(1).map(|l| l.trim().to_string())
+                })
+            })
+            .unwrap_or_default();
+
+        let mut needs_resign = false;
+        if old_id.contains("/Library/Frameworks/R.framework/") {
+            let _ = Command::new("install_name_tool")
+                .args(["-id", &path_str, &path_str])
+                .status();
+            needs_resign = true;
+        }
+
+        // Fix all dependency paths pointing into the R framework.
+        let deps = Command::new("otool")
+            .args(["-L", &path_str])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+
+        for line in deps.lines().skip(1) {
+            let dep = line.trim().split_whitespace().next().unwrap_or("");
+            if !dep.contains("/Library/Frameworks/R.framework/") {
+                continue;
+            }
+            let filename = std::path::Path::new(dep)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if filename.is_empty() {
+                continue;
+            }
+            let new_dep = format!("{lib_str}/{filename}");
+            if Command::new("install_name_tool")
+                .args(["-change", dep, &new_dep, &path_str])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                needs_resign = true;
+            }
+        }
+
+        if needs_resign {
+            let _ = Command::new("codesign")
+                .args(["--force", "--sign", "-", &path_str])
+                .status();
+        }
     }
 }
 

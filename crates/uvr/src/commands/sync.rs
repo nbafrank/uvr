@@ -9,7 +9,7 @@ use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
-use uvr_core::r_version::downloader::{patch_renviron_site, Platform};
+use uvr_core::r_version::downloader::{patch_r_dylibs, patch_renviron_site, Platform};
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
@@ -130,6 +130,10 @@ pub async fn install_from_lockfile(
         if let Some(ref r_home) = r_home_opt {
             if r_home.to_string_lossy().contains(".uvr/r-versions") {
                 let _ = patch_renviron_site(r_home);
+                // Patch all R dylib install names so BLAS/LAPACK sibling libraries
+                // (libRlapack, libRblas, libgfortran) are found at the managed path
+                // rather than the original CRAN framework path. Idempotent.
+                patch_r_dylibs(r_home);
                 Some(r_home.join("lib").join("libR.dylib"))
             } else {
                 None
