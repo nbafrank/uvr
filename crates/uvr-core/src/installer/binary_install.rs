@@ -48,6 +48,13 @@ pub fn install_binary_package(
     Ok(())
 }
 
+/// Public entry-point for retroactively patching already-installed packages.
+/// Called by `uvr sync` to fix packages that were extracted before patching
+/// support was added. Idempotent: no-op if the `.so` already points to `libr_path`.
+pub fn patch_installed_so_files(pkg_dir: &Path, libr_path: &Path) {
+    let _ = patch_so_libr_refs(pkg_dir, libr_path);
+}
+
 /// Walk `<pkg_dir>/libs/` and fix every `.so` that references a `libR.dylib`
 /// path other than `libr_path`.
 ///

@@ -28,9 +28,16 @@ pub fn run(script: Option<String>, args: Vec<String>) -> Result<()> {
     cmd.env("R_LIBS", "");
     cmd.env("DYLD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
     cmd.env("LD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
+    // Suppress ALL Renviron files so our R_LIBS_USER is not overwritten:
+    //  - R_ENVIRON=""   → skips $R_HOME/etc/Renviron (which sets R_LIBS_USER to
+    //                     ~/Library/R/4.5/library, overriding our value)
+    //  - --no-environ   → skips ~/.Renviron (user customisations)
+    cmd.env("R_ENVIRON", "");
+    cmd.arg("--no-environ");
 
     if let Some(script_path) = &script {
-        cmd.arg("--vanilla");
+        cmd.arg("--no-save");
+        cmd.arg("--no-restore");
         cmd.arg("--file");
         cmd.arg(script_path);
         if !args.is_empty() {

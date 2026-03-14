@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use console::style;
 
-use uvr_core::installer::binary_install::install_binary_package;
+use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
 use uvr_core::installer::download::Downloader;
 use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
@@ -122,6 +122,20 @@ pub async fn install_from_lockfile(
             None
         };
 
+    // Retroactively patch already-installed binary packages whose .so files still
+    // reference the CRAN framework libR path (installed before patching support was
+    // added). Idempotent: no-op when the .so already points to the managed R path.
+    if let Some(ref libr) = libr_path {
+        if libr.exists() {
+            for pkg in &lockfile.packages {
+                let pkg_dir = library.join(&pkg.name);
+                if pkg_dir.exists() {
+                    patch_installed_so_files(&pkg_dir, libr);
+                }
+            }
+        }
+    }
+
     let r_minor = query_r_version(&r_binary)
         .map(|v| {
             let parts: Vec<&str> = v.splitn(3, '.').collect();
@@ -164,9 +178,9 @@ pub async fn install_from_lockfile(
         );
     }
 
-    let pairs: Vec<(&LockedPackage, &str)> = pkg_urls
+    let pairs: Vec<(&LockedPackage, &str, bool)> = pkg_urls
         .iter()
-        .map(|(p, url, _)| (*p, url.as_str()))
+        .map(|(p, url, is_binary)| (*p, url.as_str(), *is_binary))
         .collect();
 
     let downloader = Downloader::new(client, cache_dir, jobs);

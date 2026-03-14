@@ -22,16 +22,19 @@ impl Downloader {
 
     /// Download all packages in parallel (bounded by `self.concurrency`).
     /// Returns paths to the downloaded tarballs in the same order as `packages`.
+    ///
+    /// `is_binary` signals a P3M pre-built binary: checksum in the lockfile was
+    /// recorded for the source tarball and must not be checked against the binary.
     pub async fn download_all(
         &self,
-        packages: &[(&LockedPackage, &str)], // (package, url)
+        packages: &[(&LockedPackage, &str, bool)], // (package, url, is_binary)
     ) -> Result<Vec<PathBuf>> {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         let mp = Arc::new(MultiProgress::new());
 
         let tasks: Vec<_> = packages
             .iter()
-            .map(|(pkg, url)| {
+            .map(|(pkg, url, is_binary)| {
                 let sem = semaphore.clone();
                 let mp = mp.clone();
                 let client = self.client.clone();
@@ -39,7 +42,9 @@ impl Downloader {
                 let pkg_name = pkg.name.clone();
                 let pkg_version = pkg.version.clone();
                 let url = url.to_string();
-                let checksum = pkg.checksum.clone();
+                // Binary packages: checksum in lockfile is for the source tarball;
+                // skip verification so we don't reject a valid P3M binary.
+                let checksum = if *is_binary { None } else { pkg.checksum.clone() };
 
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
@@ -74,7 +79,14 @@ async fn download_one(
     expected_checksum: Option<&str>,
     mp: &MultiProgress,
 ) -> Result<PathBuf> {
-    let filename = format!("{name}_{version}.tar.gz");
+    // Derive the cache filename from the URL so that source tarballs (.tar.gz)
+    // and binary tarballs (.tgz) get distinct cache entries and never collide.
+    let filename = url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&format!("{name}_{version}.tar.gz"))
+        .to_string();
     let dest = cache_dir.join(&filename);
 
     if dest.exists() {
