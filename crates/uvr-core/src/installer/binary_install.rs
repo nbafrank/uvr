@@ -55,21 +55,29 @@ pub fn patch_installed_so_files(pkg_dir: &Path, libr_path: &Path) {
     let _ = patch_so_libr_refs(pkg_dir, libr_path);
 }
 
-/// Walk `<pkg_dir>/libs/` and fix every `.so` that references a `libR.dylib`
-/// path other than `libr_path`.
+/// Walk `<pkg_dir>/libs/` and redirect every R-framework library reference
+/// to its managed-R counterpart.
 ///
-/// P3M macOS binaries embed `/Library/Frameworks/R.framework/…/libR.dylib`.
-/// When running with a uvr-managed R (not in the framework location), `dyn.load()`
-/// fails unless we update that embedded path with `install_name_tool -change`.
-/// After modification we re-sign the binary with an ad-hoc signature
-/// (Apple Silicon requires all Mach-O binaries to be validly signed).
+/// P3M macOS binaries embed absolute framework paths for ALL R libraries they
+/// link against — not just `libR.dylib` but also `libRlapack.dylib`,
+/// `libRblas.dylib`, `libgfortran.5.dylib`, etc.  A naive replacement that
+/// redirects every R.framework reference to `libR.dylib` causes packages like
+/// Matrix (which directly links `libRlapack.dylib` for `_dgebal_`) to fail
+/// at load time with "Symbol not found".
+///
+/// The correct fix: for each framework reference, extract the filename and
+/// redirect it to the same-named library inside `<r_lib_dir>/`.
 fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
     let libs_dir = pkg_dir.join("libs");
     if !libs_dir.exists() {
         return Ok(());
     }
 
-    let new_libr = libr_path.to_string_lossy();
+    // The managed R lib directory — all R dylibs live here.
+    let r_lib_dir = match libr_path.parent() {
+        Some(d) => d.to_string_lossy().to_string(),
+        None => return Ok(()),
+    };
 
     for entry in std::fs::read_dir(&libs_dir)?.flatten() {
         let path = entry.path();
@@ -77,34 +85,45 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
             continue;
         }
 
-        // Ask the dynamic linker what libR reference is embedded.
         let Ok(otool_out) = Command::new("otool").args(["-L", &path.to_string_lossy()]).output()
         else {
             continue;
         };
         let otool_text = String::from_utf8_lossy(&otool_out.stdout);
 
+        let mut changed = false;
         for line in otool_text.lines() {
-            let trimmed = line.trim();
-            if !trimmed.contains("libR.dylib") && !trimmed.contains("R.framework") {
+            let old_dep = line.trim().split_whitespace().next().unwrap_or("");
+            if !old_dep.contains("R.framework") && !old_dep.contains("libR.dylib") {
                 continue;
             }
-            // The path is the first whitespace-delimited token on the line.
-            let old_libr = trimmed.split_ascii_whitespace().next().unwrap_or("");
-            if old_libr.is_empty() || old_libr == new_libr {
-                break; // already correct, nothing to do
+            // Redirect to the same filename inside the managed R lib dir.
+            let filename = std::path::Path::new(old_dep)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if filename.is_empty() {
+                continue;
             }
+            let new_dep = format!("{r_lib_dir}/{filename}");
+            if old_dep == new_dep {
+                continue; // already pointing at managed path
+            }
+            if Command::new("install_name_tool")
+                .args(["-change", old_dep, &new_dep, &path.to_string_lossy()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                changed = true;
+            }
+        }
 
-            let _ = Command::new("install_name_tool")
-                .args(["-change", old_libr, &new_libr, &path.to_string_lossy()])
-                .status();
-
+        if changed {
             // Re-sign after modification (required on Apple Silicon).
             let _ = Command::new("codesign")
                 .args(["--force", "--sign", "-", &path.to_string_lossy()])
                 .status();
-
-            break; // only one libR reference per .so
         }
     }
 
