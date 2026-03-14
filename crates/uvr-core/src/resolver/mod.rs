@@ -181,10 +181,21 @@ pub fn parse_version_req(s: &str) -> Result<VersionReq> {
     VersionReq::parse(&normalized).map_err(UvrError::Semver)
 }
 
-/// Normalize an R version string `"1.1-3"` → `"1.1.3"`.
+/// Normalize an R version string to semver.
+///
+/// - Replaces `-` with `.` (e.g. `"1.1-3"` → `"1.1.3"`)
+/// - Strips leading zeros from each component (semver forbids them):
+///   `"2026.03.11"` → `"2026.3.11"`
+/// - Pads to three components
 pub fn normalize_version(v: &str) -> String {
     let v = v.replace('-', ".");
-    let parts: Vec<&str> = v.split('.').collect();
+    let parts: Vec<String> = v
+        .split('.')
+        .map(|p| {
+            // Parse as u64 to strip leading zeros, fall back to raw string.
+            p.parse::<u64>().map(|n| n.to_string()).unwrap_or_else(|_| p.to_string())
+        })
+        .collect();
     match parts.len() {
         0 => "0.0.0".to_string(),
         1 => format!("{}.0.0", parts[0]),
@@ -236,6 +247,9 @@ mod tests {
         assert_eq!(normalize_version("1.1-3"), "1.1.3");
         assert_eq!(normalize_version("2.0"), "2.0.0");
         assert_eq!(normalize_version("4"), "4.0.0");
+        // Date-style versions with leading zeros (e.g. prodlim 2026.03.11)
+        assert_eq!(normalize_version("2026.03.11"), "2026.3.11");
+        assert_eq!(normalize_version("2023.03.01"), "2023.3.1");
     }
 
     #[test]
