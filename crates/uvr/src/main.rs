@@ -6,7 +6,7 @@ use clap::Parser;
 use console::style;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use cli::{Cli, Commands, RCommands};
+use cli::{CacheCommands, Cli, Commands, RCommands};
 
 #[tokio::main]
 async fn main() {
@@ -21,6 +21,12 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    // Respect NO_COLOR env var (https://no-color.org/)
+    if std::env::var_os("NO_COLOR").is_some() {
+        console::set_colors_enabled(false);
+        console::set_colors_enabled_stderr(false);
+    }
+
     let cli = Cli::parse();
 
     // Initialize tracing
@@ -61,13 +67,18 @@ async fn run() -> Result<()> {
                 commands::r_cmd::install::run(args.version).await?;
             }
             RCommands::List(args) => {
-                commands::r_cmd::list::run(args.all)?;
+                commands::r_cmd::list::run(args.all).await?;
             }
             RCommands::Use(args) => {
                 commands::r_cmd::use_version::run(args.version)?;
             }
             RCommands::Pin(args) => {
                 commands::r_cmd::pin::run(args.version)?;
+            }
+        },
+        Commands::Cache(cache_args) => match cache_args.command {
+            CacheCommands::Clean => {
+                commands::cache::run_clean()?;
             }
         },
     }

@@ -494,3 +494,60 @@ fn find_data_tar(dir: &Path) -> Result<PathBuf> {
     }
     Err(UvrError::Other("data.tar.* not found in .deb".into()))
 }
+
+/// Fetch the list of available R versions for `platform` from the CRAN CDN.
+///
+/// Returns versions sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`).
+pub async fn fetch_available_versions(
+    client: &reqwest::Client,
+    platform: Platform,
+) -> Result<Vec<String>> {
+    // Use the platform-specific binary index when possible; fall back to the
+    // CRAN source index (which lists every released version) for Linux.
+    let (url, prefix, suffix): (&str, &str, &str) = match platform {
+        Platform::MacOsArm64 => (
+            "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/",
+            "R-",
+            "-arm64.pkg",
+        ),
+        Platform::MacOsX86_64 => (
+            "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/",
+            "R-",
+            "-x86_64.pkg",
+        ),
+        Platform::LinuxX86_64 | Platform::LinuxArm64 => (
+            "https://cran.r-project.org/src/base/",
+            "R-",
+            ".tar.gz",
+        ),
+    };
+
+    let html = client.get(url).send().await?.error_for_status()?.text().await?;
+
+    // Parse href="R-<version><suffix>" fragments from the directory listing HTML.
+    let needle = format!("href=\"{prefix}");
+    let mut versions: Vec<String> = html
+        .split(needle.as_str())
+        .skip(1)
+        .filter_map(|chunk| {
+            let end = chunk.find(suffix)?;
+            let ver = &chunk[..end];
+            // Sanity check: must be X.Y or X.Y.Z (digits and dots only).
+            if ver.chars().all(|c| c.is_ascii_digit() || c == '.') && ver.contains('.') {
+                Some(ver.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort numerically by component (not lexicographically).
+    versions.sort_by(|a, b| {
+        let parse = |s: &str| -> Vec<u64> {
+            s.split('.').filter_map(|p| p.parse().ok()).collect()
+        };
+        parse(a).cmp(&parse(b))
+    });
+    versions.dedup();
+    Ok(versions)
+}

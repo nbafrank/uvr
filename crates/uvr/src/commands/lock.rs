@@ -93,6 +93,11 @@ pub fn build_client() -> Result<reqwest::Client> {
 }
 
 pub fn make_spinner(msg: &str) -> ProgressBar {
+    // In non-TTY environments (CI, piped output) suppress the spinner to avoid
+    // ANSI escape codes polluting logs.
+    if !console::Term::stderr().is_term() {
+        return ProgressBar::hidden();
+    }
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.cyan} {msg}")

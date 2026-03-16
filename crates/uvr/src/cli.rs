@@ -43,6 +43,10 @@ pub enum Commands {
     /// Manage R versions
     #[command(name = "r")]
     R(RArgs),
+
+    /// Manage the local download cache
+    #[command(name = "cache")]
+    Cache(CacheArgs),
 }
 
 // ────────────────────────────────────────────────────────────
@@ -182,4 +186,20 @@ pub struct RPinArgs {
     /// Exact R version to pin in .r-version (e.g. "4.3.2").
     /// If omitted, uses the currently active R version.
     pub version: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  cache
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub command: CacheCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommands {
+    /// Remove all cached package downloads
+    Clean,
 }
