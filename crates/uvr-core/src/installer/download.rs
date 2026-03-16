@@ -17,7 +17,11 @@ pub struct Downloader {
 
 impl Downloader {
     pub fn new(client: reqwest::Client, cache_dir: PathBuf, concurrency: usize) -> Self {
-        Downloader { client, cache_dir, concurrency }
+        Downloader {
+            client,
+            cache_dir,
+            concurrency,
+        }
     }
 
     /// Download all packages in parallel (bounded by `self.concurrency`).
@@ -44,7 +48,11 @@ impl Downloader {
                 let url = url.to_string();
                 // Binary packages: checksum in lockfile is for the source tarball;
                 // skip verification so we don't reject a valid P3M binary.
-                let checksum = if *is_binary { None } else { pkg.checksum.clone() };
+                let checksum = if *is_binary {
+                    None
+                } else {
+                    pkg.checksum.clone()
+                };
 
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
@@ -100,7 +108,7 @@ async fn download_one(
             }
             debug!("Cache corrupt for {name}, re-downloading");
             let _ = std::fs::remove_file(&dest); // best-effort removal
-            // fall through to re-download
+                                                 // fall through to re-download
         } else {
             debug!("Cache hit: {filename}");
             return Ok(dest);

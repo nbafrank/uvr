@@ -25,7 +25,10 @@ impl Project {
             let candidate = dir.join(MANIFEST_FILE);
             if candidate.exists() {
                 let manifest = Manifest::from_file(&candidate)?;
-                return Ok(Project { root: dir, manifest });
+                return Ok(Project {
+                    root: dir,
+                    manifest,
+                });
             }
             if !dir.pop() {
                 return Err(UvrError::ManifestNotFound);

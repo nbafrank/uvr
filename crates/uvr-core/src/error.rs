@@ -35,7 +35,10 @@ pub enum UvrError {
     RNotFound,
 
     #[error("R version constraint '{constraint}' not satisfied by installed R {installed}")]
-    RVersionUnsatisfied { constraint: String, installed: String },
+    RVersionUnsatisfied {
+        constraint: String,
+        installed: String,
+    },
 
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),

@@ -19,10 +19,16 @@ pub struct Dep {
 
 impl Dep {
     pub fn any(name: impl Into<String>) -> Self {
-        Dep { name: name.into(), constraint: None }
+        Dep {
+            name: name.into(),
+            constraint: None,
+        }
     }
     pub fn with_constraint(name: impl Into<String>, constraint: impl Into<String>) -> Self {
-        Dep { name: name.into(), constraint: Some(constraint.into()) }
+        Dep {
+            name: name.into(),
+            constraint: Some(constraint.into()),
+        }
     }
 }
 

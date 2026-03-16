@@ -14,11 +14,7 @@ fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
             (raw.to_string(), None)
         };
         // Use the repo name (after /) as the package name
-        let name = repo
-            .split('/')
-            .last()
-            .unwrap_or(&repo)
-            .to_string();
+        let name = repo.split('/').next_back().unwrap_or(&repo).to_string();
         let spec = DependencySpec::Detailed(DetailedDep {
             git: Some(repo),
             rev: git_ref,
@@ -53,21 +49,31 @@ fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
 pub async fn run(packages: Vec<String>, dev: bool, bioc: bool, jobs: usize) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
-    let parsed: Vec<(String, DependencySpec)> = packages
-        .iter()
-        .map(|p| parse_add_spec(p, bioc))
-        .collect();
+    let parsed: Vec<(String, DependencySpec)> =
+        packages.iter().map(|p| parse_add_spec(p, bioc)).collect();
 
     for (name, spec) in &parsed {
         let is_new = project.manifest.add_dep(name.clone(), spec.clone(), dev);
         if is_new {
-            println!("{} {} {}", style("+").green().bold(), style(name).cyan(), format_spec(spec));
+            println!(
+                "{} {} {}",
+                style("+").green().bold(),
+                style(name).cyan(),
+                format_spec(spec)
+            );
         } else {
-            println!("{} {} {} (updated)", style("~").yellow().bold(), style(name).cyan(), format_spec(spec));
+            println!(
+                "{} {} {} (updated)",
+                style("~").yellow().bold(),
+                style(name).cyan(),
+                format_spec(spec)
+            );
         }
     }
 
-    project.save_manifest().context("Failed to write uvr.toml")?;
+    project
+        .save_manifest()
+        .context("Failed to write uvr.toml")?;
 
     // Re-resolve → update lockfile → install new packages
     let lockfile = crate::commands::lock::resolve_and_lock(&project, false)

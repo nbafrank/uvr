@@ -15,14 +15,18 @@ impl DependencyGraph {
     }
 
     pub fn add_edge(&mut self, from: &str, to: &str) {
-        self.edges.entry(from.to_string()).or_default().push(to.to_string());
+        self.edges
+            .entry(from.to_string())
+            .or_default()
+            .push(to.to_string());
         self.edges.entry(to.to_string()).or_default();
     }
 
     /// Kahn's algorithm — returns nodes in install order (deps first).
     pub fn topological_sort(&self) -> Result<Vec<String>> {
         // in-degree count
-        let mut in_degree: HashMap<String, usize> = self.edges.keys().map(|k| (k.clone(), 0)).collect();
+        let mut in_degree: HashMap<String, usize> =
+            self.edges.keys().map(|k| (k.clone(), 0)).collect();
         for deps in self.edges.values() {
             for dep in deps {
                 *in_degree.entry(dep.clone()).or_insert(0) += 1;
@@ -51,7 +55,11 @@ impl DependencyGraph {
                 .filter_map(|dep| {
                     let d = in_degree.get_mut(&dep)?;
                     *d -= 1;
-                    if *d == 0 { Some(dep) } else { None }
+                    if *d == 0 {
+                        Some(dep)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             next.sort();
@@ -60,7 +68,12 @@ impl DependencyGraph {
 
         if result.len() != self.edges.len() {
             let visited: HashSet<_> = result.iter().cloned().collect();
-            let cycle_nodes: Vec<_> = self.edges.keys().filter(|k| !visited.contains(*k)).cloned().collect();
+            let cycle_nodes: Vec<_> = self
+                .edges
+                .keys()
+                .filter(|k| !visited.contains(*k))
+                .cloned()
+                .collect();
             return Err(UvrError::CircularDependency(cycle_nodes.join(", ")));
         }
 

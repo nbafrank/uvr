@@ -7,7 +7,9 @@ use uvr_core::r_version::detector::find_r_binary;
 
 pub fn run(script: Option<String>, args: Vec<String>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
-    project.ensure_library_dir().context("Failed to create .uvr/library/")?;
+    project
+        .ensure_library_dir()
+        .context("Failed to create .uvr/library/")?;
 
     let library = project.library_path();
     let r_constraint = project.manifest.project.r_version.as_deref();
@@ -17,7 +19,7 @@ pub fn run(script: Option<String>, args: Vec<String>) -> Result<()> {
     // Derive R's lib directory for DYLD_LIBRARY_PATH so that compiled packages
     // (e.g. rlang) can find libR.dylib at runtime regardless of its embedded install-name.
     let r_lib_dir = r_binary
-        .parent()             // …/bin/
+        .parent() // …/bin/
         .and_then(|p| p.parent()) // …/r-versions/4.4.2/
         .map(|p| p.join("lib"))
         .unwrap_or_default();

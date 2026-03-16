@@ -1,6 +1,6 @@
-use std::fs;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::fs;
 use tempfile::TempDir;
 
 fn uvr_cmd() -> Command {
@@ -39,7 +39,10 @@ fn test_init_creates_manifest() {
         .stdout(predicate::str::contains("test-project"));
 
     assert!(dir.path().join("uvr.toml").exists(), "uvr.toml not created");
-    assert!(dir.path().join(".uvr").join("library").exists(), ".uvr/library not created");
+    assert!(
+        dir.path().join(".uvr").join("library").exists(),
+        ".uvr/library not created"
+    );
 
     let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
     assert!(content.contains("test-project"));
@@ -105,10 +108,7 @@ fn test_r_use_updates_manifest() {
 
 #[test]
 fn test_add_help_works() {
-    uvr_cmd()
-        .args(["add", "--help"])
-        .assert()
-        .success();
+    uvr_cmd().args(["add", "--help"]).assert().success();
 }
 
 #[test]
@@ -121,7 +121,10 @@ fn test_r_use_exact_writes_r_version_file() {
         .success();
 
     let pin = dir.path().join(".r-version");
-    assert!(pin.exists(), ".r-version not created by `uvr r use <exact>`");
+    assert!(
+        pin.exists(),
+        ".r-version not created by `uvr r use <exact>`"
+    );
     let content = fs::read_to_string(&pin).unwrap();
     assert_eq!(content.trim(), "4.3.2");
 }
@@ -146,10 +149,7 @@ fn test_r_use_constraint_no_r_version_file() {
 
 #[test]
 fn test_r_pin_help_works() {
-    uvr_cmd()
-        .args(["r", "pin", "--help"])
-        .assert()
-        .success();
+    uvr_cmd().args(["r", "pin", "--help"]).assert().success();
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn test_sync_without_lockfile_fails() {
 fn test_lockfile_round_trip() {
     let path = fixture("sample_project/uvr.lock");
     let content = fs::read_to_string(&path).unwrap();
-    let lf = uvr_core::lockfile::Lockfile::from_str(&content).unwrap();
+    let lf: uvr_core::lockfile::Lockfile = content.parse().unwrap();
     assert_eq!(lf.r.version, "4.3.2");
     assert_eq!(lf.packages.len(), 6);
     assert!(lf.get_package("ggplot2").is_some());
@@ -177,7 +177,7 @@ fn test_lockfile_round_trip() {
 fn test_manifest_round_trip() {
     let path = fixture("sample_project/uvr.toml");
     let content = fs::read_to_string(&path).unwrap();
-    let m = uvr_core::manifest::Manifest::from_str(&content).unwrap();
+    let m: uvr_core::manifest::Manifest = content.parse().unwrap();
     assert_eq!(m.project.name, "sample-project");
     assert!(m.dependencies.contains_key("ggplot2"));
 }

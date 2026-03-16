@@ -24,9 +24,11 @@ impl Platform {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         return Ok(Platform::LinuxArm64);
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        Err(UvrError::UnsupportedPlatform(
-            format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
-        ))
+        Err(UvrError::UnsupportedPlatform(format!(
+            "{}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )))
     }
 
     /// Return the download URL for a given R version.
@@ -38,12 +40,12 @@ impl Platform {
             Platform::MacOsX86_64 => format!(
                 "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
             ),
-            Platform::LinuxX86_64 => format!(
-                "https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_amd64.deb"
-            ),
-            Platform::LinuxArm64 => format!(
-                "https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_arm64.deb"
-            ),
+            Platform::LinuxX86_64 => {
+                format!("https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_amd64.deb")
+            }
+            Platform::LinuxArm64 => {
+                format!("https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_arm64.deb")
+            }
         }
     }
 }
@@ -69,7 +71,13 @@ pub async fn download_and_install_r(
     let url = platform.download_url(version);
     info!("Downloading R {version} from {url}");
 
-    let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+    let bytes = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
 
     std::fs::create_dir_all(&install_dir)?;
 
@@ -102,7 +110,11 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     // Step 1: pkgutil --expand R.pkg <expanded_dir>
     let expanded_dir = tmp.path().join("expanded");
     let out = Command::new("pkgutil")
-        .args(["--expand", &pkg_path.to_string_lossy(), &expanded_dir.to_string_lossy()])
+        .args([
+            "--expand",
+            &pkg_path.to_string_lossy(),
+            &expanded_dir.to_string_lossy(),
+        ])
         .output()?;
     if !out.status.success() {
         return Err(UvrError::Other(format!(
@@ -116,17 +128,26 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     // We try each Payload until we find one that contains a usable R binary.
     let payloads = find_all_payload_files(&expanded_dir)?;
     if payloads.is_empty() {
-        return Err(UvrError::Other("No Payload files found in expanded pkg".into()));
+        return Err(UvrError::Other(
+            "No Payload files found in expanded pkg".into(),
+        ));
     }
 
     // Step 3 + 4: extract each Payload and look for bin/R
     let resources = payloads
         .iter()
         .find_map(|payload| {
-            let stage_dir = tmp.path().join(format!("stage-{}", payload.display().to_string().len()));
+            let stage_dir = tmp
+                .path()
+                .join(format!("stage-{}", payload.display().to_string().len()));
             std::fs::create_dir_all(&stage_dir).ok()?;
             let ok = Command::new("tar")
-                .args(["xf", &payload.to_string_lossy(), "-C", &stage_dir.to_string_lossy()])
+                .args([
+                    "xf",
+                    &payload.to_string_lossy(),
+                    "-C",
+                    &stage_dir.to_string_lossy(),
+                ])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
@@ -135,10 +156,12 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
             }
             find_dir_with_r_binary(&stage_dir, 0)
         })
-        .ok_or_else(|| UvrError::Other(format!(
-            "Could not find bin/R in any of {} Payload(s) in the pkg",
-            payloads.len()
-        )))?;
+        .ok_or_else(|| {
+            UvrError::Other(format!(
+                "Could not find bin/R in any of {} Payload(s) in the pkg",
+                payloads.len()
+            ))
+        })?;
     info!("Found R Resources at {}", resources.display());
 
     // Step 5: copy Resources contents → dest.
@@ -262,7 +285,11 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let patched = if content.ends_with('\n') { patched + "\n" } else { patched };
+    let patched = if content.ends_with('\n') {
+        patched + "\n"
+    } else {
+        patched
+    };
     std::fs::write(&makeconf, patched)?;
     Ok(())
 }
@@ -315,7 +342,9 @@ pub fn patch_r_dylibs(r_home: &Path) {
     }
     let lib_str = lib_dir.to_string_lossy().to_string();
 
-    let Ok(entries) = std::fs::read_dir(&lib_dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -330,9 +359,9 @@ pub fn patch_r_dylibs(r_home: &Path) {
             .output()
             .ok()
             .and_then(|o| {
-                String::from_utf8(o.stdout).ok().and_then(|t| {
-                    t.lines().nth(1).map(|l| l.trim().to_string())
-                })
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .and_then(|t| t.lines().nth(1).map(|l| l.trim().to_string()))
             })
             .unwrap_or_default();
 
@@ -353,7 +382,7 @@ pub fn patch_r_dylibs(r_home: &Path) {
             .unwrap_or_default();
 
         for line in deps.lines().skip(1) {
-            let dep = line.trim().split_whitespace().next().unwrap_or("");
+            let dep = line.split_whitespace().next().unwrap_or("");
             if !dep.contains("/Library/Frameworks/R.framework/") {
                 continue;
             }
@@ -423,7 +452,10 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         // Use metadata() so we follow symlinks (file_type() does not).
-        if std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+        if std::fs::metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             if let Some(found) = find_dir_with_r_binary(&path, depth + 1) {
                 return Some(found);
             }
@@ -431,7 +463,6 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     }
     None
 }
-
 
 fn find_all_payload_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
@@ -479,7 +510,9 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
         ])
         .status()?;
     if !status.success() {
-        return Err(UvrError::Other("tar extraction of Linux R .deb failed".into()));
+        return Err(UvrError::Other(
+            "tar extraction of Linux R .deb failed".into(),
+        ));
     }
 
     Ok(())
@@ -515,14 +548,18 @@ pub async fn fetch_available_versions(
             "R-",
             "-x86_64.pkg",
         ),
-        Platform::LinuxX86_64 | Platform::LinuxArm64 => (
-            "https://cran.r-project.org/src/base/",
-            "R-",
-            ".tar.gz",
-        ),
+        Platform::LinuxX86_64 | Platform::LinuxArm64 => {
+            ("https://cran.r-project.org/src/base/", "R-", ".tar.gz")
+        }
     };
 
-    let html = client.get(url).send().await?.error_for_status()?.text().await?;
+    let html = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
 
     // Parse href="R-<version><suffix>" fragments from the directory listing HTML.
     let needle = format!("href=\"{prefix}");
@@ -543,9 +580,7 @@ pub async fn fetch_available_versions(
 
     // Sort numerically by component (not lexicographically).
     versions.sort_by(|a, b| {
-        let parse = |s: &str| -> Vec<u64> {
-            s.split('.').filter_map(|p| p.parse().ok()).collect()
-        };
+        let parse = |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
         parse(a).cmp(&parse(b))
     });
     versions.dedup();

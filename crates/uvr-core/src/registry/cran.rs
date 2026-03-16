@@ -48,11 +48,17 @@ impl CranPackageEntry {
 
     /// All non-base dependency names (for the lockfile `requires` field).
     pub fn all_requires(&self) -> Vec<String> {
-        self.requires_as_deps().into_iter().map(|d| d.name).collect()
+        self.requires_as_deps()
+            .into_iter()
+            .map(|d| d.name)
+            .collect()
     }
 
     pub fn tarball_url(&self) -> String {
-        format!("{}/{}_{}.tar.gz", CRAN_SRC_BASE, self.name, self.raw_version)
+        format!(
+            "{}/{}_{}.tar.gz",
+            CRAN_SRC_BASE, self.name, self.raw_version
+        )
     }
 }
 
@@ -83,7 +89,7 @@ impl CranIndex {
 
         entries
             .iter()
-            .find(|e| req.as_ref().map_or(true, |r| r.matches(&e.version)))
+            .find(|e| req.as_ref().is_none_or(|r| r.matches(&e.version)))
             .ok_or_else(|| UvrError::NoMatchingVersion {
                 package: name.to_string(),
                 constraint: constraint.unwrap_or("*").to_string(),
@@ -223,7 +229,15 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         .unwrap_or_default();
     let md5sum = fields.get("MD5sum").cloned().unwrap_or_default();
 
-    Some(CranPackageEntry { name, version, raw_version, depends, imports, linking_to, md5sum })
+    Some(CranPackageEntry {
+        name,
+        version,
+        raw_version,
+        depends,
+        imports,
+        linking_to,
+        md5sum,
+    })
 }
 
 /// Parse `"dplyr (>= 1.0.0), rlang, R (>= 4.1.0)"` → `Vec<DepConstraint>`.
@@ -240,7 +254,10 @@ pub fn parse_dep_field(s: &str) -> Vec<DepConstraint> {
                 let req = parse_version_req(constraint_str).ok();
                 Some(DepConstraint { name, req })
             } else {
-                Some(DepConstraint { name: part.to_string(), req: None })
+                Some(DepConstraint {
+                    name: part.to_string(),
+                    req: None,
+                })
             }
         })
         .collect()

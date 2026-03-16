@@ -79,7 +79,10 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
                 }
             }
         }
-        let installed = installations.first().map(|i| i.version.as_str()).unwrap_or("unknown");
+        let installed = installations
+            .first()
+            .map(|i| i.version.as_str())
+            .unwrap_or("unknown");
         return Err(UvrError::RVersionUnsatisfied {
             constraint: constraint.to_string(),
             installed: installed.to_string(),
@@ -88,7 +91,10 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
 
     // 3. Prefer managed installation, fall back to first system R.
     //    Use the already-fetched list — do NOT call find_all() again.
-    let system_fallback = installations.iter().find(|i| !i.managed).map(|i| i.binary.clone());
+    let system_fallback = installations
+        .iter()
+        .find(|i| !i.managed)
+        .map(|i| i.binary.clone());
     installations
         .into_iter()
         .find(|i| i.managed)
@@ -111,7 +117,12 @@ fn find_exact_version(installations: &[RInstallation], version: &str) -> Result<
 
 pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     let output = Command::new(binary)
-        .args(["--vanilla", "--slave", "-e", "cat(R.version$major, \".\", R.version$minor, sep='')"])
+        .args([
+            "--vanilla",
+            "--slave",
+            "-e",
+            "cat(R.version$major, \".\", R.version$minor, sep='')",
+        ])
         .output()
         .ok()?;
     if output.status.success() {

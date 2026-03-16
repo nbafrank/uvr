@@ -21,7 +21,9 @@ pub struct P3MBinaryIndex {
 
 impl P3MBinaryIndex {
     pub fn empty() -> Self {
-        P3MBinaryIndex { packages: HashMap::new() }
+        P3MBinaryIndex {
+            packages: HashMap::new(),
+        }
     }
 
     /// Fetch (and cache) the P3M binary PACKAGES index for the given R minor version
@@ -33,7 +35,10 @@ impl P3MBinaryIndex {
         match fetch_inner(client, r_minor, arch).await {
             Ok(idx) => idx,
             Err(e) => {
-                tracing::warn!("P3M binary index unavailable ({}), falling back to source", e);
+                tracing::warn!(
+                    "P3M binary index unavailable ({}), falling back to source",
+                    e
+                );
                 Self::empty()
             }
         }
@@ -48,7 +53,11 @@ impl P3MBinaryIndex {
     }
 }
 
-async fn fetch_inner(client: &reqwest::Client, r_minor: &str, arch: &str) -> Result<P3MBinaryIndex> {
+async fn fetch_inner(
+    client: &reqwest::Client,
+    r_minor: &str,
+    arch: &str,
+) -> Result<P3MBinaryIndex> {
     let cache = cache_path(r_minor, arch);
 
     // Use today's cached file if present.
@@ -59,7 +68,13 @@ async fn fetch_inner(client: &reqwest::Client, r_minor: &str, arch: &str) -> Res
             "https://packagemanager.posit.co/cran/latest/bin/macosx/{arch}/contrib/{r_minor}/PACKAGES.gz"
         );
         info!("Fetching P3M binary index from {url}");
-        let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+        let bytes = client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
         let mut gz = GzDecoder::new(bytes.as_ref());
         let mut text = String::new();
         gz.read_to_string(&mut text)?;
@@ -74,9 +89,8 @@ async fn fetch_inner(client: &reqwest::Client, r_minor: &str, arch: &str) -> Res
 }
 
 fn parse_index(text: &str, r_minor: &str, arch: &str) -> P3MBinaryIndex {
-    let base = format!(
-        "https://packagemanager.posit.co/cran/latest/bin/macosx/{arch}/contrib/{r_minor}"
-    );
+    let base =
+        format!("https://packagemanager.posit.co/cran/latest/bin/macosx/{arch}/contrib/{r_minor}");
     let mut packages = HashMap::new();
     for block in text.split("\n\n") {
         let block = block.trim();

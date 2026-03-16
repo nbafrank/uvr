@@ -58,7 +58,11 @@ async fn resolve_lockfile(
 
     // Fetch Bioconductor index only when the manifest has bioc deps.
     let has_bioc = project.manifest.dependencies.values().any(|s| s.is_bioc())
-        || project.manifest.dev_dependencies.values().any(|s| s.is_bioc());
+        || project
+            .manifest
+            .dev_dependencies
+            .values()
+            .any(|s| s.is_bioc());
 
     let bioc_opt: Option<BiocRegistry> = if has_bioc {
         let r_ver = actual_r_version.as_deref().unwrap_or("4.4");

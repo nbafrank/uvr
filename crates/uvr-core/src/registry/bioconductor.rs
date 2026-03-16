@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
-use crate::registry::PackageInfo;
 use crate::registry::cran::{parse_dcf_block, CranPackageEntry};
+use crate::registry::PackageInfo;
 use crate::resolver::PackageRegistry;
 
 fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
@@ -54,7 +54,10 @@ impl BiocRegistry {
         }
 
         info!("Bioconductor {bioc_release}: {} packages", packages.len());
-        Ok(BiocRegistry { packages, bioc_release })
+        Ok(BiocRegistry {
+            packages,
+            bioc_release,
+        })
     }
 }
 

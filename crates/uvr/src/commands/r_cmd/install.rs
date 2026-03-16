@@ -19,7 +19,10 @@ pub async fn run(version: String) -> Result<()> {
         .context("Failed to build HTTP client")?;
 
     let manager = RManager::new(client);
-    manager.install(&version).await.context("R installation failed")?;
+    manager
+        .install(&version)
+        .await
+        .context("R installation failed")?;
 
     println!(
         "{} R {} installed",

@@ -1,5 +1,5 @@
-use std::path::Path;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::error::{Result, UvrError};
 use crate::manifest::atomic_write;
@@ -61,14 +61,17 @@ impl std::fmt::Display for PackageSource {
     }
 }
 
-impl Lockfile {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl std::str::FromStr for Lockfile {
+    type Err = UvrError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         toml::from_str(s).map_err(|e| UvrError::LockfileParse(e.to_string()))
     }
+}
 
+impl Lockfile {
     pub fn from_file(path: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
-        Self::from_str(&s)
+        s.parse()
     }
 
     pub fn to_toml_string(&self) -> Result<String> {
@@ -83,7 +86,9 @@ impl Lockfile {
     }
 
     pub fn get_package(&self, name: &str) -> Option<&LockedPackage> {
-        self.packages.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+        self.packages
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
     }
 
     pub fn upsert_package(&mut self, pkg: LockedPackage) {
@@ -120,17 +125,20 @@ source = "cran"
 
     #[test]
     fn round_trip() {
-        let lf = Lockfile::from_str(SAMPLE).expect("parse");
+        let lf: Lockfile = SAMPLE.parse().expect("parse");
         assert_eq!(lf.r.version, "4.3.2");
         assert_eq!(lf.packages.len(), 2);
 
         let gg = lf.get_package("ggplot2").unwrap();
         assert_eq!(gg.version, "3.4.4");
-        assert_eq!(gg.url.as_deref(), Some("https://cran.r-project.org/src/contrib/ggplot2_3.4.4.tar.gz"));
+        assert_eq!(
+            gg.url.as_deref(),
+            Some("https://cran.r-project.org/src/contrib/ggplot2_3.4.4.tar.gz")
+        );
         assert_eq!(gg.requires, vec!["dplyr", "scales"]);
 
         let s = lf.to_toml_string().unwrap();
-        let lf2 = Lockfile::from_str(&s).unwrap();
+        let lf2: Lockfile = s.parse().unwrap();
         assert_eq!(lf, lf2);
     }
 
@@ -146,7 +154,7 @@ name = "ggplot2"
 version = "3.4.4"
 source = "cran"
 "#;
-        let lf = Lockfile::from_str(old).unwrap();
+        let lf: Lockfile = old.parse().unwrap();
         assert!(lf.get_package("ggplot2").unwrap().url.is_none());
     }
 }

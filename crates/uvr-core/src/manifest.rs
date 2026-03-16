@@ -13,7 +13,11 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, DependencySpec>,
 
-    #[serde(rename = "dev-dependencies", default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        rename = "dev-dependencies",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub dev_dependencies: BTreeMap<String, DependencySpec>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -93,6 +97,13 @@ pub struct PackageSource {
     pub url: String,
 }
 
+impl std::str::FromStr for Manifest {
+    type Err = crate::error::UvrError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))
+    }
+}
+
 impl Manifest {
     pub fn new(name: impl Into<String>, r_version: Option<String>) -> Self {
         Manifest {
@@ -107,13 +118,9 @@ impl Manifest {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self> {
-        toml::from_str(s).map_err(|e| UvrError::ManifestParse(e.to_string()))
-    }
-
     pub fn from_file(path: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
-        Self::from_str(&s)
+        s.parse()
     }
 
     pub fn to_toml_string(&self) -> Result<String> {
@@ -127,7 +134,11 @@ impl Manifest {
 
     /// Add or update a dependency. Returns `true` if a new dep was added.
     pub fn add_dep(&mut self, name: String, spec: DependencySpec, dev: bool) -> bool {
-        let map = if dev { &mut self.dev_dependencies } else { &mut self.dependencies };
+        let map = if dev {
+            &mut self.dev_dependencies
+        } else {
+            &mut self.dependencies
+        };
         let new = !map.contains_key(&name);
         map.insert(name, spec);
         new
@@ -147,7 +158,8 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(data)?;
-    tmp.persist(path).map_err(|e| crate::error::UvrError::Io(e.error))?;
+    tmp.persist(path)
+        .map_err(|e| crate::error::UvrError::Io(e.error))?;
     Ok(())
 }
 
@@ -174,7 +186,7 @@ rev = "main"
 
     #[test]
     fn round_trip() {
-        let m = Manifest::from_str(SAMPLE).expect("parse");
+        let m: Manifest = SAMPLE.parse().expect("parse");
         assert_eq!(m.project.name, "my-project");
         assert_eq!(m.project.r_version.as_deref(), Some(">=4.0.0"));
 
@@ -189,7 +201,7 @@ rev = "main"
 
         // Re-serialize and re-parse
         let toml_str = m.to_toml_string().expect("serialize");
-        let m2 = Manifest::from_str(&toml_str).expect("reparse");
+        let m2: Manifest = toml_str.parse().expect("reparse");
         assert_eq!(m, m2);
     }
 
@@ -197,7 +209,11 @@ rev = "main"
     fn add_remove_dep() {
         let mut m = Manifest::new("test", None);
         assert!(m.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false));
-        assert!(!m.add_dep("ggplot2".into(), DependencySpec::Version(">=3.0.0".into()), false));
+        assert!(!m.add_dep(
+            "ggplot2".into(),
+            DependencySpec::Version(">=3.0.0".into()),
+            false
+        ));
         assert!(m.remove_dep("ggplot2"));
         assert!(!m.remove_dep("ggplot2"));
     }

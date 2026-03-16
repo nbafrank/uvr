@@ -29,9 +29,8 @@ pub async fn resolve_github_package(
 ) -> Result<PackageInfo> {
     let commit_sha = fetch_commit_sha(client, user, repo, git_ref).await?;
 
-    let desc_url = format!(
-        "https://raw.githubusercontent.com/{user}/{repo}/{commit_sha}/DESCRIPTION"
-    );
+    let desc_url =
+        format!("https://raw.githubusercontent.com/{user}/{repo}/{commit_sha}/DESCRIPTION");
     let desc_text = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
@@ -40,19 +39,17 @@ pub async fn resolve_github_package(
         .text()
         .await?;
 
-    let pkg_name = parse_description_field(&desc_text, "Package")
-        .unwrap_or_else(|| repo.to_string());
-    let pkg_version = parse_description_field(&desc_text, "Version")
-        .unwrap_or_else(|| "0.0.0".to_string());
+    let pkg_name =
+        parse_description_field(&desc_text, "Package").unwrap_or_else(|| repo.to_string());
+    let pkg_version =
+        parse_description_field(&desc_text, "Version").unwrap_or_else(|| "0.0.0".to_string());
     let version = Version::parse(&crate::resolver::normalize_version(&pkg_version))
         .unwrap_or_else(|_| Version::new(0, 0, 0));
 
     // Parse dependencies from DESCRIPTION
     let requires = parse_description_deps(&desc_text);
 
-    let url = format!(
-        "https://api.github.com/repos/{user}/{repo}/tarball/{commit_sha}"
-    );
+    let url = format!("https://api.github.com/repos/{user}/{repo}/tarball/{commit_sha}");
 
     info!("GitHub {user}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
 

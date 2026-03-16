@@ -85,7 +85,9 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
             continue;
         }
 
-        let Ok(otool_out) = Command::new("otool").args(["-L", &path.to_string_lossy()]).output()
+        let Ok(otool_out) = Command::new("otool")
+            .args(["-L", &path.to_string_lossy()])
+            .output()
         else {
             continue;
         };
@@ -93,7 +95,7 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
 
         let mut changed = false;
         for line in otool_text.lines() {
-            let old_dep = line.trim().split_whitespace().next().unwrap_or("");
+            let old_dep = line.split_whitespace().next().unwrap_or("");
             if !old_dep.contains("R.framework") && !old_dep.contains("libR.dylib") {
                 continue;
             }

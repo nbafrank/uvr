@@ -18,7 +18,9 @@ pub async fn run(packages: Vec<String>) -> Result<()> {
         }
     }
 
-    project.save_manifest().context("Failed to write uvr.toml")?;
+    project
+        .save_manifest()
+        .context("Failed to write uvr.toml")?;
 
     let lockfile = crate::commands::lock::resolve_and_lock(&project, false)
         .await

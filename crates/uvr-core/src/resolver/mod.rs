@@ -95,7 +95,9 @@ impl<'a> Resolver<'a> {
                 continue;
             }
 
-            let info = self.registry.resolve_package(&name, constraint.as_deref())?;
+            let info = self
+                .registry
+                .resolve_package(&name, constraint.as_deref())?;
 
             graph.add_node(&name);
             for dep in &info.requires {
@@ -162,9 +164,21 @@ impl<'a> Resolver<'a> {
 }
 
 const BASE_PACKAGES: &[&str] = &[
-    "R", "base", "stats", "utils", "methods", "graphics", "grDevices",
-    "datasets", "tools", "compiler", "grid", "parallel", "splines",
-    "tcltk", "translations",
+    "R",
+    "base",
+    "stats",
+    "utils",
+    "methods",
+    "graphics",
+    "grDevices",
+    "datasets",
+    "tools",
+    "compiler",
+    "grid",
+    "parallel",
+    "splines",
+    "tcltk",
+    "translations",
 ];
 
 pub fn is_base_package(name: &str) -> bool {
@@ -193,7 +207,9 @@ pub fn normalize_version(v: &str) -> String {
         .split('.')
         .map(|p| {
             // Parse as u64 to strip leading zeros, fall back to raw string.
-            p.parse::<u64>().map(|n| n.to_string()).unwrap_or_else(|_| p.to_string())
+            p.parse::<u64>()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| p.to_string())
         })
         .collect();
     match parts.len() {
@@ -206,9 +222,7 @@ pub fn normalize_version(v: &str) -> String {
 
 /// Sort `packages` into topological install order using their `requires` fields.
 /// Packages already installed (not in `all_names`) are treated as satisfied.
-pub fn topological_install_order<'a>(
-    packages: &'a [LockedPackage],
-) -> Vec<&'a LockedPackage> {
+pub fn topological_install_order(packages: &[LockedPackage]) -> Vec<&LockedPackage> {
     let mut graph = DependencyGraph::default();
     let pkg_set: HashSet<&str> = packages.iter().map(|p| p.name.as_str()).collect();
 
@@ -221,9 +235,9 @@ pub fn topological_install_order<'a>(
         }
     }
 
-    let order = graph.topological_sort().unwrap_or_else(|_| {
-        packages.iter().map(|p| p.name.clone()).collect()
-    });
+    let order = graph
+        .topological_sort()
+        .unwrap_or_else(|_| packages.iter().map(|p| p.name.clone()).collect());
     let order_index: HashMap<&str, usize> = order
         .iter()
         .enumerate()
@@ -231,7 +245,12 @@ pub fn topological_install_order<'a>(
         .collect();
 
     let mut sorted: Vec<&LockedPackage> = packages.iter().collect();
-    sorted.sort_by_key(|p| order_index.get(p.name.as_str()).copied().unwrap_or(usize::MAX));
+    sorted.sort_by_key(|p| {
+        order_index
+            .get(p.name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
     sorted
 }
 
@@ -272,7 +291,11 @@ mod tests {
         }
     }
 
-    fn make_pkg(name: &str, version: &str, requires: Vec<(&str, Option<&str>)>) -> (String, PackageInfo) {
+    fn make_pkg(
+        name: &str,
+        version: &str,
+        requires: Vec<(&str, Option<&str>)>,
+    ) -> (String, PackageInfo) {
         (
             name.to_string(),
             PackageInfo {
@@ -282,7 +305,10 @@ mod tests {
                 checksum: None,
                 requires: requires
                     .into_iter()
-                    .map(|(n, c)| Dep { name: n.to_string(), constraint: c.map(str::to_string) })
+                    .map(|(n, c)| Dep {
+                        name: n.to_string(),
+                        constraint: c.map(str::to_string),
+                    })
                     .collect(),
                 url: format!("https://cran.r-project.org/{name}_{version}.tar.gz"),
                 raw_version: None,
@@ -348,7 +374,9 @@ mod tests {
         }
         impl PackageRegistry for ConstraintRespectingRegistry {
             fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
-                let info = self.packages.get(name)
+                let info = self
+                    .packages
+                    .get(name)
                     .cloned()
                     .ok_or_else(|| UvrError::PackageNotFound(name.to_string()))?;
                 if let Some(c) = constraint {
@@ -380,18 +408,30 @@ mod tests {
         use crate::lockfile::LockedPackage;
         let packages = vec![
             LockedPackage {
-                name: "ggplot2".into(), version: "3.4.4".into(),
-                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
+                name: "ggplot2".into(),
+                version: "3.4.4".into(),
+                source: PackageSource::Cran,
+                raw_version: None,
+                url: None,
+                checksum: None,
                 requires: vec!["dplyr".into(), "rlang".into()],
             },
             LockedPackage {
-                name: "dplyr".into(), version: "1.1.4".into(),
-                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
+                name: "dplyr".into(),
+                version: "1.1.4".into(),
+                source: PackageSource::Cran,
+                raw_version: None,
+                url: None,
+                checksum: None,
                 requires: vec!["rlang".into()],
             },
             LockedPackage {
-                name: "rlang".into(), version: "1.1.4".into(),
-                source: PackageSource::Cran, raw_version: None, url: None, checksum: None,
+                name: "rlang".into(),
+                version: "1.1.4".into(),
+                source: PackageSource::Cran,
+                raw_version: None,
+                url: None,
+                checksum: None,
                 requires: vec![],
             },
         ];

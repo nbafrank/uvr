@@ -9,8 +9,8 @@ pub async fn run(all: bool) -> Result<()> {
 
     if all {
         let client = crate::commands::lock::build_client()?;
-        let platform = Platform::detect()
-            .map_err(|e| anyhow::anyhow!("Unsupported platform: {e}"))?;
+        let platform =
+            Platform::detect().map_err(|e| anyhow::anyhow!("Unsupported platform: {e}"))?;
         let available = fetch_available_versions(&client, platform)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch available R versions: {e}"))?;

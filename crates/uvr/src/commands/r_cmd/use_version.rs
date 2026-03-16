@@ -11,7 +11,9 @@ pub fn run(version: String) -> Result<()> {
 
     let old = project.manifest.project.r_version.clone();
     project.manifest.project.r_version = Some(version.clone());
-    project.save_manifest().context("Failed to write uvr.toml")?;
+    project
+        .save_manifest()
+        .context("Failed to write uvr.toml")?;
 
     // If the version looks exact (digits and dots/dashes only), also pin .r-version
     if is_exact_version(&version) {
@@ -47,5 +49,6 @@ pub fn run(version: String) -> Result<()> {
 /// Returns true if `s` looks like a bare version number (`4.3.2`, `4.3-2`),
 /// i.e. no comparison operators.
 fn is_exact_version(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    s.chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
 }

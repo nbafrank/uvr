@@ -9,7 +9,9 @@ pub struct RCmdInstall {
 
 impl RCmdInstall {
     pub fn new(r_binary: impl Into<String>) -> Self {
-        RCmdInstall { r_binary: r_binary.into() }
+        RCmdInstall {
+            r_binary: r_binary.into(),
+        }
     }
 
     /// Run `R CMD INSTALL --library=<lib_path> --no-test-load <tarball>`.
@@ -23,7 +25,7 @@ impl RCmdInstall {
         // linker can find libR.dylib even when its embedded install-name still points
         // to the original build location (e.g. /Library/Frameworks/R.framework/…).
         let r_lib_dir = std::path::Path::new(&self.r_binary)
-            .parent()             // …/bin/
+            .parent() // …/bin/
             .and_then(|p| p.parent()) // …/r-versions/4.4.2/
             .map(|p| p.join("lib"))
             .unwrap_or_default();

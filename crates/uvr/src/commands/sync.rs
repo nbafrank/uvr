@@ -29,14 +29,14 @@ pub async fn run(frozen: bool, jobs: usize) -> Result<()> {
 /// with the current manifest. If the manifest has diverged, exit with an error
 /// rather than silently installing a stale environment.
 pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<()> {
-    project.ensure_library_dir().context("Failed to create .uvr/library/")?;
+    project
+        .ensure_library_dir()
+        .context("Failed to create .uvr/library/")?;
 
     let lockfile = project
         .load_lockfile()
         .context("Failed to read uvr.lock")?
-        .ok_or_else(|| anyhow::anyhow!(
-            "No lockfile found. Run `uvr lock` to generate one."
-        ))?;
+        .ok_or_else(|| anyhow::anyhow!("No lockfile found. Run `uvr lock` to generate one."))?;
 
     if frozen {
         let fresh = crate::commands::lock::resolve_only(project)
@@ -84,10 +84,11 @@ pub async fn install_from_lockfile(
                     style(&current_minor).cyan(),
                 );
                 if library.exists() {
-                    std::fs::remove_dir_all(&library)
-                        .context("Failed to wipe project library")?;
+                    std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
                 }
-                project.ensure_library_dir().context("Failed to recreate .uvr/library/")?;
+                project
+                    .ensure_library_dir()
+                    .context("Failed to recreate .uvr/library/")?;
             }
         }
     }
@@ -125,22 +126,24 @@ pub async fn install_from_lockfile(
     //    spawned by R CMD INSTALL can find libR.dylib (macOS SIP strips DYLD_* vars).
     // 2. Compute the path to libR.dylib so binary packages extracted from P3M can be
     //    patched to reference the managed R's libR instead of the CRAN framework path.
-    let r_home_opt = r_binary.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-    let libr_path: Option<std::path::PathBuf> =
-        if let Some(ref r_home) = r_home_opt {
-            if r_home.to_string_lossy().contains(".uvr/r-versions") {
-                let _ = patch_renviron_site(r_home);
-                // Patch all R dylib install names so BLAS/LAPACK sibling libraries
-                // (libRlapack, libRblas, libgfortran) are found at the managed path
-                // rather than the original CRAN framework path. Idempotent.
-                patch_r_dylibs(r_home);
-                Some(r_home.join("lib").join("libR.dylib"))
-            } else {
-                None
-            }
+    let r_home_opt = r_binary
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf());
+    let libr_path: Option<std::path::PathBuf> = if let Some(ref r_home) = r_home_opt {
+        if r_home.to_string_lossy().contains(".uvr/r-versions") {
+            let _ = patch_renviron_site(r_home);
+            // Patch all R dylib install names so BLAS/LAPACK sibling libraries
+            // (libRlapack, libRblas, libgfortran) are found at the managed path
+            // rather than the original CRAN framework path. Idempotent.
+            patch_r_dylibs(r_home);
+            Some(r_home.join("lib").join("libR.dylib"))
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     // Retroactively patch already-installed binary packages whose .so files still
     // reference the CRAN framework libR path (installed before patching support was
@@ -248,7 +251,10 @@ fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
 /// Compare two lockfiles for semantic equivalence, ignoring fields that can
 /// legitimately differ between lockfile versions (e.g. `url`, `checksum`).
 /// Compares: R major.minor version + set of (name, version, source) triples.
-fn lockfiles_equivalent(a: &uvr_core::lockfile::Lockfile, b: &uvr_core::lockfile::Lockfile) -> bool {
+fn lockfiles_equivalent(
+    a: &uvr_core::lockfile::Lockfile,
+    b: &uvr_core::lockfile::Lockfile,
+) -> bool {
     if r_minor(&a.r.version) != r_minor(&b.r.version) {
         return false;
     }
@@ -256,9 +262,10 @@ fn lockfiles_equivalent(a: &uvr_core::lockfile::Lockfile, b: &uvr_core::lockfile
         return false;
     }
     // Both are sorted alphabetically by the resolver, so zip is safe.
-    a.packages.iter().zip(b.packages.iter()).all(|(ap, bp)| {
-        ap.name == bp.name && ap.version == bp.version && ap.source == bp.source
-    })
+    a.packages
+        .iter()
+        .zip(b.packages.iter())
+        .all(|(ap, bp)| ap.name == bp.name && ap.version == bp.version && ap.source == bp.source)
 }
 
 /// Return true only if `s` looks like an actual version number (e.g. `"4.5.3"`),

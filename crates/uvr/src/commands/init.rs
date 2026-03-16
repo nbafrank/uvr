@@ -31,8 +31,7 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
 
     // Create .uvr/library/
     let library_path = cwd.join(DOT_UVR_DIR).join(LIBRARY_DIR);
-    std::fs::create_dir_all(&library_path)
-        .context("Failed to create .uvr/library/")?;
+    std::fs::create_dir_all(&library_path).context("Failed to create .uvr/library/")?;
 
     // Write .gitignore
     write_gitignore(&cwd).context("Failed to write .gitignore")?;
@@ -43,7 +42,11 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
         style(&project_name).cyan()
     );
     println!("  {}", style(MANIFEST_FILE).dim());
-    println!("  {}/{}/", style(DOT_UVR_DIR).dim(), style(LIBRARY_DIR).dim());
+    println!(
+        "  {}/{}/",
+        style(DOT_UVR_DIR).dim(),
+        style(LIBRARY_DIR).dim()
+    );
 
     Ok(())
 }
@@ -64,6 +67,6 @@ fn write_gitignore(dir: &Path) -> std::io::Result<()> {
         content.push_str(&uvr_entry);
         std::fs::write(&path, content)
     } else {
-        std::fs::write(&path, format!("{uvr_entry}"))
+        std::fs::write(&path, uvr_entry)
     }
 }
