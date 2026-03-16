@@ -1,6 +1,6 @@
 # uvr
 
-[![CI](https://github.com/frgrz/uvr/actions/workflows/ci.yml/badge.svg)](https://github.com/frgrz/uvr/actions)
+[![CI](https://github.com/nbafrank/uvr/actions/workflows/ci.yml/badge.svg)](https://github.com/nbafrank/uvr/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
@@ -36,13 +36,13 @@ $ uvr run analysis.R
 ### Standalone (requires [Rust](https://rustup.rs))
 
 ```sh
-cargo install --git https://github.com/frgrz/uvr
+cargo install --git https://github.com/nbafrank/uvr
 ```
 
 ### Build from source
 
 ```sh
-git clone https://github.com/frgrz/uvr
+git clone https://github.com/nbafrank/uvr
 cd uvr
 cargo install --path crates/uvr
 ```
