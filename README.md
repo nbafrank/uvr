@@ -1,10 +1,16 @@
 # uvr
 
-Fast, reproducible R package management — inspired by [uv](https://github.com/astral-sh/uv).
+[![CI](https://github.com/frgrz/uvr/actions/workflows/ci.yml/badge.svg)](https://github.com/frgrz/uvr/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-`uvr` gives R projects a `uvr.toml` manifest, a `uvr.lock` lockfile, and a per-project isolated library. Packages install from pre-built P3M binaries by default (no compilation, no waiting), with automatic fallback to CRAN source. R versions are managed per-project with no sudo required.
+An extremely fast R package and project manager, written in Rust.
 
-```
+---
+
+`uvr` brings uv-style project management to R: a `uvr.toml` manifest, a reproducible `uvr.lock` lockfile, and a per-project isolated library. Packages install from pre-built [P3M](https://packagemanager.posit.co/) binaries by default — no compilation, no waiting — with automatic fallback to CRAN source. R versions are managed per-project with no `sudo` required.
+
+```sh
 $ uvr init my-analysis
 $ uvr add ggplot2 dplyr tidymodels
 $ uvr sync          # installs from lockfile, idempotent
@@ -13,26 +19,27 @@ $ uvr run analysis.R
 
 ---
 
-## Features
+## Highlights
 
-- **Project isolation** — each project gets its own `.uvr/library/`, never touching system R
-- **Fast installs** — prefers pre-built P3M binaries; falls back to `R CMD INSTALL` for source
-- **Lockfile-first** — `uvr.lock` is the source of truth; `uvr sync` is reproducible and idempotent
-- **R version management** — `uvr r install 4.4.2`, `uvr r use >=4.3`, `uvr r pin 4.4.2`
+- **Blazing fast** — installs from pre-built P3M binaries; compiles from source only when needed
+- **Reproducible** — `uvr.lock` is the source of truth; `uvr sync` is always idempotent
+- **Project-isolated** — every project gets its own `.uvr/library/`, never touching system R
+- **Full R version management** — `uvr r install 4.4.2`, `uvr r use >=4.3`, `uvr r pin 4.4.2`
 - **CRAN + Bioconductor + GitHub** — `uvr add DESeq2 --bioc`, `uvr add user/repo@main`
-- **CI-friendly** — `uvr sync --frozen` fails if the lockfile is out of date; respects `NO_COLOR`
+- **CI-ready** — `uvr sync --frozen` fails fast if the lockfile is stale; respects `NO_COLOR`
+- **Written in Rust** — single static binary, no R or Python required to install
 
 ---
 
 ## Installation
 
-### From source (requires [Rust](https://rustup.rs))
+### Standalone (requires [Rust](https://rustup.rs))
 
 ```sh
 cargo install --git https://github.com/frgrz/uvr
 ```
 
-### Build locally
+### Build from source
 
 ```sh
 git clone https://github.com/frgrz/uvr
@@ -49,10 +56,11 @@ cargo install --path crates/uvr
 uvr init my-project --r-version ">=4.3.0"
 cd my-project
 
-# Add packages
+# Add packages (CRAN, Bioconductor, GitHub)
 uvr add ggplot2 dplyr
 uvr add DESeq2 --bioc
 uvr add tidymodels@>=1.0.0
+uvr add user/repo@main
 
 # Install everything from the lockfile
 uvr sync
