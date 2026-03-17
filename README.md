@@ -19,6 +19,29 @@ $ uvr run analysis.R
 
 ---
 
+## Rationale
+
+R has several package management tools — `renv`, `pak`, `rv`, `rig` — each solving a different slice of the problem. After 10+ years of R development, the workflow I kept wanting was the one `uv` brought to Python: **a single tool that handles the full lifecycle**, from installing R itself to adding packages to reproducible installs in CI, with no configuration sprawl.
+
+Here is how existing tools compare and where the gaps are:
+
+- **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not manage R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
+- **pak** — fast parallel installs and good system dependency detection, but no lockfile and no R version management. A great complement to renv, not a replacement.
+- **rv** — the closest prior art: Rust-based, declarative, fast. It focuses on package resolution. It does not manage R installations.
+- **rig** — excellent R version manager. No package management or lockfile.
+
+`uvr` is the combination of all of the above in one tool, with a single config file (`uvr.toml`) and a single lockfile (`uvr.lock`). The design goals are:
+
+1. **One tool, one config** — no juggling renv + rig + pak. `uvr.toml` declares both the R version and package dependencies.
+2. **Lockfile-first** — `uvr.lock` is the source of truth. `uvr sync` is always reproducible and idempotent.
+3. **Fast by default** — P3M pre-built binaries on macOS; source fallback only when needed.
+4. **R version management built in** — `uvr r install`, `uvr r use`, `uvr r pin` work the same way `uv python` does, because needing a separate tool for this is friction.
+5. **CI-native** — `uvr sync --frozen` is a first-class command, not an afterthought.
+
+If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for people who want the `uv` experience in R.
+
+---
+
 ## Highlights
 
 - **Blazing fast** — installs from pre-built P3M binaries; compiles from source only when needed
@@ -124,8 +147,8 @@ myPkg = { git = "user/repo", rev = "main" }
 |----------|----------------|----------------|----------------------|
 | macOS ARM64 (Apple Silicon) | ✓ P3M | ✓ | ✓ |
 | macOS x86-64 | ✓ P3M | ✓ | ✓ |
-| Linux x86-64 | — | ✓ | ✓ |
-| Linux ARM64 | — | ✓ | ✓ |
+| Linux x86-64 | — | ✓ | ✓ (Ubuntu 22.04+) |
+| Linux ARM64 | — | ✓ | ✓ (Ubuntu 22.04+) |
 | Windows | — | — | — |
 
 P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/).
