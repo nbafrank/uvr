@@ -515,6 +515,19 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
         ));
     }
 
+    // Patch hardcoded /opt/R/<version> paths to the actual install dir.
+    // The Posit .deb is built with /opt/R/<version> baked into bin/R,
+    // etc/Makeconf, etc/ldpaths, etc. We replace them all so R_HOME resolves
+    // correctly from ~/.uvr/r-versions/<version>/.
+    let original_prefix = format!("/opt/R/{version}");
+    patch_text_files(dest, &original_prefix, &dest.to_string_lossy())?;
+
+    // Write Renviron.site so LD_LIBRARY_PATH is set for every R process
+    // spawned from this installation. The .so files in lib/ have their RPATH
+    // pointing to /opt/R/<version>/lib; setting LD_LIBRARY_PATH at the R
+    // level is the simplest way to ensure they resolve without patchelf.
+    write_renviron_site(dest)?;
+
     Ok(())
 }
 
