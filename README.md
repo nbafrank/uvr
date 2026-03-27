@@ -27,8 +27,10 @@ Here is how existing tools compare and where the gaps are:
 
 - **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not manage R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
 - **pak** — fast parallel installs and good system dependency detection, but no lockfile and no R version management. A great complement to renv, not a replacement.
-- **rv** — the closest prior art: Rust-based, declarative, fast. It focuses on package resolution. It does not manage R installations.
-- **rig** — excellent R version manager. No package management or lockfile.
+- **rv** — the closest prior art: Rust-based, declarative, fast. It focuses on package resolution. It does not manage R installations, and `rv run` is not yet available.
+- **rig** — excellent R version manager. No package management or lockfile. Requires admin rights on Windows.
+- **pixi** — conda-based multi-language environment manager. Supports R via conda-forge, but packages come from conda-forge rather than CRAN/Bioconductor/P3M natively. Language-agnostic by design; not R-first.
+- **rix** — Nix-based, with extreme reproducibility including system-level dependencies. Right tool if you need bit-for-bit reproducibility across machines. Requires Nix; a different philosophy than a fast pragmatic workflow.
 
 `uvr` is the combination of all of the above in one tool, with a single config file (`uvr.toml`) and a single lockfile (`uvr.lock`). The design goals are:
 
@@ -151,7 +153,7 @@ myPkg = { git = "user/repo", rev = "main" }
 | Linux ARM64 | — | ✓ | ✓ (Ubuntu 22.04+) |
 | Windows | — | — | — |
 
-P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/).
+P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). Linux R binaries are sourced from [Posit CDN](https://cdn.posit.co/) (Ubuntu 22.04+ only); macOS R binaries from CRAN.
 
 ---
 
