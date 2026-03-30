@@ -1,0 +1,6 @@
+[project]
+name = "bench-ggplot2"
+r_version = ">=4.0.0"
+
+[dependencies]
+ggplot2 = "*"

@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+#
+# uvr benchmark suite
+#
+# Measures cold-install time for uvr vs install.packages() vs pak::pkg_install().
+# Each tool installs from a clean library. Median of N runs is reported.
+#
+# Usage:
+#   bash benchmarks/bench.sh              # default: 3 runs per tool
+#   BENCH_RUNS=5 bash benchmarks/bench.sh # override run count
+#
+# Requirements:
+#   - uvr on PATH (or CARGO_HOME/bin)
+#   - R managed by uvr (uvr r install <version>)
+#   - Optional: pak (auto-detected; skipped if missing)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RUNS="${BENCH_RUNS:-3}"
+P3M_REPO="https://p3m.dev/cran/latest"
+
+# ─── helpers ────────────────────────────────────────────────────────────────
+
+UVR="${UVR:-uvr}"
+if ! command -v "$UVR" &>/dev/null; then
+    UVR="$HOME/.cargo/bin/uvr"
+fi
+if ! command -v "$UVR" &>/dev/null; then
+    echo "error: uvr not found on PATH or in ~/.cargo/bin" >&2
+    exit 1
+fi
+
+# Return wall-clock seconds (float) for a command.
+time_cmd() {
+    local start end
+    start=$(python3 -c 'import time; print(f"{time.time():.3f}")')
+    "$@" >/dev/null 2>&1 || true
+    end=$(python3 -c 'import time; print(f"{time.time():.3f}")')
+    python3 -c "print(f'{${end} - ${start}:.1f}')"
+}
+
+# Return the median of a space-separated list of numbers.
+median() {
+    echo "$@" | tr ' ' '\n' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
+}
+
+# ─── detect tools ───────────────────────────────────────────────────────────
+
+echo "=== uvr benchmark suite ==="
+echo "uvr:  $($UVR --version 2>&1 || echo 'unknown')"
+echo "runs: $RUNS per tool"
+echo ""
+
+# Check if pak is available via uvr run
+HAS_PAK=false
+TMPCHECK="$(mktemp -d)"
+cp "$SCRIPT_DIR/uvr-ggplot2.toml" "$TMPCHECK/uvr.toml"
+mkdir -p "$TMPCHECK/.uvr/library"
+if (cd "$TMPCHECK" && "$UVR" run -e 'if (requireNamespace("pak", quietly=TRUE)) cat("yes") else cat("no")' 2>/dev/null) | grep -q yes; then
+    HAS_PAK=true
+fi
+rm -rf "$TMPCHECK"
+
+echo "tools: uvr, install.packages"
+if $HAS_PAK; then
+    echo "       pak (detected)"
+else
+    echo "       pak (not found — skipping)"
+fi
+echo ""
+
+# ─── storage (flat arrays — bash 3 compatible) ─────────────────────────────
+
+# Results stored as "scenario:value" entries in flat arrays.
+RESULT_UVR_ENTRIES=""
+RESULT_IP_ENTRIES=""
+RESULT_PAK_ENTRIES=""
+RESULT_NPKG_ENTRIES=""
+
+set_result() { eval "${1}=\"\${${1}} ${2}:${3}\""; }
+get_result() {
+    local entries val
+    eval "entries=\"\${${1}}\""
+    for entry in $entries; do
+        case "$entry" in "${2}:"*) val="${entry#*:}"; echo "$val"; return ;; esac
+    done
+    echo "n/a"
+}
+
+# ─── scenarios ──────────────────────────────────────────────────────────────
+
+SCENARIOS="ggplot2 tidyverse"
+
+for scenario in $SCENARIOS; do
+    MANIFEST="$SCRIPT_DIR/uvr-${scenario}.toml"
+    echo "--- scenario: $scenario ---"
+
+    # ── uvr sync ────────────────────────────────────────────────────────────
+
+    echo -n "  uvr sync:            "
+    UVR_TIMES=""
+
+    # Pre-resolve lockfile once (resolution is not part of install benchmark)
+    BENCHDIR="$(mktemp -d)"
+    cp "$MANIFEST" "$BENCHDIR/uvr.toml"
+    mkdir -p "$BENCHDIR/.uvr/library"
+    (cd "$BENCHDIR" && "$UVR" lock 2>/dev/null) || true
+
+    # Count packages in lockfile
+    NPKG=$(grep -c '^\[\[package\]\]' "$BENCHDIR/uvr.lock" 2>/dev/null || echo "?")
+    set_result RESULT_NPKG_ENTRIES "$scenario" "$NPKG"
+
+    for i in $(seq 1 "$RUNS"); do
+        # Wipe library, keep lockfile
+        rm -rf "$BENCHDIR/.uvr/library"
+        mkdir -p "$BENCHDIR/.uvr/library"
+        t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' sync")
+        UVR_TIMES="$UVR_TIMES $t"
+        echo -n "${t}s "
+    done
+    rm -rf "$BENCHDIR"
+    MED=$(median $UVR_TIMES)
+    set_result RESULT_UVR_ENTRIES "$scenario" "$MED"
+    echo "→ median ${MED}s"
+
+    # ── install.packages ────────────────────────────────────────────────────
+
+    echo -n "  install.packages:    "
+    IP_TIMES=""
+    for i in $(seq 1 "$RUNS"); do
+        BENCHDIR="$(mktemp -d)"
+        cp "$MANIFEST" "$BENCHDIR/uvr.toml"
+        mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/iplib"
+
+        # Write the R script that does install.packages
+        cat > "$BENCHDIR/bench_ip.R" <<REOF
+lib <- file.path(getwd(), "iplib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+options(repos = c(CRAN = "${P3M_REPO}"))
+install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = TRUE)
+REOF
+        t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_ip.R")
+        IP_TIMES="$IP_TIMES $t"
+        rm -rf "$BENCHDIR"
+        echo -n "${t}s "
+    done
+    MED=$(median $IP_TIMES)
+    set_result RESULT_IP_ENTRIES "$scenario" "$MED"
+    echo "→ median ${MED}s"
+
+    # ── pak ──────────────────────────────────────────────────────────────────
+
+    if $HAS_PAK; then
+        echo -n "  pak::pkg_install:    "
+        PAK_TIMES=""
+        for i in $(seq 1 "$RUNS"); do
+            BENCHDIR="$(mktemp -d)"
+            cp "$MANIFEST" "$BENCHDIR/uvr.toml"
+            mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/paklib"
+
+            cat > "$BENCHDIR/bench_pak.R" <<REOF
+lib <- file.path(getwd(), "paklib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+pak::pkg_install("${scenario}", lib = lib, ask = FALSE)
+REOF
+            t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_pak.R")
+            PAK_TIMES="$PAK_TIMES $t"
+            rm -rf "$BENCHDIR"
+            echo -n "${t}s "
+        done
+        MED=$(median $PAK_TIMES)
+        set_result RESULT_PAK_ENTRIES "$scenario" "$MED"
+        echo "→ median ${MED}s"
+    fi
+
+    echo ""
+done
+
+# ─── results table ──────────────────────────────────────────────────────────
+
+echo ""
+echo "## Results"
+echo ""
+if $HAS_PAK; then
+    echo "| Scenario | Packages | uvr sync | install.packages | pak |"
+    echo "|----------|----------|----------|------------------|-----|"
+else
+    echo "| Scenario | Packages | uvr sync | install.packages |"
+    echo "|----------|----------|----------|------------------|"
+fi
+
+for scenario in $SCENARIOS; do
+    npkg=$(get_result RESULT_NPKG_ENTRIES "$scenario")
+    uvr_t="$(get_result RESULT_UVR_ENTRIES "$scenario")s"
+    ip_t="$(get_result RESULT_IP_ENTRIES "$scenario")s"
+    if $HAS_PAK; then
+        pak_t="$(get_result RESULT_PAK_ENTRIES "$scenario")s"
+        echo "| $scenario | $npkg | **$uvr_t** | $ip_t | $pak_t |"
+    else
+        echo "| $scenario | $npkg | **$uvr_t** | $ip_t |"
+    fi
+done
+
+echo ""
+R_VER=$("$UVR" run -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
+echo "_Measured on $(uname -m), ${R_VER}, P3M binaries. Median of ${RUNS} cold installs._"

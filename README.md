@@ -44,6 +44,19 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 
 ---
 
+## Benchmarks
+
+Cold-install wall time (empty library → all packages installed). P3M binaries for all tools. Median of 3 runs on Apple Silicon.
+
+| Scenario | Packages | uvr sync | install.packages | Speedup |
+|----------|----------|----------|------------------|---------|
+| ggplot2  | 17       | **0.5s** | 13.9s            | ~28x    |
+| tidyverse| 99       | **1.6s** | 6.8s             | ~4x     |
+
+> Run `bash benchmarks/bench.sh` to reproduce. Results vary by machine and network.
+
+---
+
 ## Highlights
 
 - **Blazing fast** — installs from pre-built P3M binaries; compiles from source only when needed
