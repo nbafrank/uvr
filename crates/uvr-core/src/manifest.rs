@@ -32,6 +32,11 @@ pub struct ProjectMeta {
     #[serde(default)]
     pub r_version: Option<String>,
 
+    /// Explicit Bioconductor release, e.g. `"3.18"`.
+    /// When omitted, auto-detected from the active R version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bioc_version: Option<String>,
+
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -110,6 +115,7 @@ impl Manifest {
             project: ProjectMeta {
                 name: name.into(),
                 r_version,
+                bioc_version: None,
                 description: None,
             },
             dependencies: BTreeMap::new(),
@@ -121,6 +127,64 @@ impl Manifest {
     pub fn from_file(path: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(path)?;
         s.parse()
+    }
+
+    /// Parse an R `DESCRIPTION` file (DCF format) into a `Manifest`.
+    ///
+    /// - `Imports:` → `dependencies`
+    /// - `Suggests:` → `dev_dependencies`
+    /// - `Depends: R (>= x.y.z)` → `project.r_version`
+    /// - Non-R entries in `Depends:` are merged into `dependencies`
+    pub fn from_description_str(content: &str) -> Result<Self> {
+        let fields = parse_dcf(content);
+
+        let name = fields
+            .get("Package")
+            .map(|s| s.as_str())
+            .unwrap_or("unnamed")
+            .to_string();
+
+        let r_version = fields.get("Depends").and_then(|deps| {
+            parse_r_version_from_depends(deps)
+        });
+
+        let mut dependencies = BTreeMap::new();
+        let mut dev_dependencies = BTreeMap::new();
+
+        if let Some(imports) = fields.get("Imports") {
+            for (pkg, spec) in parse_dep_field(imports) {
+                dependencies.insert(pkg, spec);
+            }
+        }
+        if let Some(depends) = fields.get("Depends") {
+            for (pkg, spec) in parse_dep_field(depends) {
+                if pkg != "R" {
+                    dependencies.insert(pkg, spec);
+                }
+            }
+        }
+        if let Some(suggests) = fields.get("Suggests") {
+            for (pkg, spec) in parse_dep_field(suggests) {
+                dev_dependencies.insert(pkg, spec);
+            }
+        }
+
+        Ok(Manifest {
+            project: ProjectMeta {
+                name,
+                r_version,
+                bioc_version: None,
+                description: fields.get("Title").cloned(),
+            },
+            dependencies,
+            dev_dependencies,
+            sources: Vec::new(),
+        })
+    }
+
+    pub fn from_description_file(path: &Path) -> Result<Self> {
+        let s = std::fs::read_to_string(path)?;
+        Self::from_description_str(&s)
     }
 
     pub fn to_toml_string(&self) -> Result<String> {
@@ -149,6 +213,90 @@ impl Manifest {
         let b = self.dev_dependencies.remove(name).is_some();
         a || b
     }
+}
+
+/// Parse a DCF (Debian Control File) string into a `BTreeMap<field, value>`.
+/// Continuation lines (leading whitespace) are joined with a space.
+fn parse_dcf(content: &str) -> BTreeMap<String, String> {
+    let mut fields: BTreeMap<String, String> = BTreeMap::new();
+    let mut current_key: Option<String> = None;
+    let mut current_value = String::new();
+
+    for line in content.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            // Continuation line
+            if current_key.is_some() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if !current_value.is_empty() {
+                        current_value.push(' ');
+                    }
+                    current_value.push_str(trimmed);
+                }
+            }
+        } else if let Some(colon_pos) = line.find(':') {
+            // Save previous field
+            if let Some(key) = current_key.take() {
+                fields.insert(key, current_value.trim().to_string());
+                current_value.clear();
+            }
+            current_key = Some(line[..colon_pos].trim().to_string());
+            current_value = line[colon_pos + 1..].trim().to_string();
+        }
+    }
+    // Save last field
+    if let Some(key) = current_key {
+        fields.insert(key, current_value.trim().to_string());
+    }
+    fields
+}
+
+/// Parse a comma-separated R dependency field (Imports, Suggests, Depends).
+/// Returns `(package_name, DependencySpec)` pairs, skipping blank entries.
+fn parse_dep_field(field: &str) -> Vec<(String, DependencySpec)> {
+    let mut result = Vec::new();
+    for entry in field.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, spec) = if let Some(paren) = entry.find('(') {
+            let name = entry[..paren].trim().to_string();
+            let inner = entry[paren + 1..entry.rfind(')').unwrap_or(entry.len())].trim();
+            // Convert ">=3.0.0" or ">= 3.0.0" → ">=3.0.0"
+            let version: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+            (name, DependencySpec::Version(version))
+        } else {
+            (entry.to_string(), DependencySpec::Version("*".to_string()))
+        };
+        if !name.is_empty() {
+            result.push((name, spec));
+        }
+    }
+    result
+}
+
+/// Extract R version constraint from a `Depends:` field value.
+/// e.g. `"R (>= 4.0.0), methods"` → `Some(">=4.0.0")`
+fn parse_r_version_from_depends(depends: &str) -> Option<String> {
+    for entry in depends.split(',') {
+        let entry = entry.trim();
+        if entry.starts_with('R') {
+            let rest = entry[1..].trim();
+            if rest.is_empty() || rest.starts_with('(') {
+                if let Some(paren) = entry.find('(') {
+                    let inner =
+                        entry[paren + 1..entry.rfind(')').unwrap_or(entry.len())].trim();
+                    let version: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+                    if !version.is_empty() {
+                        return Some(version);
+                    }
+                }
+                return None;
+            }
+        }
+    }
+    None
 }
 
 /// Write `data` to `path` atomically via a temp file in the same directory.
@@ -203,6 +351,95 @@ rev = "main"
         let toml_str = m.to_toml_string().expect("serialize");
         let m2: Manifest = toml_str.parse().expect("reparse");
         assert_eq!(m, m2);
+    }
+
+    const DESCRIPTION_SAMPLE: &str = r#"Package: myanalysis
+Title: My Analysis Project
+Version: 0.1.0
+Depends:
+    R (>= 4.1.0),
+    methods
+Imports:
+    ggplot2 (>= 3.4.0),
+    dplyr,
+    stringr
+Suggests:
+    testthat (>= 3.0.0),
+    knitr
+"#;
+
+    #[test]
+    fn description_basic() {
+        let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
+        assert_eq!(m.project.name, "myanalysis");
+        assert_eq!(m.project.r_version.as_deref(), Some(">=4.1.0"));
+        assert_eq!(m.project.description.as_deref(), Some("My Analysis Project"));
+    }
+
+    #[test]
+    fn description_imports_as_deps() {
+        let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
+        // ggplot2 with version constraint
+        let gg = m.dependencies.get("ggplot2").unwrap();
+        assert!(matches!(gg, DependencySpec::Version(v) if v == ">=3.4.0"));
+        // dplyr without version
+        let dp = m.dependencies.get("dplyr").unwrap();
+        assert!(matches!(dp, DependencySpec::Version(v) if v == "*"));
+        // methods from Depends (non-R entry)
+        assert!(m.dependencies.contains_key("methods"));
+    }
+
+    #[test]
+    fn description_suggests_as_dev_deps() {
+        let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
+        let tt = m.dev_dependencies.get("testthat").unwrap();
+        assert!(matches!(tt, DependencySpec::Version(v) if v == ">=3.0.0"));
+        assert!(m.dev_dependencies.contains_key("knitr"));
+    }
+
+    #[test]
+    fn description_no_r_in_deps() {
+        let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
+        assert!(!m.dependencies.contains_key("R"));
+        assert!(!m.dev_dependencies.contains_key("R"));
+    }
+
+    #[test]
+    fn bioc_version_round_trip() {
+        let toml = r#"
+[project]
+name = "bioc-test"
+r_version = ">=4.3.0"
+bioc_version = "3.18"
+
+[dependencies.DESeq2]
+bioc = true
+"#;
+        let m: Manifest = toml.parse().expect("parse");
+        assert_eq!(m.project.bioc_version.as_deref(), Some("3.18"));
+
+        let serialized = m.to_toml_string().expect("serialize");
+        let m2: Manifest = serialized.parse().expect("reparse");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn bioc_version_omitted() {
+        // bioc_version should be None when not specified (backward compat)
+        let m: Manifest = SAMPLE.parse().expect("parse");
+        assert!(m.project.bioc_version.is_none());
+        // And not serialized
+        let s = m.to_toml_string().expect("serialize");
+        assert!(!s.contains("bioc_version"));
+    }
+
+    #[test]
+    fn description_no_depends() {
+        let content = "Package: minimal\nImports: ggplot2\n";
+        let m = Manifest::from_description_str(content).expect("parse");
+        assert_eq!(m.project.name, "minimal");
+        assert!(m.project.r_version.is_none());
+        assert!(m.dependencies.contains_key("ggplot2"));
     }
 
     #[test]

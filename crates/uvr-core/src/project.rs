@@ -5,29 +5,51 @@ use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 
 pub const MANIFEST_FILE: &str = "uvr.toml";
+pub const DESCRIPTION_FILE: &str = "DESCRIPTION";
 pub const LOCK_FILE: &str = "uvr.lock";
 pub const R_VERSION_FILE: &str = ".r-version";
 pub const DOT_UVR_DIR: &str = ".uvr";
 pub const LIBRARY_DIR: &str = "library";
 
-/// Represents a resolved uvr project rooted at a directory containing `uvr.toml`.
+/// Whether this project's manifest came from `uvr.toml` or a `DESCRIPTION` file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestSource {
+    /// Standard `uvr.toml` — full read/write support.
+    Toml,
+    /// R `DESCRIPTION` file — read-only; use `uvr init` to create a `uvr.toml`.
+    Description,
+}
+
+/// Represents a resolved uvr project rooted at a directory containing `uvr.toml`
+/// or an R `DESCRIPTION` file.
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
     pub manifest: Manifest,
+    pub manifest_source: ManifestSource,
 }
 
 impl Project {
-    /// Walk up from `start` looking for `uvr.toml`.
+    /// Walk up from `start` looking for `uvr.toml` (preferred) or `DESCRIPTION`.
     pub fn find(start: &Path) -> Result<Self> {
         let mut dir = start.to_path_buf();
         loop {
-            let candidate = dir.join(MANIFEST_FILE);
-            if candidate.exists() {
-                let manifest = Manifest::from_file(&candidate)?;
+            let toml_candidate = dir.join(MANIFEST_FILE);
+            if toml_candidate.exists() {
+                let manifest = Manifest::from_file(&toml_candidate)?;
                 return Ok(Project {
                     root: dir,
                     manifest,
+                    manifest_source: ManifestSource::Toml,
+                });
+            }
+            let desc_candidate = dir.join(DESCRIPTION_FILE);
+            if desc_candidate.exists() {
+                let manifest = Manifest::from_description_file(&desc_candidate)?;
+                return Ok(Project {
+                    root: dir,
+                    manifest,
+                    manifest_source: ManifestSource::Description,
                 });
             }
             if !dir.pop() {
@@ -68,6 +90,11 @@ impl Project {
     }
 
     pub fn save_manifest(&self) -> Result<()> {
+        if self.manifest_source == ManifestSource::Description {
+            return Err(UvrError::Other(
+                "Cannot modify DESCRIPTION directly. Run `uvr init` to create a uvr.toml.".to_string(),
+            ));
+        }
         self.manifest.write(&self.manifest_path())
     }
 
