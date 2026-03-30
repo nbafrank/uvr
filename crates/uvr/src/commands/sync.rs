@@ -178,6 +178,8 @@ pub async fn install_from_lockfile(
         _ => P3MBinaryIndex::empty(),
     };
 
+    let bioc_release = lockfile.r.bioc_version.as_deref();
+
     // Decide URL and install method for each package.
     // Prefer P3M binary if available for the exact version; fall back to source.
     let pkg_urls: Vec<(&LockedPackage, String, bool)> = to_install
@@ -186,7 +188,7 @@ pub async fn install_from_lockfile(
             if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
                 (*p, bin_url.to_string(), true)
             } else {
-                (*p, source_url(p), false)
+                (*p, source_url(p, bioc_release), false)
             }
         })
         .collect();
@@ -290,7 +292,7 @@ fn r_minor(version: &str) -> String {
 /// Prefers the stored `url` field; falls back to reconstructing it.
 /// Uses `raw_version` (e.g. `"1.1-3"`) when available so the reconstructed
 /// filename matches the actual CRAN tarball (e.g. `scales_1.1-3.tar.gz`).
-fn source_url(pkg: &LockedPackage) -> String {
+fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
     if let Some(url) = &pkg.url {
         return url.clone();
     }
@@ -301,10 +303,13 @@ fn source_url(pkg: &LockedPackage) -> String {
             "https://cran.r-project.org/src/contrib/{}_{}.tar.gz",
             pkg.name, ver
         ),
-        PackageSource::Bioconductor => format!(
-            "https://bioconductor.org/packages/release/bioc/src/contrib/{}_{}.tar.gz",
-            pkg.name, ver
-        ),
+        PackageSource::Bioconductor => {
+            let release = bioc_release.unwrap_or("release");
+            format!(
+                "https://bioconductor.org/packages/{release}/bioc/src/contrib/{}_{}.tar.gz",
+                pkg.name, ver
+            )
+        }
         PackageSource::GitHub | PackageSource::Local => String::new(),
     }
 }

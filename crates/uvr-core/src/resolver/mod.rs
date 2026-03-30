@@ -157,7 +157,10 @@ impl<'a> Resolver<'a> {
         packages.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(Lockfile {
-            r: crate::lockfile::RVersionPin { version: r_version },
+            r: crate::lockfile::RVersionPin {
+                version: r_version,
+                bioc_version: None,
+            },
             packages,
         })
     }

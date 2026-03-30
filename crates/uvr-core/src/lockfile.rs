@@ -17,6 +17,11 @@ pub struct Lockfile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RVersionPin {
     pub version: String,
+
+    /// Bioconductor release used during resolution, e.g. `"3.18"`.
+    /// Only present when the lockfile includes Bioconductor packages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bioc_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -140,6 +145,35 @@ source = "cran"
         let s = lf.to_toml_string().unwrap();
         let lf2: Lockfile = s.parse().unwrap();
         assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn round_trip_with_bioc_version() {
+        let input = r#"
+[r]
+version = "4.3.2"
+bioc_version = "3.18"
+
+[[package]]
+name = "DESeq2"
+version = "1.42.0"
+source = "bioconductor"
+url = "https://bioconductor.org/packages/3.18/bioc/src/contrib/DESeq2_1.42.0.tar.gz"
+"#;
+        let lf: Lockfile = input.parse().expect("parse");
+        assert_eq!(lf.r.bioc_version.as_deref(), Some("3.18"));
+        assert_eq!(lf.packages[0].source, PackageSource::Bioconductor);
+
+        let s = lf.to_toml_string().unwrap();
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn backward_compat_no_bioc_version() {
+        // Old lockfiles without bioc_version should still parse fine.
+        let lf: Lockfile = SAMPLE.parse().expect("parse");
+        assert!(lf.r.bioc_version.is_none());
     }
 
     #[test]

@@ -65,16 +65,24 @@ async fn resolve_lockfile(
             .any(|s| s.is_bioc());
 
     let bioc_opt: Option<BiocRegistry> = if has_bioc {
-        let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-        let bioc = BiocRegistry::fetch(client, r_ver)
-            .await
-            .context("Failed to fetch Bioconductor index")?;
+        let bioc = if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
+            // Explicit bioc_version in manifest — use it directly.
+            BiocRegistry::fetch_release(client, bioc_ver)
+                .await
+                .context("Failed to fetch Bioconductor index")?
+        } else {
+            // Auto-detect Bioconductor release from the active R version.
+            let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
+            BiocRegistry::fetch(client, r_ver)
+                .await
+                .context("Failed to fetch Bioconductor index")?
+        };
         Some(bioc)
     } else {
         None
     };
 
-    let lockfile = if let Some(ref bioc) = bioc_opt {
+    let mut lockfile = if let Some(ref bioc) = bioc_opt {
         let composite = CompositeRegistry::new(&cran, bioc);
         Resolver::new(&composite)
             .resolve(&project.manifest, actual_r_version.as_deref())
@@ -84,6 +92,11 @@ async fn resolve_lockfile(
             .resolve(&project.manifest, actual_r_version.as_deref())
             .context("Dependency resolution failed")?
     };
+
+    // Record the Bioconductor release in the lockfile so it's fully self-describing.
+    if let Some(ref bioc) = bioc_opt {
+        lockfile.r.bioc_version = Some(bioc.release().to_string());
+    }
 
     spinner.finish_with_message(format!("Resolved {} packages", lockfile.packages.len()));
     Ok(lockfile)

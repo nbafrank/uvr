@@ -12,12 +12,13 @@ use crate::resolver::PackageRegistry;
 
 fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
     match (r_major, r_minor) {
+        (4, 5) => "3.21",
         (4, 4) => "3.20",
         (4, 3) => "3.18",
         (4, 2) => "3.16",
         (4, 1) => "3.14",
         (4, 0) => "3.12",
-        _ => "3.20",
+        _ => "3.21",
     }
 }
 
@@ -27,12 +28,17 @@ pub struct BiocRegistry {
 }
 
 impl BiocRegistry {
+    /// Fetch the Bioconductor package index for the release matching `r_version`.
     pub async fn fetch(client: &reqwest::Client, r_version: &str) -> Result<Self> {
         let parts: Vec<&str> = r_version.split('.').collect();
         let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
-        let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
-        let bioc_release = bioc_release_for_r(major, minor).to_string();
+        let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
+        let bioc_release = bioc_release_for_r(major, minor);
+        Self::fetch_release(client, bioc_release).await
+    }
 
+    /// Fetch the Bioconductor package index for a specific release (e.g. `"3.18"`).
+    pub async fn fetch_release(client: &reqwest::Client, bioc_release: &str) -> Result<Self> {
         let url = format!(
             "https://bioconductor.org/packages/{bioc_release}/bioc/src/contrib/PACKAGES.gz"
         );
@@ -56,8 +62,13 @@ impl BiocRegistry {
         info!("Bioconductor {bioc_release}: {} packages", packages.len());
         Ok(BiocRegistry {
             packages,
-            bioc_release,
+            bioc_release: bioc_release.to_string(),
         })
+    }
+
+    /// The Bioconductor release version this registry was fetched for (e.g. `"3.18"`).
+    pub fn release(&self) -> &str {
+        &self.bioc_release
     }
 }
 
