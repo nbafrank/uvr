@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -5,16 +6,35 @@ use anyhow::{Context, Result};
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::find_r_binary;
 
-pub fn run(script: Option<String>, args: Vec<String>) -> Result<()> {
-    let project = Project::find_cwd().context("Not inside a uvr project")?;
-    project
-        .ensure_library_dir()
-        .context("Failed to create .uvr/library/")?;
+pub fn run(script: Option<String>, r_version_override: Option<String>, args: Vec<String>) -> Result<()> {
+    // Resolve project (optional — uvr run works outside a project too).
+    let (project_library, project_r_constraint) = match Project::find_cwd() {
+        Ok(p) => {
+            p.ensure_library_dir()
+                .context("Failed to create .uvr/library/")?;
+            let lib = p.library_path();
+            let rv = p.manifest.project.r_version.clone();
+            (Some(lib), rv)
+        }
+        Err(_) => (None, None),
+    };
 
-    let library = project.library_path();
-    let r_constraint = project.manifest.project.r_version.as_deref();
-    let r_binary = find_r_binary(r_constraint)
+    // --r-version flag takes priority over the project constraint.
+    let effective_constraint = r_version_override
+        .as_deref()
+        .or(project_r_constraint.as_deref());
+
+    let r_binary = find_r_binary(effective_constraint)
         .context("R not found. Install R or use `uvr r install <version>`")?;
+
+    let library: PathBuf = project_library.unwrap_or_else(|| {
+        // Outside a project: use a user-level fallback so packages installed
+        // via install.packages() land somewhere predictable.
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("uvr")
+            .join("library")
+    });
 
     // Derive R's lib directory for DYLD_LIBRARY_PATH so that compiled packages
     // (e.g. rlang) can find libR.dylib at runtime regardless of its embedded install-name.
@@ -40,8 +60,7 @@ pub fn run(script: Option<String>, args: Vec<String>) -> Result<()> {
     if let Some(script_path) = &script {
         cmd.arg("--no-save");
         cmd.arg("--no-restore");
-        cmd.arg("--file");
-        cmd.arg(script_path);
+        cmd.arg(format!("--file={script_path}"));
         if !args.is_empty() {
             cmd.arg("--args");
             cmd.args(&args);

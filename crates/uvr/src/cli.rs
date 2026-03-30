@@ -118,6 +118,10 @@ pub struct SyncArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
+    /// Override the R version for this run, e.g. "4.3.2" or ">=4.2.0"
+    #[arg(long = "r-version", value_name = "VERSION")]
+    pub r_version: Option<String>,
+
     /// R script to execute
     pub script: Option<String>,
 

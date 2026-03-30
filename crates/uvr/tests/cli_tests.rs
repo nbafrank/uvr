@@ -83,14 +83,23 @@ fn test_remove_nonexistent_does_not_crash() {
 }
 
 #[test]
-fn test_run_without_project_fails() {
+fn test_run_outside_project_uses_system_r() {
+    // uvr run outside a project should succeed (falls back to system R)
+    // and NOT print any "not inside a uvr project" error.
     let dir = TempDir::new().unwrap();
-    uvr_cmd()
-        .args(["run", "script.R"])
+    // Run without a script → drops into interactive R, but with --no-save
+    // the assertion just checks it doesn't error with a "project not found" message.
+    // We can't run interactive R in CI, so just verify the error is R-level, not uvr-level.
+    let output = uvr_cmd()
+        .args(["run", "nonexistent_script_xyz.R"])
         .current_dir(dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("uvr project").or(predicate::str::contains("uvr.toml")));
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("uvr project") && !stderr.contains("uvr.toml"),
+        "unexpected uvr project error: {stderr}"
+    );
 }
 
 #[test]

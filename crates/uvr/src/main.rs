@@ -57,7 +57,7 @@ async fn run() -> Result<()> {
             commands::sync::run(args.frozen, args.jobs).await?;
         }
         Commands::Run(args) => {
-            commands::run::run(args.script, args.args)?;
+            commands::run::run(args.script, args.r_version, args.args)?;
         }
         Commands::Lock(args) => {
             commands::lock::run(args.upgrade).await?;
