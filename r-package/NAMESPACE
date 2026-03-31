@@ -1,3 +1,4 @@
+export(install_uvr)
 export(init)
 export(add)
 export(remove_pkgs)
