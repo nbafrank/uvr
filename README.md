@@ -42,6 +42,28 @@ Here is how existing tools compare and where the gaps are:
 
 If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for people who want the `uv` experience in R.
 
+### Feature matrix
+
+|                              | uvr | renv | pak | rv  | rig | pixi |
+|------------------------------|-----|------|-----|-----|-----|------|
+| Declarative manifest         | ✓   | –    | –   | ✓   | –   | ✓    |
+| Lockfile                     | ✓   | ✓    | –   | ✓   | –   | ✓    |
+| R version management         | ✓   | –    | –   | –   | ✓   | ✓    |
+| Run scripts in isolated env  | ✓   | –    | –   | –   | –   | ✓    |
+| CRAN packages                | ✓   | ✓    | ✓   | ✓   | –   | ✓¹   |
+| Bioconductor packages        | ✓   | ✓    | ✓   | ✓   | –   | ✓¹   |
+| GitHub packages              | ✓   | ✓    | ✓   | ✓   | –   | –    |
+| Pre-built binaries (P3M)     | ✓   | –    | ✓   | –   | –   | –    |
+| System dep detection (Linux) | –   | –    | ✓   | –   | –   | ✓    |
+| Single config file           | ✓   | –    | –   | ✓   | –   | ✓    |
+| CI mode (`--frozen`)         | ✓   | ✓    | –   | –   | –   | ✓    |
+| No admin rights required     | ✓   | ✓    | ✓   | ✓   | –²  | ✓    |
+| Single static binary         | ✓   | –    | –   | ✓   | ✓   | –    |
+| Windows support              | –   | ✓    | ✓   | ✓   | ✓   | ✓    |
+
+¹ pixi installs R packages from conda-forge, not CRAN/Bioconductor directly.
+² rig requires admin rights on Windows.
+
 ---
 
 ## Benchmarks
