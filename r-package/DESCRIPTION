@@ -1,0 +1,16 @@
+Package: uvr
+Title: R Interface to the 'uvr' Package Manager
+Version: 0.1.0
+Authors@R: person("Francesco", "Grazzini", role = c("aut", "cre"),
+                  email = "francesco@example.com")
+Description: Provides R functions that wrap the 'uvr' command-line tool for
+    fast, reproducible R package management. Functions include project
+    initialization, package addition and removal, lockfile synchronization,
+    and script execution within isolated environments. Requires the 'uvr'
+    binary to be installed separately.
+License: MIT + file LICENSE
+Depends: R (>= 4.0.0)
+Suggests: testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Encoding: UTF-8
+RoxygenNote: 7.3.2
