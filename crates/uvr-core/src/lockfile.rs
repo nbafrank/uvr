@@ -44,6 +44,10 @@ pub struct LockedPackage {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+
+    /// Raw `SystemRequirements` string from DESCRIPTION, if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_requirements: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

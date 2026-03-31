@@ -61,6 +61,7 @@ pub async fn resolve_github_package(
         requires,
         url,
         raw_version: None, // GitHub packages don't have CRAN-style dash versions
+        system_requirements: None,
     })
 }
 

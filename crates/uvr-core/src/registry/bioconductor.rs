@@ -109,6 +109,7 @@ impl PackageRegistry for BiocRegistry {
             requires: entry.requires_as_deps(),
             url,
             raw_version: Some(entry.raw_version.clone()),
+            system_requirements: entry.system_requirements.clone(),
         })
     }
 }

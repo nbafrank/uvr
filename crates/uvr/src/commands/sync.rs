@@ -111,6 +111,54 @@ pub async fn install_from_lockfile(
     );
 
     let client = crate::commands::lock::build_client()?;
+
+    // On Linux, check for missing system dependencies before installing.
+    #[cfg(target_os = "linux")]
+    {
+        use uvr_core::sysreqs;
+
+        if let Some(distro) = sysreqs::detect_linux_distro() {
+            let sysreqs_packages: Vec<(String, String)> = to_install
+                .iter()
+                .filter_map(|p| {
+                    p.system_requirements
+                        .as_ref()
+                        .map(|sr| (p.name.clone(), sr.clone()))
+                })
+                .collect();
+
+            if !sysreqs_packages.is_empty() {
+                let missing = sysreqs::check_system_deps(&client, &sysreqs_packages, &distro).await;
+                if !missing.is_empty() {
+                    let all_pkgs: Vec<&str> = missing
+                        .values()
+                        .flat_map(|reqs| reqs.iter().map(|r| r.package.as_str()))
+                        .collect::<std::collections::BTreeSet<&str>>()
+                        .into_iter()
+                        .collect();
+
+                    println!(
+                        "\n{} Missing system dependencies for {} package(s):",
+                        style("⚠").yellow().bold(),
+                        missing.len()
+                    );
+                    for (pkg_name, reqs) in &missing {
+                        let names: Vec<&str> = reqs.iter().map(|r| r.package.as_str()).collect();
+                        println!(
+                            "  {} requires: {}",
+                            style(pkg_name).cyan(),
+                            names.join(", ")
+                        );
+                    }
+                    println!(
+                        "\n  Install with: {}\n",
+                        style(format!("sudo apt-get install -y {}", all_pkgs.join(" "))).bold()
+                    );
+                    println!("  Continuing installation (some packages may fail to compile)...\n");
+                }
+            }
+        }
+    }
     let cache_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".uvr")

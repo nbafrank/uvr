@@ -23,6 +23,7 @@ pub struct ResolvedPackage {
     pub requires: Vec<String>,
     pub url: String,
     pub raw_version: Option<String>,
+    pub system_requirements: Option<String>,
 }
 
 /// Trait to abstract over CRAN / Bioconductor / GitHub registries.
@@ -134,6 +135,7 @@ impl<'a> Resolver<'a> {
                     requires: info.requires.iter().map(|d| d.name.clone()).collect(),
                     url: info.url,
                     raw_version: info.raw_version,
+                    system_requirements: info.system_requirements,
                 },
             );
         }
@@ -152,6 +154,7 @@ impl<'a> Resolver<'a> {
                 url: Some(r.url),
                 checksum: r.checksum,
                 requires: r.requires,
+                system_requirements: r.system_requirements,
             })
             .collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -315,6 +318,7 @@ mod tests {
                     .collect(),
                 url: format!("https://cran.r-project.org/{name}_{version}.tar.gz"),
                 raw_version: None,
+                system_requirements: None,
             },
         )
     }
@@ -418,6 +422,7 @@ mod tests {
                 url: None,
                 checksum: None,
                 requires: vec!["dplyr".into(), "rlang".into()],
+                system_requirements: None,
             },
             LockedPackage {
                 name: "dplyr".into(),
@@ -427,6 +432,7 @@ mod tests {
                 url: None,
                 checksum: None,
                 requires: vec!["rlang".into()],
+                system_requirements: None,
             },
             LockedPackage {
                 name: "rlang".into(),
@@ -436,6 +442,7 @@ mod tests {
                 url: None,
                 checksum: None,
                 requires: vec![],
+                system_requirements: None,
             },
         ];
 

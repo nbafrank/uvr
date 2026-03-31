@@ -71,4 +71,6 @@ pub struct PackageInfo {
     /// Used in tarball URL construction so we never produce broken URLs like
     /// `scales_1.1.3.tar.gz` when the real file is `scales_1.1-3.tar.gz`.
     pub raw_version: Option<String>,
+    /// Raw `SystemRequirements` field from DESCRIPTION, if present.
+    pub system_requirements: Option<String>,
 }

@@ -28,6 +28,8 @@ pub struct CranPackageEntry {
     /// Header-only packages needed at compile time (e.g. `cpp11`, `Rcpp`).
     pub linking_to: Vec<DepConstraint>,
     pub md5sum: String,
+    /// Raw `SystemRequirements` field from DESCRIPTION, if present.
+    pub system_requirements: Option<String>,
 }
 
 impl CranPackageEntry {
@@ -160,6 +162,7 @@ impl PackageRegistry for CranRegistry {
             requires: entry.requires_as_deps(),
             url: entry.tarball_url(),
             raw_version: Some(entry.raw_version.clone()),
+            system_requirements: entry.system_requirements.clone(),
         })
     }
 }
@@ -228,6 +231,7 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         .map(|s| parse_dep_field(s))
         .unwrap_or_default();
     let md5sum = fields.get("MD5sum").cloned().unwrap_or_default();
+    let system_requirements = fields.get("SystemRequirements").cloned();
 
     Some(CranPackageEntry {
         name,
@@ -237,6 +241,7 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         imports,
         linking_to,
         md5sum,
+        system_requirements,
     })
 }
 
@@ -331,5 +336,21 @@ MD5sum: def789
         let s = req.to_string();
         let req2 = parse_version_req(&s).unwrap();
         assert!(req2.matches(&Version::parse("1.1.0").unwrap()));
+    }
+
+    #[test]
+    fn system_requirements_parsed() {
+        let dcf =
+            "Package: xml2\nVersion: 1.3.6\nSystemRequirements: libxml2 (>= 2.9.0)\nMD5sum: abc\n";
+        let entry = parse_dcf_block(dcf).unwrap();
+        assert_eq!(
+            entry.system_requirements.as_deref(),
+            Some("libxml2 (>= 2.9.0)")
+        );
+
+        // Packages without SystemRequirements get None
+        let dcf2 = "Package: dplyr\nVersion: 1.1.4\nMD5sum: def\n";
+        let entry2 = parse_dcf_block(dcf2).unwrap();
+        assert!(entry2.system_requirements.is_none());
     }
 }
