@@ -20,8 +20,7 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     // If DESCRIPTION exists, import name/r_version/deps from it; CLI args override.
     let description_path = cwd.join(DESCRIPTION_FILE);
     let mut manifest = if description_path.exists() {
-        Manifest::from_description_file(&description_path)
-            .context("Failed to parse DESCRIPTION")?
+        Manifest::from_description_file(&description_path).context("Failed to parse DESCRIPTION")?
     } else {
         Manifest::new(String::new(), None)
     };

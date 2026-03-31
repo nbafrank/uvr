@@ -92,7 +92,8 @@ impl Project {
     pub fn save_manifest(&self) -> Result<()> {
         if self.manifest_source == ManifestSource::Description {
             return Err(UvrError::Other(
-                "Cannot modify DESCRIPTION directly. Run `uvr init` to create a uvr.toml.".to_string(),
+                "Cannot modify DESCRIPTION directly. Run `uvr init` to create a uvr.toml."
+                    .to_string(),
             ));
         }
         self.manifest.write(&self.manifest_path())

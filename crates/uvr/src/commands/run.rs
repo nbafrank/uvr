@@ -6,7 +6,11 @@ use anyhow::{Context, Result};
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::find_r_binary;
 
-pub fn run(script: Option<String>, r_version_override: Option<String>, args: Vec<String>) -> Result<()> {
+pub fn run(
+    script: Option<String>,
+    r_version_override: Option<String>,
+    args: Vec<String>,
+) -> Result<()> {
     // Resolve project (optional — uvr run works outside a project too).
     let (project_library, project_r_constraint) = match Project::find_cwd() {
         Ok(p) => {

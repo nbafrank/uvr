@@ -144,9 +144,9 @@ impl Manifest {
             .unwrap_or("unnamed")
             .to_string();
 
-        let r_version = fields.get("Depends").and_then(|deps| {
-            parse_r_version_from_depends(deps)
-        });
+        let r_version = fields
+            .get("Depends")
+            .and_then(|deps| parse_r_version_from_depends(deps));
 
         let mut dependencies = BTreeMap::new();
         let mut dev_dependencies = BTreeMap::new();
@@ -285,8 +285,7 @@ fn parse_r_version_from_depends(depends: &str) -> Option<String> {
             let rest = entry[1..].trim();
             if rest.is_empty() || rest.starts_with('(') {
                 if let Some(paren) = entry.find('(') {
-                    let inner =
-                        entry[paren + 1..entry.rfind(')').unwrap_or(entry.len())].trim();
+                    let inner = entry[paren + 1..entry.rfind(')').unwrap_or(entry.len())].trim();
                     let version: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
                     if !version.is_empty() {
                         return Some(version);
@@ -373,7 +372,10 @@ Suggests:
         let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
         assert_eq!(m.project.name, "myanalysis");
         assert_eq!(m.project.r_version.as_deref(), Some(">=4.1.0"));
-        assert_eq!(m.project.description.as_deref(), Some("My Analysis Project"));
+        assert_eq!(
+            m.project.description.as_deref(),
+            Some("My Analysis Project")
+        );
     }
 
     #[test]
