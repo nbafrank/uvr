@@ -122,6 +122,10 @@ pub struct RunArgs {
     #[arg(long = "r-version", value_name = "VERSION")]
     pub r_version: Option<String>,
 
+    /// Extra packages to make available for this run (cached, not added to manifest)
+    #[arg(long = "with", value_name = "PKG")]
+    pub with_packages: Vec<String>,
+
     /// R script to execute
     pub script: Option<String>,
 

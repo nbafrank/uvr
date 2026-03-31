@@ -2112,6 +2112,7 @@ dependencies = [
  "indicatif",
  "predicates",
  "reqwest",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",

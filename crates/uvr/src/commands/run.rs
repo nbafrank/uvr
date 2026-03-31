@@ -2,13 +2,16 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
-use uvr_core::project::Project;
-use uvr_core::r_version::detector::find_r_binary;
+use uvr_core::manifest::{DependencySpec, Manifest};
+use uvr_core::project::{ManifestSource, Project};
+use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 
-pub fn run(
+pub async fn run(
     script: Option<String>,
     r_version_override: Option<String>,
+    with_packages: Vec<String>,
     args: Vec<String>,
 ) -> Result<()> {
     // Resolve project (optional — uvr run works outside a project too).
@@ -32,32 +35,40 @@ pub fn run(
         .context("R not found. Install R or use `uvr r install <version>`")?;
 
     let library: PathBuf = project_library.unwrap_or_else(|| {
-        // Outside a project: use a user-level fallback so packages installed
-        // via install.packages() land somewhere predictable.
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("uvr")
             .join("library")
     });
 
+    // Handle --with packages: resolve + install into a cached env.
+    let with_library = if !with_packages.is_empty() {
+        let r_ver = query_r_version(&r_binary).unwrap_or_default();
+        Some(ensure_with_env(&with_packages, &r_ver).await?)
+    } else {
+        None
+    };
+
+    // Build R_LIBS_USER: with-library (if any) prepended to project library.
+    let libs_user = match &with_library {
+        Some(with_lib) => format!("{}:{}", with_lib.display(), library.display()),
+        None => library.to_string_lossy().into_owned(),
+    };
+
     // Derive R's lib directory for DYLD_LIBRARY_PATH so that compiled packages
     // (e.g. rlang) can find libR.dylib at runtime regardless of its embedded install-name.
     let r_lib_dir = r_binary
-        .parent() // …/bin/
-        .and_then(|p| p.parent()) // …/r-versions/4.4.2/
+        .parent()
+        .and_then(|p| p.parent())
         .map(|p| p.join("lib"))
         .unwrap_or_default();
 
     let mut cmd = Command::new(&r_binary);
-    cmd.env("R_LIBS_USER", library.to_string_lossy().as_ref());
+    cmd.env("R_LIBS_USER", &libs_user);
     cmd.env("R_LIBS_SITE", "");
     cmd.env("R_LIBS", "");
     cmd.env("DYLD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
     cmd.env("LD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
-    // Suppress ALL Renviron files so our R_LIBS_USER is not overwritten:
-    //  - R_ENVIRON=""   → skips $R_HOME/etc/Renviron (which sets R_LIBS_USER to
-    //                     ~/Library/R/4.5/library, overriding our value)
-    //  - --no-environ   → skips ~/.Renviron (user customisations)
     cmd.env("R_ENVIRON", "");
     cmd.arg("--no-environ");
 
@@ -75,14 +86,69 @@ pub fn run(
 
     let status = cmd.status().context("Failed to spawn R")?;
     if !status.success() {
-        // Return the exit code to main so it can call process::exit with the
-        // correct code. This preserves the code for the shell while allowing
-        // Drop impls (e.g. TempDir) to run.
         let code = status.code().unwrap_or(1);
         return Err(ScriptExitError(code).into());
     }
 
     Ok(())
+}
+
+/// Ensure the `--with` packages are installed in a cached environment.
+/// Returns the path to the cached library directory.
+async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf> {
+    // Compute a stable cache key from the sorted package list + R version.
+    let mut sorted = packages.to_vec();
+    sorted.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(r_version.as_bytes());
+    for pkg in &sorted {
+        hasher.update(b"\0");
+        hasher.update(pkg.as_bytes());
+    }
+    let hash = format!("{:x}", hasher.finalize());
+    let short_hash = &hash[..12];
+
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".uvr")
+        .join("cache")
+        .join("with-envs")
+        .join(short_hash);
+
+    let lib_dir = cache_dir.join(".uvr").join("library");
+
+    // Check if all requested packages are already installed.
+    let all_installed = sorted
+        .iter()
+        .all(|pkg| lib_dir.join(pkg).join("DESCRIPTION").exists());
+
+    if all_installed {
+        return Ok(lib_dir);
+    }
+
+    // Build a temporary manifest with the --with packages.
+    let mut manifest = Manifest::new("__with__", None);
+    for pkg in &sorted {
+        manifest.add_dep(pkg.clone(), DependencySpec::default(), false);
+    }
+
+    let project = Project {
+        root: cache_dir.clone(),
+        manifest,
+        manifest_source: ManifestSource::Toml,
+    };
+    project
+        .ensure_library_dir()
+        .context("Failed to create --with cache library")?;
+    project
+        .save_manifest()
+        .context("Failed to write --with manifest")?;
+
+    // Resolve and install.
+    let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
+    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4).await?;
+
+    Ok(lib_dir)
 }
 
 /// Sentinel error that carries an R script's exit code.
