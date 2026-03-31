@@ -281,8 +281,8 @@ fn parse_dep_field(field: &str) -> Vec<(String, DependencySpec)> {
 fn parse_r_version_from_depends(depends: &str) -> Option<String> {
     for entry in depends.split(',') {
         let entry = entry.trim();
-        if entry.starts_with('R') {
-            let rest = entry[1..].trim();
+        if let Some(stripped) = entry.strip_prefix('R') {
+            let rest = stripped.trim();
             if rest.is_empty() || rest.starts_with('(') {
                 if let Some(paren) = entry.find('(') {
                     let inner = entry[paren + 1..entry.rfind(')').unwrap_or(entry.len())].trim();
