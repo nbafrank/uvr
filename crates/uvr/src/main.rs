@@ -62,6 +62,9 @@ async fn run() -> Result<()> {
         Commands::Lock(args) => {
             commands::lock::run(args.upgrade).await?;
         }
+        Commands::Doctor => {
+            commands::doctor::run()?;
+        }
         Commands::R(r_args) => match r_args.command {
             RCommands::Install(args) => {
                 commands::r_cmd::install::run(args.version).await?;

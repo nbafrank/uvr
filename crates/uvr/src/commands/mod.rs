@@ -1,5 +1,6 @@
 pub mod add;
 pub mod cache;
+pub mod doctor;
 pub mod init;
 pub mod lock;
 pub mod r_cmd;

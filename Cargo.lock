@@ -2356,6 +2356,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uvr-core",
+ "which",
 ]
 
 [[package]]

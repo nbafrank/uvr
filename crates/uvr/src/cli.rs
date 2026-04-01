@@ -44,6 +44,9 @@ pub enum Commands {
     #[command(name = "r")]
     R(RArgs),
 
+    /// Diagnose environment issues
+    Doctor,
+
     /// Manage the local download cache
     #[command(name = "cache")]
     Cache(CacheArgs),
