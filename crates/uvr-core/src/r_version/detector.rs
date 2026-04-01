@@ -17,12 +17,18 @@ pub struct RInstallation {
 pub fn find_all() -> Vec<RInstallation> {
     let mut found = Vec::new();
 
+    let r_name = if cfg!(target_os = "windows") {
+        "R.exe"
+    } else {
+        "R"
+    };
+
     // Managed installations in ~/.uvr/r-versions/
     if let Some(home) = dirs::home_dir() {
         let versions_dir = home.join(".uvr").join("r-versions");
         if let Ok(entries) = std::fs::read_dir(&versions_dir) {
             for entry in entries.flatten() {
-                let bin = entry.path().join("bin").join("R");
+                let bin = entry.path().join("bin").join(r_name);
                 if bin.exists() {
                     let version = entry.file_name().to_string_lossy().to_string();
                     found.push(RInstallation {
@@ -36,13 +42,35 @@ pub fn find_all() -> Vec<RInstallation> {
     }
 
     // System R on PATH
-    if let Ok(r_path) = which::which("R") {
+    if let Ok(r_path) = which::which(r_name) {
         if let Some(version) = query_r_version(&r_path) {
             found.push(RInstallation {
                 binary: r_path,
                 version,
                 managed: false,
             });
+        }
+    }
+
+    // Windows: check common install locations
+    #[cfg(target_os = "windows")]
+    {
+        let program_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let r_base = std::path::Path::new(&program_files).join("R");
+        if let Ok(entries) = std::fs::read_dir(&r_base) {
+            for entry in entries.flatten() {
+                let bin = entry.path().join("bin").join("R.exe");
+                if bin.exists() && !found.iter().any(|i| i.binary == bin) {
+                    if let Some(version) = query_r_version(&bin) {
+                        found.push(RInstallation {
+                            binary: bin,
+                            version,
+                            managed: false,
+                        });
+                    }
+                }
+            }
         }
     }
 

@@ -28,15 +28,25 @@ find_uvr <- function() {
 #' @return Path string or NULL if not found.
 #' @keywords internal
 .find_uvr_path <- function() {
+  bin_name <- if (.Platform$OS.type == "windows") "uvr.exe" else "uvr"
+
   # Check PATH first
-  path <- Sys.which("uvr")
+  path <- Sys.which(bin_name)
   if (nzchar(path)) return(unname(path))
 
   # Check common install locations
-  candidates <- c(
-    file.path(Sys.getenv("HOME"), ".cargo", "bin", "uvr"),
-    "/usr/local/bin/uvr"
-  )
+  if (.Platform$OS.type == "windows") {
+    candidates <- file.path(Sys.getenv("USERPROFILE"), ".cargo", "bin", "uvr.exe")
+    local_app <- Sys.getenv("LOCALAPPDATA")
+    if (nzchar(local_app)) {
+      candidates <- c(candidates, file.path(local_app, "Programs", "uvr", "uvr.exe"))
+    }
+  } else {
+    candidates <- c(
+      file.path(Sys.getenv("HOME"), ".cargo", "bin", "uvr"),
+      "/usr/local/bin/uvr"
+    )
+  }
   for (candidate in candidates) {
     if (file.exists(candidate)) return(candidate)
   }
@@ -105,8 +115,11 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
     if (arch %in% c("arm64", "aarch64")) "aarch64-apple-darwin" else "x86_64-apple-darwin"
   } else if (os == "unix") {
     if (arch %in% c("aarch64", "arm64")) "aarch64-unknown-linux-gnu" else "x86_64-unknown-linux-gnu"
+  } else if (os == "windows") {
+    # x86_64-pc-windows-msvc runs via emulation on Windows ARM64
+    "x86_64-pc-windows-msvc"
   } else {
-    return(NULL) # Windows not yet supported
+    return(NULL)
   }
 
   # Try latest release
@@ -127,9 +140,14 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
   if (nrow(asset) == 0L) return(NULL)
 
   download_url <- asset$browser_download_url[1L]
-  dest_dir <- file.path(Sys.getenv("HOME"), ".cargo", "bin")
+  if (.Platform$OS.type == "windows") {
+    dest_dir <- file.path(Sys.getenv("USERPROFILE"), ".cargo", "bin")
+  } else {
+    dest_dir <- file.path(Sys.getenv("HOME"), ".cargo", "bin")
+  }
   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
-  dest <- file.path(dest_dir, "uvr")
+  bin_name <- if (.Platform$OS.type == "windows") "uvr.exe" else "uvr"
+  dest <- file.path(dest_dir, bin_name)
 
   message("Downloading uvr from: ", download_url)
   tmp <- tempfile()
@@ -142,20 +160,30 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
   })
   if (!ok) return(NULL)
 
-  # Handle tar.gz or plain binary
+  # Handle tar.gz, zip, or plain binary
   if (grepl("\\.tar\\.gz$", download_url)) {
     exdir <- tempfile("uvr-extract-")
     dir.create(exdir)
     on.exit(unlink(exdir, recursive = TRUE), add = TRUE)
     utils::untar(tmp, exdir = exdir)
-    bin <- list.files(exdir, pattern = "^uvr$", recursive = TRUE, full.names = TRUE)[1L]
+    bin <- list.files(exdir, pattern = paste0("^", bin_name, "$"), recursive = TRUE, full.names = TRUE)[1L]
+    if (is.na(bin)) return(NULL)
+    file.copy(bin, dest, overwrite = TRUE)
+  } else if (grepl("\\.zip$", download_url)) {
+    exdir <- tempfile("uvr-extract-")
+    dir.create(exdir)
+    on.exit(unlink(exdir, recursive = TRUE), add = TRUE)
+    utils::unzip(tmp, exdir = exdir)
+    bin <- list.files(exdir, pattern = paste0("^", bin_name, "$"), recursive = TRUE, full.names = TRUE)[1L]
     if (is.na(bin)) return(NULL)
     file.copy(bin, dest, overwrite = TRUE)
   } else {
     file.copy(tmp, dest, overwrite = TRUE)
   }
 
-  Sys.chmod(dest, "0755")
+  if (.Platform$OS.type != "windows") {
+    Sys.chmod(dest, "0755")
+  }
   dest
 }
 
@@ -166,7 +194,8 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
   cargo <- Sys.which("cargo")
   if (!nzchar(cargo)) {
     # Check common location
-    cargo_candidate <- file.path(Sys.getenv("HOME"), ".cargo", "bin", "cargo")
+    home <- if (.Platform$OS.type == "windows") Sys.getenv("USERPROFILE") else Sys.getenv("HOME")
+    cargo_candidate <- file.path(home, ".cargo", "bin", "cargo")
     if (file.exists(cargo_candidate)) {
       cargo <- cargo_candidate
     } else {
@@ -186,7 +215,9 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
     stop("cargo install failed with exit code ", rc, call. = FALSE)
   }
 
-  path <- file.path(Sys.getenv("HOME"), ".cargo", "bin", "uvr")
+  home <- if (.Platform$OS.type == "windows") Sys.getenv("USERPROFILE") else Sys.getenv("HOME")
+  bin_name <- if (.Platform$OS.type == "windows") "uvr.exe" else "uvr"
+  path <- file.path(home, ".cargo", "bin", bin_name)
   if (!file.exists(path)) {
     stop("cargo install succeeded but uvr binary not found at expected location.", call. = FALSE)
   }

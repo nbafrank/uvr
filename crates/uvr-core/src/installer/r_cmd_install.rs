@@ -31,40 +31,83 @@ impl RCmdInstall {
             .unwrap_or_default();
         let r_lib_str = r_lib_dir.to_string_lossy();
 
-        // On macOS, include Homebrew library/include paths so that packages with
-        // system library dependencies (freetype, harfbuzz, etc.) can find them.
-        // Homebrew on Apple Silicon installs to /opt/homebrew; Intel Macs use /usr/local.
-        let (brew_lib, brew_inc, brew_pkgconfig) = if cfg!(target_arch = "aarch64") {
-            (
-                "/opt/homebrew/lib",
-                "/opt/homebrew/include",
-                "/opt/homebrew/lib/pkgconfig",
-            )
-        } else {
-            (
-                "/usr/local/lib",
-                "/usr/local/include",
-                "/usr/local/lib/pkgconfig",
-            )
-        };
+        let mut cmd = Command::new(&self.r_binary);
+        cmd.args([
+            "CMD",
+            "INSTALL",
+            &format!("--library={lib_str}"),
+            "--no-test-load",
+            "--no-staged-install",
+            &tarball_str,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-        let output = Command::new(&self.r_binary)
-            .args([
-                "CMD",
-                "INSTALL",
-                &format!("--library={lib_str}"),
-                "--no-test-load",
-                "--no-staged-install", // avoid staging-dir issues with lazy loading on macOS
-                &tarball_str,
-            ])
-            .env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
-            .env("LD_LIBRARY_PATH", r_lib_str.as_ref())
-            .env("PKG_CONFIG_PATH", brew_pkgconfig)
-            .env("LDFLAGS", format!("-L{brew_lib}"))
-            .env("CPPFLAGS", format!("-I{brew_inc}"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()?;
+        if cfg!(target_os = "windows") {
+            // On Windows, add Rtools to PATH if detected.
+            // Check RTOOLS*_HOME env vars first (set by Rtools installers),
+            // then fall back to common filesystem locations.
+            let mut path_ext = String::new();
+            let rtools_candidates: Vec<String> = [
+                std::env::var("RTOOLS45_HOME").ok(),
+                std::env::var("RTOOLS44_HOME").ok(),
+                std::env::var("RTOOLS43_HOME").ok(),
+                Some("C:\\rtools45".to_string()),
+                Some("C:\\rtools44".to_string()),
+                Some("C:\\rtools43".to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            for rtools in &rtools_candidates {
+                let rtools_path = std::path::Path::new(rtools);
+                if rtools_path.exists() {
+                    let usr_bin = rtools_path.join("usr").join("bin");
+                    let mingw_bin = rtools_path
+                        .join("x86_64-w64-mingw32.static.posix")
+                        .join("bin");
+                    if usr_bin.exists() {
+                        path_ext.push_str(&usr_bin.to_string_lossy());
+                        path_ext.push(';');
+                    }
+                    if mingw_bin.exists() {
+                        path_ext.push_str(&mingw_bin.to_string_lossy());
+                        path_ext.push(';');
+                    }
+                    break;
+                }
+            }
+            if !path_ext.is_empty() {
+                let existing_path = std::env::var("PATH").unwrap_or_default();
+                cmd.env("PATH", format!("{path_ext}{existing_path}"));
+            }
+        } else {
+            // On macOS/Linux, set library paths and Homebrew paths.
+            cmd.env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
+                .env("LD_LIBRARY_PATH", r_lib_str.as_ref());
+
+            if cfg!(target_os = "macos") {
+                let (brew_lib, brew_inc, brew_pkgconfig) = if cfg!(target_arch = "aarch64") {
+                    (
+                        "/opt/homebrew/lib",
+                        "/opt/homebrew/include",
+                        "/opt/homebrew/lib/pkgconfig",
+                    )
+                } else {
+                    (
+                        "/usr/local/lib",
+                        "/usr/local/include",
+                        "/usr/local/lib/pkgconfig",
+                    )
+                };
+                cmd.env("PKG_CONFIG_PATH", brew_pkgconfig)
+                    .env("LDFLAGS", format!("-L{brew_lib}"))
+                    .env("CPPFLAGS", format!("-I{brew_inc}"));
+            }
+        }
+
+        let output = cmd.output()?;
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);

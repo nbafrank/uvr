@@ -178,14 +178,26 @@ pub async fn install_from_lockfile(
         .parent()
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf());
+    let managed_versions_dir = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
     let libr_path: Option<std::path::PathBuf> = if let Some(ref r_home) = r_home_opt {
-        if r_home.to_string_lossy().contains(".uvr/r-versions") {
-            let _ = patch_renviron_site(r_home);
-            // Patch all R dylib install names so BLAS/LAPACK sibling libraries
-            // (libRlapack, libRblas, libgfortran) are found at the managed path
-            // rather than the original CRAN framework path. Idempotent.
-            patch_r_dylibs(r_home);
-            Some(r_home.join("lib").join("libR.dylib"))
+        if managed_versions_dir
+            .as_ref()
+            .map(|d| r_home.starts_with(d))
+            .unwrap_or(false)
+        {
+            // macOS-specific: patch dylib install names and Renviron.site
+            if cfg!(target_os = "macos") {
+                let _ = patch_renviron_site(r_home);
+                patch_r_dylibs(r_home);
+            }
+            let libr_name = if cfg!(target_os = "macos") {
+                "libR.dylib"
+            } else if cfg!(target_os = "windows") {
+                "R.dll"
+            } else {
+                "libR.so"
+            };
+            Some(r_home.join("lib").join(libr_name))
         } else {
             None
         }
@@ -195,33 +207,28 @@ pub async fn install_from_lockfile(
 
     // Retroactively patch already-installed binary packages whose .so files still
     // reference the CRAN framework libR path (installed before patching support was
-    // added). Idempotent: no-op when the .so already points to the managed R path.
-    if let Some(ref libr) = libr_path {
-        if libr.exists() {
-            for pkg in &lockfile.packages {
-                let pkg_dir = library.join(&pkg.name);
-                if pkg_dir.exists() {
-                    patch_installed_so_files(&pkg_dir, libr);
+    // added). macOS only — Windows DLLs use PATH, not install names.
+    if cfg!(target_os = "macos") {
+        if let Some(ref libr) = libr_path {
+            if libr.exists() {
+                for pkg in &lockfile.packages {
+                    let pkg_dir = library.join(&pkg.name);
+                    if pkg_dir.exists() {
+                        patch_installed_so_files(&pkg_dir, libr);
+                    }
                 }
             }
         }
     }
 
-    let r_minor = query_r_version(&r_binary)
-        .map(|v| {
-            let parts: Vec<&str> = v.splitn(3, '.').collect();
-            if parts.len() >= 2 {
-                format!("{}.{}", parts[0], parts[1])
-            } else {
-                v
-            }
-        })
+    let r_minor_str = query_r_version(&r_binary)
+        .map(|v| r_minor(&v))
         .unwrap_or_else(|| "4.4".to_string());
 
     // Fetch P3M binary index (gracefully returns empty if unavailable).
     let p3m = match Platform::detect() {
-        Ok(platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64)) => {
-            P3MBinaryIndex::fetch(&client, &r_minor, platform).await
+        Ok(platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64 | Platform::WindowsX86_64)) => {
+            P3MBinaryIndex::fetch(&client, &r_minor_str, platform).await
         }
         _ => P3MBinaryIndex::empty(),
     };

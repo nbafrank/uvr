@@ -5,12 +5,13 @@ use tracing::info;
 
 use crate::error::{Result, UvrError};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     MacOsArm64,
     MacOsX86_64,
     LinuxX86_64,
     LinuxArm64,
+    WindowsX86_64,
 }
 
 impl Platform {
@@ -23,12 +24,22 @@ impl Platform {
         return Ok(Platform::LinuxX86_64);
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         return Ok(Platform::LinuxArm64);
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        return Ok(Platform::WindowsX86_64);
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(UvrError::UnsupportedPlatform(format!(
             "{}/{}",
             std::env::consts::OS,
             std::env::consts::ARCH
         )))
+    }
+
+    pub fn is_windows(&self) -> bool {
+        matches!(self, Platform::WindowsX86_64)
+    }
+
+    pub fn is_macos(&self) -> bool {
+        matches!(self, Platform::MacOsArm64 | Platform::MacOsX86_64)
     }
 
     /// Return the download URL for a given R version.
@@ -46,6 +57,9 @@ impl Platform {
             Platform::LinuxArm64 => {
                 format!("https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_arm64.deb")
             }
+            Platform::WindowsX86_64 => {
+                format!("https://cran.r-project.org/bin/windows/base/R-{version}-win.exe")
+            }
         }
     }
 }
@@ -62,7 +76,8 @@ pub async fn download_and_install_r(
         .join("r-versions")
         .join(version);
 
-    let r_binary = install_dir.join("bin").join("R");
+    let r_binary_name = if platform.is_windows() { "R.exe" } else { "R" };
+    let r_binary = install_dir.join("bin").join(r_binary_name);
     if r_binary.exists() {
         info!("R {version} already installed at {}", install_dir.display());
         return Ok(install_dir);
@@ -87,6 +102,9 @@ pub async fn download_and_install_r(
         }
         Platform::LinuxX86_64 | Platform::LinuxArm64 => {
             install_r_linux(&bytes, version, &install_dir)?;
+        }
+        Platform::WindowsX86_64 => {
+            install_r_windows(&bytes, version, &install_dir)?;
         }
     }
 
@@ -482,6 +500,41 @@ fn collect_payloads(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Windows: Inno Setup `.exe` → silent install to `dest` without admin rights.
+///
+/// The `/CURRENTUSER` flag tells Inno Setup to install for the current user only,
+/// avoiding the need for admin/UAC elevation — a key differentiator over rig.
+fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let exe_path = tmp.path().join(format!("R-{version}-win.exe"));
+    std::fs::write(&exe_path, exe_bytes)?;
+
+    info!("Installing R {version} silently to {}", dest.display());
+
+    // Quote the /DIR= value — Windows usernames frequently contain spaces
+    // (e.g. C:\Users\John Smith\...) and Inno Setup splits on unquoted spaces.
+    let dir_arg = format!("/DIR=\"{}\"", dest.to_string_lossy());
+    let status = Command::new(&exe_path)
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            &dir_arg,
+            "/CURRENTUSER",
+            "/NOICONS",
+            "/NORESTART",
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err(UvrError::Other(format!(
+            "R {version} silent installer failed (exit {})",
+            status.code().unwrap_or(-1)
+        )));
+    }
+
+    Ok(())
+}
+
 /// Linux: `.deb` → `ar x` → `data.tar.gz` → extract
 fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -564,6 +617,11 @@ pub async fn fetch_available_versions(
         Platform::LinuxX86_64 | Platform::LinuxArm64 => {
             ("https://cran.r-project.org/src/base/", "R-", ".tar.gz")
         }
+        Platform::WindowsX86_64 => (
+            "https://cran.r-project.org/bin/windows/base/",
+            "R-",
+            "-win.exe",
+        ),
     };
 
     let html = client

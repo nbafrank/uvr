@@ -3,48 +3,102 @@ use std::process::Command;
 
 use crate::error::{Result, UvrError};
 
-/// Extract a pre-built R binary package (`.tgz`) directly into `library`.
+/// Extract a pre-built R binary package into `library`.
 ///
-/// P3M binary packages are gzip-compressed tarballs where the top-level entry
-/// is the package directory: `<pkg>/DESCRIPTION`, `<pkg>/R/`, `<pkg>/libs/`, …
-/// A plain `tar xf pkg.tgz -C <library>` places it at `<library>/<pkg>/`.
+/// On macOS: `.tgz` (gzip-compressed tarball) extracted with `tar`.
+/// On Windows: `.zip` extracted with the `zip` crate.
 ///
-/// `libr_path`: when set (uvr-managed R), the `.so` files inside the extracted
-/// package are patched so their `libR.dylib` reference points to the managed R
-/// installation rather than the CRAN framework path they were compiled against.
-/// This is necessary because P3M binary packages embed an absolute framework path
-/// (`/Library/Frameworks/R.framework/…`) that only exists for system R installs.
+/// `libr_path`: when set (uvr-managed R on macOS), the `.so` files inside the
+/// extracted package are patched so their `libR.dylib` reference points to the
+/// managed R installation rather than the CRAN framework path.
 pub fn install_binary_package(
     tarball: &Path,
     library: &Path,
     package_name: &str,
     libr_path: Option<&Path>,
 ) -> Result<()> {
-    let out = Command::new("tar")
-        .args([
-            "xf",
-            &tarball.to_string_lossy(),
-            "-C",
-            &library.to_string_lossy(),
-        ])
-        .output()?;
+    let is_zip = tarball
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
 
-    if !out.status.success() {
-        return Err(UvrError::Other(format!(
-            "Binary extraction failed for '{}': {}",
-            package_name,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
+    if is_zip {
+        extract_zip(tarball, library, package_name)?;
+    } else {
+        let out = Command::new("tar")
+            .args([
+                "xf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &library.to_string_lossy(),
+            ])
+            .output()?;
 
-    // Patch libR.dylib references in all .so files when using managed R.
-    if let Some(libr) = libr_path {
-        if libr.exists() {
-            let pkg_dir = library.join(package_name);
-            let _ = patch_so_libr_refs(&pkg_dir, libr);
+        if !out.status.success() {
+            return Err(UvrError::Other(format!(
+                "Binary extraction failed for '{}': {}",
+                package_name,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
         }
     }
 
+    // Patch libR.dylib references in all .so files when using managed R (macOS only).
+    if cfg!(target_os = "macos") {
+        if let Some(libr) = libr_path {
+            if libr.exists() {
+                let pkg_dir = library.join(package_name);
+                let _ = patch_so_libr_refs(&pkg_dir, libr);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract a `.zip` binary package into the library directory.
+///
+/// Validates that all zip entries extract within `library` to prevent
+/// path traversal attacks (zip-slip).
+fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()> {
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        UvrError::Other(format!("Failed to open zip for '{}': {}", package_name, e))
+    })?;
+
+    // Guard against zip-slip: verify every entry stays within library.
+    let canonical_lib = library
+        .canonicalize()
+        .unwrap_or_else(|_| library.to_path_buf());
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to read zip entry for '{}': {}",
+                package_name, e
+            ))
+        })?;
+        let outpath = canonical_lib.join(entry.mangled_name());
+        if !outpath.starts_with(&canonical_lib) {
+            return Err(UvrError::Other(format!(
+                "Zip path traversal detected in package '{}': {}",
+                package_name,
+                entry.name()
+            )));
+        }
+    }
+
+    // Re-open archive (iteration consumed it) and extract.
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        UvrError::Other(format!("Failed to open zip for '{}': {}", package_name, e))
+    })?;
+    archive.extract(library).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to extract zip for '{}': {}",
+            package_name, e
+        ))
+    })?;
     Ok(())
 }
 

@@ -29,10 +29,10 @@ impl P3MBinaryIndex {
     /// Fetch (and cache) the P3M binary PACKAGES index for the given R minor version
     /// and platform. Returns an empty index on any error so callers fall back to source.
     pub async fn fetch(client: &reqwest::Client, r_minor: &str, platform: Platform) -> Self {
-        let Some(arch) = platform_arch(platform) else {
-            return Self::empty(); // unsupported platform (e.g. Linux — handle later)
+        let Some(info) = platform_info(platform) else {
+            return Self::empty(); // unsupported platform (e.g. Linux — no P3M binaries)
         };
-        match fetch_inner(client, r_minor, arch).await {
+        match fetch_inner(client, r_minor, info).await {
             Ok(idx) => idx,
             Err(e) => {
                 tracing::warn!(
@@ -56,16 +56,17 @@ impl P3MBinaryIndex {
 async fn fetch_inner(
     client: &reqwest::Client,
     r_minor: &str,
-    arch: &str,
+    platform_info: PlatformInfo,
 ) -> Result<P3MBinaryIndex> {
-    let cache = cache_path(r_minor, arch);
+    let cache = cache_path(r_minor, platform_info.cache_key);
 
     // Use today's cached file if present.
     let text = if let Ok(cached) = std::fs::read_to_string(&cache) {
         cached
     } else {
         let url = format!(
-            "https://packagemanager.posit.co/cran/latest/bin/macosx/{arch}/contrib/{r_minor}/PACKAGES.gz"
+            "https://packagemanager.posit.co/cran/latest/bin/{}/contrib/{r_minor}/PACKAGES.gz",
+            platform_info.url_segment
         );
         info!("Fetching P3M binary index from {url}");
         let bytes = client
@@ -85,12 +86,15 @@ async fn fetch_inner(
         text
     };
 
-    Ok(parse_index(&text, r_minor, arch))
+    Ok(parse_index(&text, r_minor, &platform_info))
 }
 
-fn parse_index(text: &str, r_minor: &str, arch: &str) -> P3MBinaryIndex {
-    let base =
-        format!("https://packagemanager.posit.co/cran/latest/bin/macosx/{arch}/contrib/{r_minor}");
+fn parse_index(text: &str, r_minor: &str, info: &PlatformInfo) -> P3MBinaryIndex {
+    let base = format!(
+        "https://packagemanager.posit.co/cran/latest/bin/{}/contrib/{r_minor}",
+        info.url_segment
+    );
+    let ext = info.pkg_ext;
     let mut packages = HashMap::new();
     for block in text.split("\n\n") {
         let block = block.trim();
@@ -107,7 +111,7 @@ fn parse_index(text: &str, r_minor: &str, arch: &str) -> P3MBinaryIndex {
             }
         }
         if let (Some(n), Some(v)) = (name, version) {
-            let url = format!("{base}/{n}_{v}.tgz");
+            let url = format!("{base}/{n}_{v}.{ext}");
             // Normalize the version (e.g. "4.6.0-1" → "4.6.0.1") to match the
             // semver-normalized version stored in LockedPackage.
             packages.insert(n, (normalize_version(&v), url));
@@ -117,21 +121,43 @@ fn parse_index(text: &str, r_minor: &str, arch: &str) -> P3MBinaryIndex {
     P3MBinaryIndex { packages }
 }
 
-/// Map platform to the arch string used in P3M URLs (`big-sur-arm64` etc.).
-/// Returns `None` for platforms without macOS binary support.
-fn platform_arch(platform: Platform) -> Option<&'static str> {
+/// Platform-specific info for P3M URL construction.
+struct PlatformInfo {
+    /// URL segment after `/bin/` (e.g. `macosx/big-sur-arm64` or `windows`).
+    url_segment: &'static str,
+    /// File extension for binary packages (`tgz` or `zip`).
+    pkg_ext: &'static str,
+    /// Cache key suffix.
+    cache_key: &'static str,
+}
+
+/// Map platform to P3M URL info. Returns `None` for platforms without binary support.
+fn platform_info(platform: Platform) -> Option<PlatformInfo> {
     match platform {
-        Platform::MacOsArm64 => Some("big-sur-arm64"),
-        Platform::MacOsX86_64 => Some("big-sur-x86_64"),
-        _ => None,
+        Platform::MacOsArm64 => Some(PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        }),
+        Platform::MacOsX86_64 => Some(PlatformInfo {
+            url_segment: "macosx/big-sur-x86_64",
+            cache_key: "macos-x86_64",
+            pkg_ext: "tgz",
+        }),
+        Platform::WindowsX86_64 => Some(PlatformInfo {
+            url_segment: "windows",
+            cache_key: "windows",
+            pkg_ext: "zip",
+        }),
+        _ => None, // Linux — no P3M binaries yet
     }
 }
 
-fn cache_path(r_minor: &str, arch: &str) -> PathBuf {
+fn cache_path(r_minor: &str, key: &str) -> PathBuf {
     let date = Local::now().format("%Y-%m-%d").to_string();
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".uvr")
         .join("cache")
-        .join(format!("p3m-{r_minor}-{arch}-{date}.txt"))
+        .join(format!("p3m-{r_minor}-{key}-{date}.txt"))
 }
