@@ -188,6 +188,9 @@ uvr tree
 | `uvr r list --all` | Show all available R versions (fetched from CRAN) |
 | `uvr r use <ver>` | Set R version constraint in `uvr.toml` |
 | `uvr r pin <ver>` | Write exact version to `.r-version` |
+| `uvr export` | Export lockfile to renv.lock format |
+| `uvr export -o renv.lock` | Export to a file |
+| `uvr self-update` | Update uvr itself to the latest GitHub release |
 | `uvr doctor` | Diagnose environment issues (R, build tools, project status) |
 | `uvr completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `uvr cache clean` | Remove all cached package downloads |

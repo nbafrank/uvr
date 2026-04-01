@@ -47,8 +47,14 @@ pub enum Commands {
     /// Show the dependency tree
     Tree(TreeArgs),
 
+    /// Export lockfile to other formats (e.g. renv.lock)
+    Export(ExportArgs),
+
     /// Generate shell completions
     Completions(CompletionsArgs),
+
+    /// Update uvr itself to the latest release
+    SelfUpdate,
 
     /// Manage R versions
     #[command(name = "r")]
@@ -185,6 +191,21 @@ pub struct TreeArgs {
     /// Maximum display depth
     #[arg(long, value_name = "N")]
     pub depth: Option<usize>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  export
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Output format (currently: renv)
+    #[arg(long, default_value = "renv")]
+    pub format: String,
+
+    /// Output file path (prints to stdout if omitted)
+    #[arg(short, long)]
+    pub output: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────

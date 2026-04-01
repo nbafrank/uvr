@@ -14,12 +14,17 @@ path = "src/main.rs"
 uvr-core = { path = "../uvr-core" }
 tokio.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
 console.workspace = true
 indicatif.workspace = true
 dirs.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

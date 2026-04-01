@@ -12,7 +12,7 @@ homepage = "https://github.com/frgrz/uvr"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["stream", "gzip"] }
+reqwest = { version = "0.12", features = ["stream", "gzip", "json"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 semver = { version = "1", features = ["serde"] }

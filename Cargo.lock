@@ -2357,16 +2357,21 @@ dependencies = [
  "clap_complete",
  "console",
  "dirs",
+ "flate2",
  "indicatif",
  "predicates",
  "reqwest",
+ "serde",
+ "serde_json",
  "sha2",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uvr-core",
  "which",
+ "zip",
 ]
 
 [[package]]

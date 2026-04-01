@@ -68,8 +68,18 @@ async fn run() -> Result<()> {
         Commands::Tree(args) => {
             commands::tree::run(args.depth)?;
         }
+        Commands::Export(args) => {
+            let format: commands::export::ExportFormat = args
+                .format
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+            commands::export::run(format, args.output)?;
+        }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
+        }
+        Commands::SelfUpdate => {
+            commands::self_update::run().await?;
         }
         Commands::Doctor => {
             commands::doctor::run()?;
