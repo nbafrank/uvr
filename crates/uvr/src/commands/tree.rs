@@ -52,7 +52,7 @@ pub fn run(depth: Option<usize>) -> Result<()> {
     let mut ctx = TreeCtx {
         pkg_map: &pkg_map,
         max_depth,
-        visited: HashSet::new(),
+        ancestors: HashSet::new(),
     };
 
     for (i, root) in roots.iter().enumerate() {
@@ -76,7 +76,10 @@ pub fn run(depth: Option<usize>) -> Result<()> {
 struct TreeCtx<'a> {
     pkg_map: &'a HashMap<&'a str, (&'a str, &'a [String])>,
     max_depth: usize,
-    visited: HashSet<String>,
+    /// Tracks packages on the current path from root to this node.
+    /// A package is only a cycle if it appears in its own ancestor chain,
+    /// NOT just because it was visited in a different branch (diamond deps).
+    ancestors: HashSet<String>,
 }
 
 fn print_node(
@@ -97,8 +100,8 @@ fn print_node(
         String::new()
     };
 
-    // Detect circular reference
-    let is_cycle = ctx.visited.contains(name);
+    // A true cycle: this package is an ancestor of itself in the current path.
+    let is_cycle = ctx.ancestors.contains(name);
     let cycle_tag = if is_cycle {
         format!(" {}", style("(*)").yellow())
     } else {
@@ -115,7 +118,7 @@ fn print_node(
         return;
     }
 
-    ctx.visited.insert(name.to_string());
+    ctx.ancestors.insert(name.to_string());
 
     let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
 
@@ -125,5 +128,5 @@ fn print_node(
         print_node(dep, ctx, &child_prefix, child_last, false, depth + 1);
     }
 
-    ctx.visited.remove(name);
+    ctx.ancestors.remove(name);
 }

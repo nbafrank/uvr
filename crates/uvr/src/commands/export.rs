@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use console::style;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -35,27 +36,10 @@ pub fn run(format: ExportFormat, output: Option<String>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ExportFormat {
+    /// Export to renv.lock format
     Renv,
-}
-
-impl std::str::FromStr for ExportFormat {
-    type Err = String;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "renv" | "renv.lock" => Ok(ExportFormat::Renv),
-            _ => Err(format!("Unknown format: '{s}'. Supported: renv")),
-        }
-    }
-}
-
-impl std::fmt::Display for ExportFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExportFormat::Renv => write!(f, "renv"),
-        }
-    }
 }
 
 /// Export to renv.lock format.

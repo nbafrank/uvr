@@ -39,6 +39,13 @@ pub async fn resolve_only(project: &Project) -> Result<Lockfile> {
     resolve_lockfile(project, &client, false).await
 }
 
+/// Resolve with upgrade=true WITHOUT writing the lockfile.
+/// Used by `uvr update --dry-run`.
+pub async fn resolve_only_upgraded(project: &Project) -> Result<Lockfile> {
+    let client = build_client()?;
+    resolve_lockfile(project, &client, true).await
+}
+
 /// Core resolution logic shared by `resolve_and_lock` and `resolve_only`.
 async fn resolve_lockfile(
     project: &Project,

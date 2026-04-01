@@ -69,11 +69,7 @@ async fn run() -> Result<()> {
             commands::tree::run(args.depth)?;
         }
         Commands::Export(args) => {
-            let format: commands::export::ExportFormat = args
-                .format
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
-            commands::export::run(format, args.output)?;
+            commands::export::run(args.format, args.output)?;
         }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;

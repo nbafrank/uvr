@@ -1,6 +1,8 @@
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::commands::export::ExportFormat;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "uvr",
@@ -200,8 +202,8 @@ pub struct TreeArgs {
 #[derive(Debug, Args)]
 pub struct ExportArgs {
     /// Output format (currently: renv)
-    #[arg(long, default_value = "renv")]
-    pub format: String,
+    #[arg(long, value_enum, default_value = "renv")]
+    pub format: ExportFormat,
 
     /// Output file path (prints to stdout if omitted)
     #[arg(short, long)]

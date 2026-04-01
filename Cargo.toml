@@ -7,8 +7,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["uvr contributors"]
 license = "MIT"
-repository = "https://github.com/frgrz/uvr"
-homepage = "https://github.com/frgrz/uvr"
+repository = "https://github.com/nbafrank/uvr"
+homepage = "https://github.com/nbafrank/uvr"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

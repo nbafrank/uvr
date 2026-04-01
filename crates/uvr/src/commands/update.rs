@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use console::style;
 
+use uvr_core::lockfile::Lockfile;
 use uvr_core::project::Project;
 
-use crate::commands::lock::resolve_and_lock;
+use crate::commands::lock::{resolve_and_lock, resolve_only_upgraded};
 use crate::commands::sync::install_from_lockfile;
 
 pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()> {
@@ -22,7 +23,6 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
         .unwrap_or_default();
 
     if packages.is_empty() {
-        // Update all: full re-resolve with upgrade=true
         println!("{} Updating all packages...", style("→").blue().bold());
     } else {
         println!(
@@ -49,16 +49,59 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
     }
 
     // Re-resolve with upgrade=true (fetches fresh index, ignores locked versions).
-    let new_lockfile = resolve_and_lock(&project, true).await?;
+    // For --dry-run, resolve without writing the lockfile.
+    let new_lockfile: Lockfile = if dry_run {
+        resolve_only_upgraded(&project).await?
+    } else {
+        resolve_and_lock(&project, true).await?
+    };
+
+    // When specific packages are requested, merge back old locked versions for
+    // packages NOT in the update set. This keeps non-targeted packages pinned.
+    let effective_lockfile = if let (false, Some(old_lf)) = (packages.is_empty(), &old_lockfile) {
+        let old_pkg_map: std::collections::HashMap<&str, &uvr_core::lockfile::LockedPackage> =
+            old_lf
+                .packages
+                .iter()
+                .map(|p| (p.name.as_str(), p))
+                .collect();
+
+        let mut merged_packages = Vec::new();
+        for pkg in &new_lockfile.packages {
+            if packages.contains(&pkg.name) || packages.iter().any(|p| p == &pkg.name) {
+                // Requested for update — use the new version
+                merged_packages.push(pkg.clone());
+            } else if let Some(old_pkg) = old_pkg_map.get(pkg.name.as_str()) {
+                // Not requested — keep the old version
+                merged_packages.push((*old_pkg).clone());
+            } else {
+                // New transitive dep — keep it
+                merged_packages.push(pkg.clone());
+            }
+        }
+
+        let mut merged = Lockfile {
+            r: new_lockfile.r.clone(),
+            packages: merged_packages,
+        };
+        merged.packages.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Write the merged lockfile (unless dry-run, which doesn't reach here)
+        if !dry_run {
+            project
+                .save_lockfile(&merged)
+                .context("Failed to write uvr.lock")?;
+        }
+
+        merged
+    } else {
+        new_lockfile
+    };
 
     // Compute diff
     let mut updated = Vec::new();
     let mut added = Vec::new();
-    for pkg in &new_lockfile.packages {
-        let dominated = !packages.is_empty() && !packages.contains(&pkg.name);
-        if dominated {
-            continue;
-        }
+    for pkg in &effective_lockfile.packages {
         match old_versions.get(&pkg.name) {
             Some(old_ver) if old_ver != &pkg.version => {
                 updated.push((&pkg.name, old_ver.as_str(), pkg.version.as_str()));
@@ -102,12 +145,12 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
 
     if dry_run {
         println!(
-            "\n{} Dry run — lockfile updated but packages not installed",
+            "\n{} Dry run — no changes written",
             style("!").yellow().bold()
         );
     } else {
         // Install updated packages
-        install_from_lockfile(&project, &new_lockfile, jobs).await?;
+        install_from_lockfile(&project, &effective_lockfile, jobs).await?;
     }
 
     Ok(())

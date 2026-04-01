@@ -1,7 +1,6 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use console::style;
+use sha2::{Digest, Sha256};
 
 pub async fn run() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
@@ -44,6 +43,21 @@ pub async fn run() -> Result<()> {
             )
         })?;
 
+    // Fetch the checksum file if available
+    let expected_checksum =
+        if let Some(checksums_asset) = release.assets.iter().find(|a| a.name == "sha256sums.txt") {
+            let checksums_text = client
+                .get(&checksums_asset.browser_download_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .text()
+                .await?;
+            parse_checksum(&checksums_text, &asset_name)
+        } else {
+            None
+        };
+
     println!("  Downloading {asset_name}...");
     let bytes = client
         .get(&asset_url)
@@ -52,6 +66,19 @@ pub async fn run() -> Result<()> {
         .error_for_status()?
         .bytes()
         .await?;
+
+    // Verify checksum
+    if let Some(expected) = &expected_checksum {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual = hex::encode(hasher.finalize());
+        if actual != *expected {
+            anyhow::bail!(
+                "Checksum mismatch for {asset_name}!\n  Expected: {expected}\n  Got:      {actual}"
+            );
+        }
+        println!("  {} SHA256 checksum verified", style("✓").green());
+    }
 
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
@@ -82,16 +109,23 @@ pub async fn run() -> Result<()> {
     let backup_path = bin_dir.join(format!("{bin_name}.bak"));
     // Remove old backup if exists
     let _ = std::fs::remove_file(&backup_path);
-    // Move current → backup
+
+    // On Windows, a running binary can't be deleted but CAN be renamed.
+    // Move current → backup, then move new → current.
     std::fs::rename(&current_exe, &backup_path).context("Failed to back up current binary")?;
-    // Move new → current
     if let Err(e) = std::fs::rename(&tmp_path, &current_exe) {
         // Restore from backup on failure
         let _ = std::fs::rename(&backup_path, &current_exe);
         return Err(e).context("Failed to replace binary");
     }
-    // Clean up backup
-    let _ = std::fs::remove_file(&backup_path);
+
+    // On Unix, clean up backup immediately. On Windows, leave it — the old
+    // binary is still locked by this running process and will be cleaned up
+    // on the next self-update invocation (see "Remove old backup" above).
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::fs::remove_file(&backup_path);
+    }
 
     println!("{} Updated to v{latest}", style("✓").green().bold());
     Ok(())
@@ -114,8 +148,12 @@ fn detect_target() -> &'static str {
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
-    parse(latest) > parse(current)
+    let latest = semver::Version::parse(latest).ok();
+    let current = semver::Version::parse(current).ok();
+    match (latest, current) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    }
 }
 
 fn extract_binary(archive_bytes: &[u8], bin_name: &str, ext: &str) -> Result<Vec<u8>> {
@@ -173,6 +211,19 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease>
     resp.json().await.context("Failed to parse release JSON")
 }
 
+fn parse_checksum(checksums_text: &str, asset_name: &str) -> Option<String> {
+    for line in checksums_text.lines() {
+        // Format: "<hash>  <filename>" or "<hash> <filename>"
+        let mut parts = line.split_whitespace();
+        if let (Some(hash), Some(name)) = (parts.next(), parts.next()) {
+            if name == asset_name {
+                return Some(hash.to_lowercase());
+            }
+        }
+    }
+    None
+}
+
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
@@ -185,9 +236,29 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-/// Get the path to a temporary file in the same directory as the binary.
-/// This ensures the rename is atomic (same filesystem).
-#[allow(dead_code)]
-fn temp_in_dir(dir: &std::path::Path, prefix: &str) -> PathBuf {
-    dir.join(format!("{prefix}.{}.tmp", std::process::id()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_newer() {
+        assert!(is_newer("0.2.0", "0.1.0"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        assert!(!is_newer("0.1.0", "0.1.0"));
+        assert!(!is_newer("0.1.0", "0.2.0"));
+        // Pre-release: 0.2.0-rc.1 is NOT newer than 0.2.0 (semver rules)
+        assert!(!is_newer("0.2.0-rc.1", "0.2.0"));
+        // But 0.2.0 IS newer than 0.2.0-rc.1
+        assert!(is_newer("0.2.0", "0.2.0-rc.1"));
+    }
+
+    #[test]
+    fn test_parse_checksum() {
+        let text = "abc123  uvr-x86_64-unknown-linux-gnu.tar.gz\ndef456  uvr-aarch64-apple-darwin.tar.gz\n";
+        assert_eq!(
+            parse_checksum(text, "uvr-aarch64-apple-darwin.tar.gz"),
+            Some("def456".to_string())
+        );
+        assert_eq!(parse_checksum(text, "uvr-nonexistent.tar.gz"), None);
+    }
 }
