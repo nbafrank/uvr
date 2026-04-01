@@ -91,6 +91,12 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
 #' @return Path to binary or NULL if unavailable.
 #' @keywords internal
 .try_install_binary <- function() {
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    message("Package 'jsonlite' is needed to download pre-built binaries.")
+    message("Install it with: install.packages('jsonlite')")
+    return(NULL)
+  }
+
   os <- .Platform$OS.type
   arch <- Sys.info()[["machine"]]
 
@@ -105,14 +111,12 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
 
   # Try latest release
   release_url <- "https://api.github.com/repos/nbafrank/uvr/releases/latest"
+  con <- tryCatch(url(release_url), error = function(e) NULL)
+  if (is.null(con)) return(NULL)
+  on.exit(close(con), add = TRUE)
+
   resp <- tryCatch(
-    {
-      con <- url(release_url, headers = c("Accept" = "application/vnd.github.v3+json"))
-      on.exit(close(con))
-      jsonlite_available <- requireNamespace("jsonlite", quietly = TRUE)
-      if (!jsonlite_available) return(NULL)
-      jsonlite::fromJSON(readLines(con, warn = FALSE))
-    },
+    jsonlite::fromJSON(readLines(con, warn = FALSE)),
     error = function(e) NULL
   )
 
@@ -129,15 +133,22 @@ install_uvr <- function(method = c("auto", "binary", "cargo"), force = FALSE) {
 
   message("Downloading uvr from: ", download_url)
   tmp <- tempfile()
-  tryCatch(
-    utils::download.file(download_url, tmp, mode = "wb", quiet = TRUE),
-    error = function(e) return(NULL)
-  )
+  ok <- tryCatch({
+    utils::download.file(download_url, tmp, mode = "wb", quiet = TRUE)
+    TRUE
+  }, error = function(e) {
+    message("Download failed: ", conditionMessage(e))
+    FALSE
+  })
+  if (!ok) return(NULL)
 
   # Handle tar.gz or plain binary
   if (grepl("\\.tar\\.gz$", download_url)) {
-    utils::untar(tmp, exdir = tempdir())
-    bin <- list.files(tempdir(), pattern = "^uvr$", recursive = TRUE, full.names = TRUE)[1L]
+    exdir <- tempfile("uvr-extract-")
+    dir.create(exdir)
+    on.exit(unlink(exdir, recursive = TRUE), add = TRUE)
+    utils::untar(tmp, exdir = exdir)
+    bin <- list.files(exdir, pattern = "^uvr$", recursive = TRUE, full.names = TRUE)[1L]
     if (is.na(bin)) return(NULL)
     file.copy(bin, dest, overwrite = TRUE)
   } else {

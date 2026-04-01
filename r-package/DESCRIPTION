@@ -9,7 +9,7 @@ Description: Provides R functions that wrap the 'uvr' command-line tool for
     and script execution within isolated environments. Requires the 'uvr'
     binary to be installed separately.
 License: MIT + file LICENSE
-Depends: R (>= 4.0.0)
+Depends: R (>= 4.1.0)
 Suggests:
     jsonlite,
     testthat (>= 3.0.0)
