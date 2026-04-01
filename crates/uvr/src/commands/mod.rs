@@ -1,5 +1,6 @@
 pub mod add;
 pub mod cache;
+pub mod completions;
 pub mod doctor;
 pub mod init;
 pub mod lock;
@@ -7,3 +8,5 @@ pub mod r_cmd;
 pub mod remove;
 pub mod run;
 pub mod sync;
+pub mod tree;
+pub mod update;

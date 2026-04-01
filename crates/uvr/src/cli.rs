@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,8 +38,17 @@ pub enum Commands {
     /// Run an R script within the project environment
     Run(RunArgs),
 
+    /// Update packages to their latest allowed versions
+    Update(UpdateArgs),
+
     /// Update the lockfile without installing
     Lock(LockArgs),
+
+    /// Show the dependency tree
+    Tree(TreeArgs),
+
+    /// Generate shell completions
+    Completions(CompletionsArgs),
 
     /// Manage R versions
     #[command(name = "r")]
@@ -146,6 +156,45 @@ pub struct LockArgs {
     /// Re-resolve and upgrade all packages to their latest allowed versions
     #[arg(long)]
     pub upgrade: bool,
+}
+
+// ────────────────────────────────────────────────────────────
+//  update
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Specific packages to update (updates all if omitted)
+    pub packages: Vec<String>,
+
+    /// Show what would change without installing
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Number of parallel download jobs
+    #[arg(short, long, default_value = "4", value_name = "N")]
+    pub jobs: usize,
+}
+
+// ────────────────────────────────────────────────────────────
+//  tree
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    /// Maximum display depth
+    #[arg(long, value_name = "N")]
+    pub depth: Option<usize>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  completions
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for
+    pub shell: Shell,
 }
 
 // ────────────────────────────────────────────────────────────

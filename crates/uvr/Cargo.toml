@@ -15,6 +15,7 @@ uvr-core = { path = "../uvr-core" }
 tokio.workspace = true
 reqwest.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 anyhow.workspace = true
 console.workspace = true
 indicatif.workspace = true

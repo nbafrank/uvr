@@ -59,8 +59,17 @@ async fn run() -> Result<()> {
         Commands::Run(args) => {
             commands::run::run(args.script, args.r_version, args.with_packages, args.args).await?;
         }
+        Commands::Update(args) => {
+            commands::update::run(args.packages, args.dry_run, args.jobs).await?;
+        }
         Commands::Lock(args) => {
             commands::lock::run(args.upgrade).await?;
+        }
+        Commands::Tree(args) => {
+            commands::tree::run(args.depth)?;
+        }
+        Commands::Completions(args) => {
+            commands::completions::run(args.shell)?;
         }
         Commands::Doctor => {
             commands::doctor::run()?;

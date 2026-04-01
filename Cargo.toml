@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 semver = { version = "1", features = ["serde"] }
 clap = { version = "4", features = ["derive", "color", "env"] }
+clap_complete = "4"
 indicatif = "0.17"
 console = "0.15"
 flate2 = "1"
