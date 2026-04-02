@@ -110,19 +110,31 @@ pub async fn resolve_system_deps(
     Ok(result)
 }
 
-/// Check which packages are missing on the system via `dpkg -s`.
+/// Check which packages are missing on the system.
+/// Uses `dpkg -s` on Debian/Ubuntu, `rpm -q` on Fedora/RHEL/SUSE.
+/// If neither package manager is found, returns an empty list (skip check).
 pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
+    let (cmd, args): (&str, &[&str]) = if which::which("dpkg").is_ok() {
+        ("dpkg", &["-s"])
+    } else if which::which("rpm").is_ok() {
+        ("rpm", &["-q"])
+    } else {
+        debug!("No supported package manager (dpkg/rpm) found, skipping sysreqs check");
+        return vec![];
+    };
+
     packages
         .iter()
         .filter(|req| {
-            let output = std::process::Command::new("dpkg")
-                .args(["-s", &req.package])
+            let output = std::process::Command::new(cmd)
+                .args(args)
+                .arg(&req.package)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
             match output {
                 Ok(status) => !status.success(),
-                Err(_) => true, // dpkg not found — assume missing
+                Err(_) => false, // command failed to run — don't report as missing
             }
         })
         .collect()

@@ -307,7 +307,7 @@ fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
 
 /// Compare two lockfiles for semantic equivalence, ignoring fields that can
 /// legitimately differ between lockfile versions (e.g. `url`, `checksum`).
-/// Compares: R major.minor version + set of (name, version, source) triples.
+/// Compares: R major.minor version + set of (name, version, source, requires) tuples.
 fn lockfiles_equivalent(
     a: &uvr_core::lockfile::Lockfile,
     b: &uvr_core::lockfile::Lockfile,
@@ -319,10 +319,12 @@ fn lockfiles_equivalent(
         return false;
     }
     // Both are sorted alphabetically by the resolver, so zip is safe.
-    a.packages
-        .iter()
-        .zip(b.packages.iter())
-        .all(|(ap, bp)| ap.name == bp.name && ap.version == bp.version && ap.source == bp.source)
+    a.packages.iter().zip(b.packages.iter()).all(|(ap, bp)| {
+        ap.name == bp.name
+            && ap.version == bp.version
+            && ap.source == bp.source
+            && ap.requires == bp.requires
+    })
 }
 
 /// Return true only if `s` looks like an actual version number (e.g. `"4.5.3"`),

@@ -39,7 +39,8 @@ pub async fn run() -> Result<()> {
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "No release asset found for {asset_name}. \
-                 Download manually from: https://github.com/nbafrank/uvr/releases/latest"
+                 Download manually from: {}/releases/latest",
+                env!("CARGO_PKG_REPOSITORY")
             )
         })?;
 
@@ -200,7 +201,12 @@ fn extract_from_zip(bytes: &[u8], bin_name: &str) -> Result<Vec<u8>> {
 }
 
 async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease> {
-    let url = "https://api.github.com/repos/nbafrank/uvr/releases/latest";
+    // Derive API URL from CARGO_PKG_REPOSITORY (https://github.com/user/repo)
+    let repo_url = env!("CARGO_PKG_REPOSITORY");
+    let api_path = repo_url
+        .strip_prefix("https://github.com/")
+        .unwrap_or("nbafrank/uvr");
+    let url = format!("https://api.github.com/repos/{api_path}/releases/latest");
     let resp = client
         .get(url)
         .header("Accept", "application/vnd.github+json")
