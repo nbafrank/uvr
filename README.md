@@ -94,7 +94,19 @@ Cold-install wall time (empty library -> all packages installed). P3M binaries f
 
 ## Installation
 
-### Pre-built binaries (recommended)
+### Quick install (recommended)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh
+```
+
+This auto-detects your platform, downloads the binary, verifies the SHA256 checksum, and installs to `~/.local/bin`. Override the install directory with `UVR_INSTALL_DIR`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | UVR_INSTALL_DIR=/usr/local/bin sh
+```
+
+### Manual download
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/nbafrank/uvr/releases/latest):
 
