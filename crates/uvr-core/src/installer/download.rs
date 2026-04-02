@@ -1,7 +1,9 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
@@ -148,23 +150,56 @@ async fn download_one(
     pb.set_message(format!("Downloading {name} {version}..."));
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let resp = client.get(url).send().await?.error_for_status()?;
-    let bytes = resp.bytes().await?;
+    // Stream response to a temp file to avoid buffering entire packages in RAM.
+    // Compute checksums on-the-fly during the stream.
+    let mut resp = client.get(url).send().await?.error_for_status()?;
 
+    let tmp_path = dest.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp_path)?;
+    let mut sha256_hasher = Sha256::new();
+    let mut md5_hasher = md5::Md5::new();
+
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk)?;
+        sha256_hasher.update(&chunk);
+        md5_hasher.update(&chunk);
+    }
+    file.flush()?;
+    drop(file);
+
+    // Verify checksum from the on-the-fly computation
     if let Some(expected) = expected_checksum {
-        if expected.starts_with("md5:") || expected.starts_with("sha256:") {
-            checksum::verify(expected, &bytes, name)?;
+        if expected.starts_with("sha256:") {
+            let actual = format!("sha256:{}", hex::encode(sha256_hasher.finalize()));
+            if actual != expected {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(UvrError::ChecksumMismatch {
+                    package: name.to_string(),
+                    expected: expected.to_string(),
+                    actual,
+                });
+            }
+        } else if expected.starts_with("md5:") {
+            let actual = format!("md5:{}", hex::encode(md5_hasher.finalize()));
+            if actual != expected {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(UvrError::ChecksumMismatch {
+                    package: name.to_string(),
+                    expected: expected.to_string(),
+                    actual,
+                });
+            }
         } else if expected.starts_with("git:") {
-            // GitHub packages: the lockfile stores git:<sha> which identifies the
-            // commit but doesn't verify the tarball content. Compute SHA256 and
-            // store a sidecar checksum file so subsequent cache hits are verified.
-            let computed = checksum::sha256_hex(&bytes);
+            // GitHub packages: store SHA256 sidecar for future cache verification
+            let computed = format!("sha256:{}", hex::encode(sha256_hasher.finalize()));
             let checksum_path = dest.with_extension("sha256");
             let _ = std::fs::write(&checksum_path, &computed);
         }
     }
 
-    std::fs::write(&dest, &bytes)?;
+    // Atomic move: temp → final destination
+    std::fs::rename(&tmp_path, &dest)?;
+
     pb.finish_with_message(format!("Downloaded {name} {version}"));
     Ok(dest)
 }

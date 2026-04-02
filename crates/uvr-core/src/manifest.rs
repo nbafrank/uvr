@@ -216,39 +216,9 @@ impl Manifest {
 }
 
 /// Parse a DCF (Debian Control File) string into a `BTreeMap<field, value>`.
-/// Continuation lines (leading whitespace) are joined with a space.
+/// Delegates to the shared `dcf::parse_dcf_fields` implementation.
 fn parse_dcf(content: &str) -> BTreeMap<String, String> {
-    let mut fields: BTreeMap<String, String> = BTreeMap::new();
-    let mut current_key: Option<String> = None;
-    let mut current_value = String::new();
-
-    for line in content.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') {
-            // Continuation line
-            if current_key.is_some() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    if !current_value.is_empty() {
-                        current_value.push(' ');
-                    }
-                    current_value.push_str(trimmed);
-                }
-            }
-        } else if let Some(colon_pos) = line.find(':') {
-            // Save previous field
-            if let Some(key) = current_key.take() {
-                fields.insert(key, current_value.trim().to_string());
-                current_value.clear();
-            }
-            current_key = Some(line[..colon_pos].trim().to_string());
-            current_value = line[colon_pos + 1..].trim().to_string();
-        }
-    }
-    // Save last field
-    if let Some(key) = current_key {
-        fields.insert(key, current_value.trim().to_string());
-    }
-    fields
+    crate::dcf::parse_dcf_fields(content)
 }
 
 /// Parse a comma-separated R dependency field (Imports, Suggests, Depends).

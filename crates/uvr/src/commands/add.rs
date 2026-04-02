@@ -5,7 +5,7 @@ use uvr_core::manifest::{DependencySpec, DetailedDep};
 use uvr_core::project::Project;
 
 /// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
-fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
+fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     // GitHub: contains '/'
     if raw.contains('/') {
         let (repo, git_ref) = if let Some(at) = raw.rfind('@') {
@@ -13,14 +13,31 @@ fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
         } else {
             (raw.to_string(), None)
         };
-        // Use the repo name (after /) as the package name
-        let name = repo.split('/').next_back().unwrap_or(&repo).to_string();
+
+        // Validate user/repo format
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            anyhow::bail!(
+                "Invalid GitHub spec '{raw}'. Expected format: user/repo or user/repo@ref"
+            );
+        }
+
+        let name = parts[1].to_string();
+
+        // Validate package name characters
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            anyhow::bail!("Invalid package name '{name}' extracted from GitHub spec '{raw}'");
+        }
+
         let spec = DependencySpec::Detailed(DetailedDep {
             git: Some(repo),
             rev: git_ref,
             ..Default::default()
         });
-        return (name, spec);
+        return Ok((name, spec));
     }
 
     // CRAN/Bioc with optional version: "pkg@>=1.0.0"
@@ -29,6 +46,15 @@ fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
     } else {
         (raw.to_string(), None)
     };
+
+    // Validate CRAN/Bioc package name
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        anyhow::bail!("Invalid package name '{name}'");
+    }
 
     let spec = if bioc {
         DependencySpec::Detailed(DetailedDep {
@@ -43,14 +69,16 @@ fn parse_add_spec(raw: &str, bioc: bool) -> (String, DependencySpec) {
         }
     };
 
-    (name, spec)
+    Ok((name, spec))
 }
 
 pub async fn run(packages: Vec<String>, dev: bool, bioc: bool, jobs: usize) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
-    let parsed: Vec<(String, DependencySpec)> =
-        packages.iter().map(|p| parse_add_spec(p, bioc)).collect();
+    let parsed: Vec<(String, DependencySpec)> = packages
+        .iter()
+        .map(|p| parse_add_spec(p, bioc))
+        .collect::<Result<Vec<_>>>()?;
 
     for (name, spec) in &parsed {
         let is_new = project.manifest.add_dep(name.clone(), spec.clone(), dev);
@@ -108,22 +136,34 @@ mod tests {
 
     #[test]
     fn parse_cran() {
-        let (name, spec) = parse_add_spec("ggplot2@>=3.0.0", false);
+        let (name, spec) = parse_add_spec("ggplot2@>=3.0.0", false).unwrap();
         assert_eq!(name, "ggplot2");
         assert!(matches!(spec, DependencySpec::Version(v) if v == ">=3.0.0"));
     }
 
     #[test]
     fn parse_github() {
-        let (name, spec) = parse_add_spec("tidyverse/ggplot2@main", false);
+        let (name, spec) = parse_add_spec("tidyverse/ggplot2@main", false).unwrap();
         assert_eq!(name, "ggplot2");
         assert!(spec.git().is_some());
     }
 
     #[test]
     fn parse_bioc() {
-        let (name, spec) = parse_add_spec("DESeq2", true);
+        let (name, spec) = parse_add_spec("DESeq2", true).unwrap();
         assert_eq!(name, "DESeq2");
         assert!(spec.is_bioc());
+    }
+
+    #[test]
+    fn parse_invalid_github() {
+        assert!(parse_add_spec("/", false).is_err());
+        assert!(parse_add_spec("a//b", false).is_err());
+        assert!(parse_add_spec("user/repo/extra", false).is_err());
+    }
+
+    #[test]
+    fn parse_empty_name() {
+        assert!(parse_add_spec("", false).is_err());
     }
 }

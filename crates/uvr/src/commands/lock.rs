@@ -112,6 +112,8 @@ async fn resolve_lockfile(
 pub fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("uvr/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .context("Failed to build HTTP client")
 }

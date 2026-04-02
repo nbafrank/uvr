@@ -198,23 +198,7 @@ pub fn parse_packages_gz(text: &str) -> Result<CranIndex> {
 
 /// Parse a single DCF record. `pub(crate)` so Bioconductor can reuse it.
 pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
-    let mut fields: HashMap<&str, String> = HashMap::new();
-    let mut current_key: Option<&str> = None;
-
-    for line in block.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if let Some(key) = current_key {
-                let entry = fields.entry(key).or_default();
-                entry.push(' ');
-                entry.push_str(line.trim());
-            }
-        } else if let Some(colon_pos) = line.find(':') {
-            let key = &line[..colon_pos];
-            let value = line[colon_pos + 1..].trim().to_string();
-            fields.insert(key, value);
-            current_key = fields.keys().find(|&&k| k == key).copied();
-        }
-    }
+    let fields = crate::dcf::parse_dcf_fields(block);
 
     let name = fields.get("Package")?.clone();
     let raw_version = fields.get("Version")?.clone();

@@ -1,4 +1,5 @@
 pub mod checksum;
+pub mod dcf;
 pub mod error;
 pub mod installer;
 pub mod lockfile;
