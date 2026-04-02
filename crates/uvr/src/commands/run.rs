@@ -50,8 +50,16 @@ pub async fn run(
     };
 
     // Build R_LIBS_USER: with-library (if any) prepended to project library.
+    // R uses ";" as path separator on Windows, ":" everywhere else.
     let libs_user = match &with_library {
-        Some(with_lib) => format!("{}:{}", with_lib.display(), library.display()),
+        Some(with_lib) => {
+            let sep = if cfg!(target_os = "windows") {
+                ";"
+            } else {
+                ":"
+            };
+            format!("{}{sep}{}", with_lib.display(), library.display())
+        }
         None => library.to_string_lossy().into_owned(),
     };
 

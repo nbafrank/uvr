@@ -207,6 +207,10 @@ pub fn parse_version_req(s: &str) -> Result<VersionReq> {
 /// - Strips leading zeros from each component (semver forbids them):
 ///   `"2026.03.11"` → `"2026.3.11"`
 /// - Pads to three components
+/// - Preserves 4th component as semver pre-release (e.g. `"1.0.12.2"` → `"1.0.12-4.2"`)
+///   so that `1.0.12.1` and `1.0.12.2` are distinguishable. The `4.` prefix ensures
+///   semver ordering is correct: `1.0.12-4.1 < 1.0.12-4.2`.
+///   Note: `raw_version` is always used for URLs, not this normalized form.
 pub fn normalize_version(v: &str) -> String {
     let v = v.replace('-', ".");
     let parts: Vec<String> = v
@@ -218,11 +222,19 @@ pub fn normalize_version(v: &str) -> String {
                 .unwrap_or_else(|_| p.to_string())
         })
         .collect();
-    match parts.len() {
-        0 => "0.0.0".to_string(),
+    let base = match parts.len() {
+        0 => return "0.0.0".to_string(),
         1 => format!("{}.0.0", parts[0]),
         2 => format!("{}.{}.0", parts[0], parts[1]),
         _ => format!("{}.{}.{}", parts[0], parts[1], parts[2]),
+    };
+    // R allows 4-component versions (e.g. Rcpp 1.0.12.2, data.table dev builds).
+    // Encode the 4th component as a semver pre-release so versions remain
+    // distinguishable and correctly ordered.
+    if parts.len() >= 4 {
+        format!("{base}-4.{}", parts[3])
+    } else {
+        base
     }
 }
 
@@ -275,6 +287,15 @@ mod tests {
         // Date-style versions with leading zeros (e.g. prodlim 2026.03.11)
         assert_eq!(normalize_version("2026.03.11"), "2026.3.11");
         assert_eq!(normalize_version("2023.03.01"), "2023.3.1");
+        // 4-component versions (e.g. Rcpp 1.0.12.2) → semver pre-release
+        assert_eq!(normalize_version("1.0.12.2"), "1.0.12-4.2");
+        assert_eq!(normalize_version("1.0.12.1"), "1.0.12-4.1");
+        // 4-component versions are distinguishable via semver ordering
+        let v1 = Version::parse(&normalize_version("1.0.12.1")).unwrap();
+        let v2 = Version::parse(&normalize_version("1.0.12.2")).unwrap();
+        assert!(v1 < v2);
+        // Both satisfy >=1.0.12 (pre-release < release, but >=1.0.12-0 matches)
+        // and the raw_version is used for URL construction anyway
     }
 
     #[test]

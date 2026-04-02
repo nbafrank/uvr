@@ -101,14 +101,36 @@ async fn download_one(
         // Verify the cached file when we have a checksum — a corrupted or
         // tampered cache entry must not silently bypass integrity checks.
         if let Some(expected) = expected_checksum {
-            let cached = std::fs::read(&dest)?;
-            if checksum::verify(expected, &cached, name).is_ok() {
-                debug!("Cache hit (verified): {filename}");
+            if expected.starts_with("md5:") || expected.starts_with("sha256:") {
+                let cached = std::fs::read(&dest)?;
+                if checksum::verify(expected, &cached, name).is_ok() {
+                    debug!("Cache hit (verified): {filename}");
+                    return Ok(dest);
+                }
+                debug!("Cache corrupt for {name}, re-downloading");
+                let _ = std::fs::remove_file(&dest);
+                // fall through to re-download
+            } else if expected.starts_with("git:") {
+                // GitHub packages: verify against sidecar SHA256 from first download
+                let checksum_path = dest.with_extension("sha256");
+                if let Ok(stored_checksum) = std::fs::read_to_string(&checksum_path) {
+                    let cached = std::fs::read(&dest)?;
+                    if checksum::verify(stored_checksum.trim(), &cached, name).is_ok() {
+                        debug!("Cache hit (git, sha256 verified): {filename}");
+                        return Ok(dest);
+                    }
+                    debug!("Cache corrupt for git package {name}, re-downloading");
+                    let _ = std::fs::remove_file(&dest);
+                    let _ = std::fs::remove_file(&checksum_path);
+                } else {
+                    // No sidecar yet (old cache entry) — accept it this time
+                    debug!("Cache hit (git, unverified): {filename}");
+                    return Ok(dest);
+                }
+            } else {
+                debug!("Cache hit: {filename}");
                 return Ok(dest);
             }
-            debug!("Cache corrupt for {name}, re-downloading");
-            let _ = std::fs::remove_file(&dest); // best-effort removal
-                                                 // fall through to re-download
         } else {
             debug!("Cache hit: {filename}");
             return Ok(dest);
@@ -132,6 +154,13 @@ async fn download_one(
     if let Some(expected) = expected_checksum {
         if expected.starts_with("md5:") || expected.starts_with("sha256:") {
             checksum::verify(expected, &bytes, name)?;
+        } else if expected.starts_with("git:") {
+            // GitHub packages: the lockfile stores git:<sha> which identifies the
+            // commit but doesn't verify the tarball content. Compute SHA256 and
+            // store a sidecar checksum file so subsequent cache hits are verified.
+            let computed = checksum::sha256_hex(&bytes);
+            let checksum_path = dest.with_extension("sha256");
+            let _ = std::fs::write(&checksum_path, &computed);
         }
     }
 

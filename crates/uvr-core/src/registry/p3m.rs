@@ -61,8 +61,8 @@ async fn fetch_inner(
     let cache = cache_path(r_minor, platform_info.cache_key);
 
     // Use today's cached file if present.
-    let text = if let Ok(cached) = std::fs::read_to_string(&cache) {
-        cached
+    let (text, from_cache) = if let Ok(cached) = std::fs::read_to_string(&cache) {
+        (cached, true)
     } else {
         let url = format!(
             "https://packagemanager.posit.co/cran/latest/bin/{}/contrib/{r_minor}/PACKAGES.gz",
@@ -79,14 +79,21 @@ async fn fetch_inner(
         let mut gz = GzDecoder::new(bytes.as_ref());
         let mut text = String::new();
         gz.read_to_string(&mut text)?;
+        (text, false)
+    };
+
+    let index = parse_index(&text, r_minor, &platform_info);
+
+    // Write cache only AFTER successful parse — avoids poisoning the
+    // daily cache with corrupt or truncated network responses.
+    if !from_cache {
         if let Some(parent) = cache.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&cache, &text);
-        text
-    };
+    }
 
-    Ok(parse_index(&text, r_minor, &platform_info))
+    Ok(index)
 }
 
 fn parse_index(text: &str, r_minor: &str, info: &PlatformInfo) -> P3MBinaryIndex {

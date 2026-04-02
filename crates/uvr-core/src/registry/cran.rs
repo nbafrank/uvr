@@ -123,25 +123,30 @@ impl CranRegistry {
     pub async fn fetch(client: &reqwest::Client, force_refresh: bool) -> Result<Self> {
         let cache_path = cache_path_for_today();
 
-        let raw = if !force_refresh && cache_path.exists() {
+        let (raw, from_cache) = if !force_refresh && cache_path.exists() {
             debug!("Loading CRAN index from cache: {}", cache_path.display());
-            std::fs::read(&cache_path)?
+            (std::fs::read(&cache_path)?, true)
         } else {
             info!("Downloading CRAN PACKAGES.gz...");
             let bytes = client.get(CRAN_PACKAGES_URL).send().await?.bytes().await?;
             let mut gz = GzDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
             gz.read_to_end(&mut decompressed)?;
-
-            if let Some(parent) = cache_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&cache_path, &decompressed)?;
-            decompressed
+            (decompressed, false)
         };
 
         let text = String::from_utf8_lossy(&raw);
         let index = parse_packages_gz(&text)?;
+
+        // Write cache only AFTER successful parse — avoids poisoning the
+        // daily cache with corrupt or truncated network responses.
+        if !from_cache {
+            if let Some(parent) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&cache_path, &raw);
+        }
+
         info!("CRAN index: {} packages", index.len());
         Ok(CranRegistry { index })
     }

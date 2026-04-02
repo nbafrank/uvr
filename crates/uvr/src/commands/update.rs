@@ -49,8 +49,9 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
     }
 
     // Re-resolve with upgrade=true (fetches fresh index, ignores locked versions).
-    // For --dry-run, resolve without writing the lockfile.
-    let new_lockfile: Lockfile = if dry_run {
+    // For --dry-run or selective update, resolve WITHOUT writing — the final
+    // lockfile is computed after merging and written once at the end.
+    let new_lockfile: Lockfile = if dry_run || !packages.is_empty() {
         resolve_only_upgraded(&project).await?
     } else {
         resolve_and_lock(&project, true).await?
