@@ -19,3 +19,12 @@ Invisible \code{TRUE} on success.
 Adds one or more packages to the manifest, updates the lockfile, and
 installs them. Equivalent to \code{uvr add} on the command line.
 }
+\examples{
+\dontrun{
+add("ggplot2")
+add(c("dplyr", "tidyr"))
+add("DESeq2", bioc = TRUE)
+add("user/repo", dev = TRUE)
+add("ggplot2@>=3.0.0")
+}
+}

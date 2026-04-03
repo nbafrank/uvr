@@ -15,5 +15,13 @@ Invisible \code{TRUE} on success.
 }
 \description{
 Creates a \code{uvr.toml} manifest and \code{.uvr/library/} directory.
-Equivalent to \code{uvr init} on the command line.
+Also generates \code{.Rprofile} for RStudio/Positron integration and
+installs the uvr R companion package. Equivalent to \code{uvr init}
+on the command line.
+}
+\examples{
+\dontrun{
+init()
+init(name = "my-project", r_version = ">=4.3.0")
+}
 }

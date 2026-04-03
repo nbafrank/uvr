@@ -16,3 +16,9 @@ Invisible \code{TRUE} on success.
 Re-resolves all dependencies and writes \code{uvr.lock} without installing.
 Equivalent to \code{uvr lock}.
 }
+\examples{
+\dontrun{
+lock()
+lock(upgrade = TRUE)  # upgrade all packages to latest versions
+}
+}

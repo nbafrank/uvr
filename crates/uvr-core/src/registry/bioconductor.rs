@@ -104,7 +104,7 @@ impl PackageRegistry for BiocRegistry {
         if let Some(c) = constraint {
             if c != "*" && !c.is_empty() {
                 let req = crate::resolver::parse_version_req(c)?;
-                if !req.matches(&entry.version) {
+                if !crate::resolver::version_matches_req(&entry.version, &req) {
                     return Err(UvrError::NoMatchingVersion {
                         package: name.to_string(),
                         constraint: c.to_string(),

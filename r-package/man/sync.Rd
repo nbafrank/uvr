@@ -16,3 +16,9 @@ Invisible \code{TRUE} on success.
 Installs all packages specified in \code{uvr.lock}. Idempotent --- skips
 packages that are already installed. Equivalent to \code{uvr sync}.
 }
+\examples{
+\dontrun{
+sync()
+sync(frozen = TRUE)  # CI mode: fail if lockfile is stale
+}
+}

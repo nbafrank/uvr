@@ -16,3 +16,9 @@ Invisible \code{TRUE} on success.
 Removes one or more packages from the manifest and updates the lockfile.
 Equivalent to \code{uvr remove} on the command line.
 }
+\examples{
+\dontrun{
+remove_pkgs("ggplot2")
+remove_pkgs(c("dplyr", "tidyr"))
+}
+}

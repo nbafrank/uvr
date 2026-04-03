@@ -108,6 +108,12 @@ pub async fn install_from_lockfile(
         .filter(|p| !is_installed(p, &library))
         .collect();
 
+    // Install the uvr R companion package if not already present
+    let r_constraint = project.manifest.project.r_version.as_deref();
+    if let Ok(r_bin) = find_r_binary(r_constraint) {
+        ensure_companion_package(&library, &r_bin);
+    }
+
     if to_install.is_empty() {
         println!("{} All packages up to date", style("✓").green().bold());
         return Ok(());
@@ -308,6 +314,56 @@ pub async fn install_from_lockfile(
     );
 
     Ok(())
+}
+
+/// Install the uvr R companion package from GitHub into the project library
+/// if it's not already installed. Failures are silently ignored — the companion
+/// package is a convenience, not a requirement.
+pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path::Path) {
+    if library.join("uvr").join("DESCRIPTION").exists() {
+        return;
+    }
+
+    let cache_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".uvr")
+        .join("cache");
+    let tarball = cache_dir.join("uvr-r-latest.tar.gz");
+
+    // Download the companion package tarball from GitHub
+    let url = "https://api.github.com/repos/nbafrank/uvr-r/tarball/main";
+    let download_ok = std::process::Command::new("curl")
+        .args(["-fsSL", url, "-o"])
+        .arg(&tarball)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !download_ok {
+        return;
+    }
+
+    let result = std::process::Command::new(r_binary)
+        .args(["CMD", "INSTALL", "--no-test-load", "-l"])
+        .arg(library)
+        .arg(&tarball)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    if let Ok(status) = result {
+        if status.success() {
+            println!(
+                "  {} uvr R companion package installed",
+                style("✓").green(),
+            );
+        }
+    }
+
+    // Clean up tarball
+    let _ = std::fs::remove_file(&tarball);
 }
 
 fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {

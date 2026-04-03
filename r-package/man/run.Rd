@@ -18,3 +18,9 @@ Executes a script with the project library active.
 Equivalent to \code{uvr run script.R} on the command line.
 For interactive R, use the CLI directly: \code{uvr run}.
 }
+\examples{
+\dontrun{
+run("analysis.R")
+run("model.R", args = c("--seed", "42"))
+}
+}

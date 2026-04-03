@@ -91,7 +91,10 @@ impl CranIndex {
 
         entries
             .iter()
-            .find(|e| req.as_ref().is_none_or(|r| r.matches(&e.version)))
+            .find(|e| {
+                req.as_ref()
+                    .is_none_or(|r| crate::resolver::version_matches_req(&e.version, r))
+            })
             .ok_or_else(|| UvrError::NoMatchingVersion {
                 package: name.to_string(),
                 constraint: constraint.unwrap_or("*").to_string(),

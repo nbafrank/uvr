@@ -5,6 +5,7 @@ use console::style;
 
 use uvr_core::manifest::Manifest;
 use uvr_core::project::{DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE};
+use uvr_core::r_version::detector::find_r_binary;
 
 pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
@@ -56,6 +57,11 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
 
     // Write .vscode/settings.json for Positron R interpreter
     ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
+
+    // Install the uvr R companion package if R is available
+    if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
+        crate::commands::sync::ensure_companion_package(&library_path, &r_binary);
+    }
 
     println!(
         "{} Initialized project {}",

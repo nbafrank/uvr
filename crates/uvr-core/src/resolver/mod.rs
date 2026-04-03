@@ -84,7 +84,7 @@ impl<'a> Resolver<'a> {
                 if let Some(c) = &constraint {
                     if !c.is_empty() && c != "*" {
                         let req = parse_version_req(c)?;
-                        if !req.matches(&existing.version) {
+                        if !version_matches_req(&existing.version, &req) {
                             return Err(UvrError::VersionConflict {
                                 package: name.clone(),
                                 required: c.clone(),
@@ -189,6 +189,24 @@ const BASE_PACKAGES: &[&str] = &[
 
 pub fn is_base_package(name: &str) -> bool {
     BASE_PACKAGES.iter().any(|b| b.eq_ignore_ascii_case(name))
+}
+
+/// Check if a version satisfies a requirement, ignoring semver pre-release semantics.
+///
+/// R's 4-component versions (e.g. `1.18.2.1`) are encoded as semver pre-releases
+/// (`1.18.2-4.1`), but semver pre-releases have lower precedence than releases,
+/// which breaks constraint matching (e.g. `>=1.13.0` won't match `1.18.2-4.1`).
+/// This function strips the pre-release tag before checking the constraint.
+pub fn version_matches_req(version: &Version, req: &VersionReq) -> bool {
+    if req.matches(version) {
+        return true;
+    }
+    // Try again without pre-release tag
+    if !version.pre.is_empty() {
+        let stripped = Version::new(version.major, version.minor, version.patch);
+        return req.matches(&stripped);
+    }
+    false
 }
 
 /// Parse a version constraint string into a `semver::VersionReq`.
@@ -408,7 +426,7 @@ mod tests {
                 if let Some(c) = constraint {
                     if c != "*" && !c.is_empty() {
                         let req = parse_version_req(c)?;
-                        if !req.matches(&info.version) {
+                        if !version_matches_req(&info.version, &req) {
                             return Err(UvrError::NoMatchingVersion {
                                 package: name.to_string(),
                                 constraint: c.to_string(),

@@ -99,14 +99,25 @@ pub async fn run(packages: Vec<String>, dev: bool, bioc: bool, jobs: usize) -> R
         }
     }
 
+    // Save the original manifest so we can roll back on resolution failure
+    let manifest_path = project.manifest_path();
+    let original_manifest = std::fs::read_to_string(&manifest_path).ok();
+
     project
         .save_manifest()
         .context("Failed to write uvr.toml")?;
 
     // Re-resolve → update lockfile → install new packages
-    let lockfile = crate::commands::lock::resolve_and_lock(&project, false)
-        .await
-        .context("Failed to resolve dependencies after add")?;
+    let resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+    if let Err(e) = resolve_result {
+        // Roll back the manifest to its original state
+        if let Some(original) = original_manifest {
+            let _ = std::fs::write(&manifest_path, original);
+        }
+        return Err(e).context("Failed to resolve dependencies after add");
+    }
+    let lockfile = resolve_result.unwrap();
+
     crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs)
         .await
         .context("Failed to install packages after add")?;
