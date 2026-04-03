@@ -370,3 +370,276 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
         PackageSource::GitHub | PackageSource::Local => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+    #[test]
+    fn r_minor_three_component() {
+        assert_eq!(r_minor("4.4.2"), "4.4");
+    }
+
+    #[test]
+    fn r_minor_two_component() {
+        assert_eq!(r_minor("4.4"), "4.4");
+    }
+
+    #[test]
+    fn r_minor_single_component() {
+        assert_eq!(r_minor("4"), "4");
+    }
+
+    #[test]
+    fn looks_like_version_valid() {
+        assert!(looks_like_version("4.5.3"));
+        assert!(looks_like_version("4.4"));
+        assert!(looks_like_version("3.6.3"));
+    }
+
+    #[test]
+    fn looks_like_version_invalid() {
+        assert!(!looks_like_version(""));
+        assert!(!looks_like_version(">=4.0.0"));
+        assert!(!looks_like_version("*"));
+    }
+
+    #[test]
+    fn lockfiles_equivalent_identical() {
+        let lf = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "jsonlite".into(),
+                version: "1.8.8".into(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: Some("md5:abc".into()),
+                requires: vec!["methods".into()],
+                url: Some("https://cran.r-project.org/test".into()),
+                system_requirements: None,
+            }],
+        };
+        assert!(lockfiles_equivalent(&lf, &lf));
+    }
+
+    #[test]
+    fn lockfiles_equivalent_ignores_url_and_checksum() {
+        let lf1 = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "jsonlite".into(),
+                version: "1.8.8".into(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: Some("md5:abc".into()),
+                requires: vec![],
+                url: Some("https://example.com/old".into()),
+                system_requirements: None,
+            }],
+        };
+        let lf2 = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "jsonlite".into(),
+                version: "1.8.8".into(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: Some("md5:xyz".into()),
+                requires: vec![],
+                url: Some("https://example.com/new".into()),
+                system_requirements: None,
+            }],
+        };
+        assert!(lockfiles_equivalent(&lf1, &lf2));
+    }
+
+    #[test]
+    fn lockfiles_not_equivalent_different_version() {
+        let make = |ver: &str| Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "jsonlite".into(),
+                version: ver.into(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: None,
+                requires: vec![],
+                url: None,
+                system_requirements: None,
+            }],
+        };
+        assert!(!lockfiles_equivalent(&make("1.8.7"), &make("1.8.8")));
+    }
+
+    #[test]
+    fn lockfiles_not_equivalent_different_r_minor() {
+        let make = |r_ver: &str| Lockfile {
+            r: RVersionPin {
+                version: r_ver.into(),
+                bioc_version: None,
+            },
+            packages: vec![],
+        };
+        assert!(!lockfiles_equivalent(&make("4.3.2"), &make("4.4.2")));
+    }
+
+    #[test]
+    fn lockfiles_equivalent_same_r_minor() {
+        let make = |r_ver: &str| Lockfile {
+            r: RVersionPin {
+                version: r_ver.into(),
+                bioc_version: None,
+            },
+            packages: vec![],
+        };
+        // Same minor → equivalent
+        assert!(lockfiles_equivalent(&make("4.4.1"), &make("4.4.2")));
+    }
+
+    #[test]
+    fn lockfiles_not_equivalent_different_requires() {
+        let make = |requires: Vec<String>| Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "ggplot2".into(),
+                version: "3.5.1".into(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: None,
+                requires,
+                url: None,
+                system_requirements: None,
+            }],
+        };
+        assert!(!lockfiles_equivalent(
+            &make(vec!["rlang".into()]),
+            &make(vec!["rlang".into(), "scales".into()])
+        ));
+    }
+
+    #[test]
+    fn source_url_cran() {
+        let pkg = LockedPackage {
+            name: "jsonlite".into(),
+            version: "1.8.8".into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        let url = source_url(&pkg, None);
+        assert_eq!(
+            url,
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
+        );
+    }
+
+    #[test]
+    fn source_url_uses_raw_version() {
+        let pkg = LockedPackage {
+            name: "scales".into(),
+            version: "1.1.3".into(),
+            raw_version: Some("1.1-3".into()),
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        let url = source_url(&pkg, None);
+        assert!(url.contains("scales_1.1-3.tar.gz"));
+    }
+
+    #[test]
+    fn source_url_prefers_stored_url() {
+        let pkg = LockedPackage {
+            name: "jsonlite".into(),
+            version: "1.8.8".into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: Some("https://custom-mirror.org/jsonlite.tar.gz".into()),
+            system_requirements: None,
+        };
+        let url = source_url(&pkg, None);
+        assert_eq!(url, "https://custom-mirror.org/jsonlite.tar.gz");
+    }
+
+    #[test]
+    fn source_url_bioconductor() {
+        let pkg = LockedPackage {
+            name: "DESeq2".into(),
+            version: "1.42.0".into(),
+            raw_version: None,
+            source: PackageSource::Bioconductor,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        let url = source_url(&pkg, Some("3.20"));
+        assert!(url.contains("bioconductor.org"));
+        assert!(url.contains("3.20"));
+        assert!(url.contains("DESeq2_1.42.0.tar.gz"));
+    }
+
+    #[test]
+    fn source_url_github_empty() {
+        let pkg = LockedPackage {
+            name: "mypkg".into(),
+            version: "0.1.0".into(),
+            raw_version: None,
+            source: PackageSource::GitHub,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        assert!(source_url(&pkg, None).is_empty());
+    }
+
+    #[test]
+    fn is_installed_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pkg = LockedPackage {
+            name: "jsonlite".into(),
+            version: "1.8.8".into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+
+        // Not installed
+        assert!(!is_installed(&pkg, dir.path()));
+
+        // Create dir without DESCRIPTION → not installed
+        std::fs::create_dir_all(dir.path().join("jsonlite")).unwrap();
+        assert!(!is_installed(&pkg, dir.path()));
+
+        // Create DESCRIPTION → installed
+        std::fs::write(dir.path().join("jsonlite").join("DESCRIPTION"), "").unwrap();
+        assert!(is_installed(&pkg, dir.path()));
+    }
+}

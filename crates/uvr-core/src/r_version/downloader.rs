@@ -657,3 +657,252 @@ pub async fn fetch_available_versions(
     versions.dedup();
     Ok(versions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn platform_detect_succeeds() {
+        // Should always succeed on supported platforms (macOS/Linux/Windows)
+        let platform = Platform::detect().unwrap();
+        // Just verify it returns something valid
+        assert!(matches!(
+            platform,
+            Platform::MacOsArm64
+                | Platform::MacOsX86_64
+                | Platform::LinuxX86_64
+                | Platform::LinuxArm64
+                | Platform::WindowsX86_64
+        ));
+    }
+
+    #[test]
+    fn platform_is_macos() {
+        assert!(Platform::MacOsArm64.is_macos());
+        assert!(Platform::MacOsX86_64.is_macos());
+        assert!(!Platform::LinuxX86_64.is_macos());
+        assert!(!Platform::WindowsX86_64.is_macos());
+    }
+
+    #[test]
+    fn platform_is_windows() {
+        assert!(Platform::WindowsX86_64.is_windows());
+        assert!(!Platform::MacOsArm64.is_windows());
+        assert!(!Platform::LinuxX86_64.is_windows());
+    }
+
+    #[test]
+    fn download_url_macos_arm64() {
+        let url = Platform::MacOsArm64.download_url("4.4.2");
+        assert!(url.contains("arm64"));
+        assert!(url.contains("4.4.2"));
+        assert!(url.ends_with(".pkg"));
+    }
+
+    #[test]
+    fn download_url_macos_x86() {
+        let url = Platform::MacOsX86_64.download_url("4.3.1");
+        assert!(url.contains("x86_64"));
+        assert!(url.contains("4.3.1"));
+        assert!(url.ends_with(".pkg"));
+    }
+
+    #[test]
+    fn download_url_linux_x86() {
+        let url = Platform::LinuxX86_64.download_url("4.4.2");
+        assert!(url.contains("amd64"));
+        assert!(url.contains("4.4.2"));
+        assert!(url.ends_with(".deb"));
+    }
+
+    #[test]
+    fn download_url_linux_arm64() {
+        let url = Platform::LinuxArm64.download_url("4.4.2");
+        assert!(url.contains("arm64"));
+        assert!(url.ends_with(".deb"));
+    }
+
+    #[test]
+    fn download_url_windows() {
+        let url = Platform::WindowsX86_64.download_url("4.4.2");
+        assert!(url.contains("windows"));
+        assert!(url.contains("4.4.2"));
+        assert!(url.ends_with(".exe"));
+    }
+
+    #[test]
+    fn extract_r_home_from_script() {
+        let dir = TempDir::new().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(
+            bin_dir.join("R"),
+            "#!/bin/sh\nR_HOME_DIR=/custom/path/to/R\nexport R_HOME\n",
+        )
+        .unwrap();
+        let result = extract_r_home_dir(dir.path()).unwrap();
+        assert_eq!(result, "/custom/path/to/R");
+    }
+
+    #[test]
+    fn extract_r_home_fallback() {
+        let dir = TempDir::new().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("R"), "#!/bin/sh\necho hello\n").unwrap();
+        let result = extract_r_home_dir(dir.path()).unwrap();
+        assert_eq!(result, "/Library/Frameworks/R.framework/Resources");
+    }
+
+    #[test]
+    fn find_dir_with_r_binary_direct() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("R"), "").unwrap();
+        let found = find_dir_with_r_binary(dir.path(), 0);
+        assert_eq!(found, Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn find_dir_with_r_binary_nested() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("Resources");
+        let bin = nested.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("R"), "").unwrap();
+        let found = find_dir_with_r_binary(dir.path(), 0);
+        assert_eq!(found, Some(nested));
+    }
+
+    #[test]
+    fn find_dir_with_r_binary_not_found() {
+        let dir = TempDir::new().unwrap();
+        let found = find_dir_with_r_binary(dir.path(), 0);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_dir_depth_limit() {
+        let dir = TempDir::new().unwrap();
+        // Even if R binary exists deeply nested, depth=13 guard should kick in
+        let found = find_dir_with_r_binary(dir.path(), 13);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_data_tar_gz() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("data.tar.gz"), "").unwrap();
+        let result = find_data_tar(dir.path()).unwrap();
+        assert!(result.to_string_lossy().contains("data.tar.gz"));
+    }
+
+    #[test]
+    fn find_data_tar_xz() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("data.tar.xz"), "").unwrap();
+        let result = find_data_tar(dir.path()).unwrap();
+        assert!(result.to_string_lossy().contains("data.tar.xz"));
+    }
+
+    #[test]
+    fn find_data_tar_missing() {
+        let dir = TempDir::new().unwrap();
+        let result = find_data_tar(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn collect_payloads_finds_files() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("R-fw.pkg");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("Payload"), "data").unwrap();
+        let payloads = find_all_payload_files(dir.path()).unwrap();
+        assert_eq!(payloads.len(), 1);
+    }
+
+    #[test]
+    fn collect_payloads_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let payloads = find_all_payload_files(dir.path()).unwrap();
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn patch_makeconf_libr_rewrites() {
+        let dir = TempDir::new().unwrap();
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(
+            etc.join("Makeconf"),
+            "CC = gcc\nLIBR = -F/Library/Frameworks/R.framework/.. -framework R\nCFLAGS = -O2\n",
+        )
+        .unwrap();
+        patch_makeconf_libr(dir.path()).unwrap();
+        let content = std::fs::read_to_string(etc.join("Makeconf")).unwrap();
+        assert!(content.contains(&format!("LIBR = -L{}/lib -lR", dir.path().display())));
+        assert!(content.contains("CC = gcc"));
+        assert!(content.contains("CFLAGS = -O2"));
+    }
+
+    #[test]
+    fn patch_makeconf_missing_file() {
+        let dir = TempDir::new().unwrap();
+        // Should be a no-op, not an error
+        patch_makeconf_libr(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn write_renviron_site_creates_file() {
+        let dir = TempDir::new().unwrap();
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        write_renviron_site(dir.path()).unwrap();
+        let content = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
+        assert!(content.contains("DYLD_LIBRARY_PATH=${R_HOME}/lib"));
+        assert!(content.contains("LD_LIBRARY_PATH=${R_HOME}/lib"));
+    }
+
+    #[test]
+    fn write_renviron_site_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let etc = dir.path().join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        write_renviron_site(dir.path()).unwrap();
+        let first = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
+        write_renviron_site(dir.path()).unwrap();
+        let second = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
+        assert_eq!(first, second, "write_renviron_site should be idempotent");
+    }
+
+    #[test]
+    fn patch_text_files_replaces_in_text() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            "path=/old/location\nother=/old/location/sub\n",
+        )
+        .unwrap();
+        patch_text_files(dir.path(), "/old/location", "/new/location").unwrap();
+        let content = std::fs::read_to_string(dir.path().join("test.txt")).unwrap();
+        assert!(content.contains("/new/location"));
+        assert!(!content.contains("/old/location\n"));
+    }
+
+    #[test]
+    fn patch_text_files_skips_binary() {
+        let dir = TempDir::new().unwrap();
+        let mut data = b"/old/location".to_vec();
+        data.push(0); // null byte → binary file
+        data.extend_from_slice(b"more data");
+        std::fs::write(dir.path().join("binary.so"), &data).unwrap();
+        patch_text_files(dir.path(), "/old/location", "/new/location").unwrap();
+        let content = std::fs::read(dir.path().join("binary.so")).unwrap();
+        // Should be unchanged — binary files are skipped
+        assert_eq!(content, data);
+    }
+}

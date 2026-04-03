@@ -170,3 +170,139 @@ struct RenvPackage {
     #[serde(rename = "RemoteRef", skip_serializing_if = "Option::is_none")]
     remote_ref: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_github_remote_api_url() {
+        let url = "https://api.github.com/repos/tidyverse/ggplot2/tarball/main";
+        let (user, repo, git_ref) = parse_github_remote(url).unwrap();
+        assert_eq!(user, "tidyverse");
+        assert_eq!(repo, "ggplot2");
+        assert_eq!(git_ref, Some("main".to_string()));
+    }
+
+    #[test]
+    fn parse_github_remote_no_ref() {
+        let url = "https://api.github.com/repos/user/pkg/tarball";
+        let (user, repo, git_ref) = parse_github_remote(url).unwrap();
+        assert_eq!(user, "user");
+        assert_eq!(repo, "pkg");
+        assert_eq!(git_ref, None);
+    }
+
+    #[test]
+    fn parse_github_remote_non_github() {
+        let url = "https://cran.r-project.org/src/contrib/ggplot2_3.5.1.tar.gz";
+        assert!(parse_github_remote(url).is_none());
+    }
+
+    #[test]
+    fn parse_github_remote_no_repos() {
+        let url = "https://github.com/user/repo";
+        // No "repos" segment → None
+        assert!(parse_github_remote(url).is_none());
+    }
+
+    #[test]
+    fn export_renv_basic() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![
+                LockedPackage {
+                    name: "jsonlite".to_string(),
+                    version: "1.8.8".to_string(),
+                    raw_version: None,
+                    source: PackageSource::Cran,
+                    checksum: None,
+                    requires: vec![],
+                    url: None,
+                    system_requirements: None,
+                },
+                LockedPackage {
+                    name: "DESeq2".to_string(),
+                    version: "1.42.0".to_string(),
+                    raw_version: None,
+                    source: PackageSource::Bioconductor,
+                    checksum: None,
+                    requires: vec!["BiocGenerics".to_string()],
+                    url: None,
+                    system_requirements: None,
+                },
+            ],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed["R"]["Version"], "4.4.2");
+        assert_eq!(parsed["Packages"]["jsonlite"]["Source"], "Repository");
+        assert_eq!(parsed["Packages"]["jsonlite"]["Repository"], "CRAN");
+        assert_eq!(parsed["Packages"]["DESeq2"]["Source"], "Bioconductor");
+        // Bioconductor packages don't have Repository field
+        assert!(parsed["Packages"]["DESeq2"]["Repository"].is_null());
+    }
+
+    #[test]
+    fn export_renv_github_package() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "mypkg".to_string(),
+                version: "0.1.0".to_string(),
+                raw_version: None,
+                source: PackageSource::GitHub,
+                checksum: None,
+                requires: vec![],
+                url: Some("https://api.github.com/repos/user/mypkg/tarball/main".to_string()),
+                system_requirements: None,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["Packages"]["mypkg"]["Source"], "GitHub");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "user");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "main");
+    }
+
+    #[test]
+    fn export_renv_uses_raw_version() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "scales".to_string(),
+                version: "1.1.3".to_string(),
+                raw_version: Some("1.1-3".to_string()),
+                source: PackageSource::Cran,
+                checksum: None,
+                requires: vec![],
+                url: None,
+                system_requirements: None,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Should use raw_version "1.1-3" not normalized "1.1.3"
+        assert_eq!(parsed["Packages"]["scales"]["Version"], "1.1-3");
+    }
+}

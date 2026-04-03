@@ -185,3 +185,99 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn create_test_zip(dir: &std::path::Path, pkg_name: &str) -> std::path::PathBuf {
+        let zip_path = dir.join(format!("{pkg_name}.zip"));
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file(format!("{pkg_name}/DESCRIPTION"), options)
+            .unwrap();
+        zip.write_all(format!("Package: {pkg_name}\nVersion: 1.0.0\nTitle: Test\n").as_bytes())
+            .unwrap();
+
+        zip.start_file(format!("{pkg_name}/R/hello.R"), options)
+            .unwrap();
+        zip.write_all(b"hello <- function() 'world'\n").unwrap();
+
+        zip.finish().unwrap();
+        zip_path
+    }
+
+    #[test]
+    fn extract_zip_basic() {
+        let dir = TempDir::new().unwrap();
+        let library = dir.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        let zip_path = create_test_zip(dir.path(), "testpkg");
+        extract_zip(&zip_path, &library, "testpkg").unwrap();
+
+        assert!(library.join("testpkg").join("DESCRIPTION").exists());
+        assert!(library.join("testpkg").join("R").join("hello.R").exists());
+    }
+
+    #[test]
+    fn install_binary_package_zip() {
+        let dir = TempDir::new().unwrap();
+        let library = dir.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        let zip_path = create_test_zip(dir.path(), "mypkg");
+        let zip_file = dir.path().join("mypkg_1.0.0.zip");
+        std::fs::rename(&zip_path, &zip_file).unwrap();
+
+        install_binary_package(&zip_file, &library, "mypkg", None).unwrap();
+        assert!(library.join("mypkg").join("DESCRIPTION").exists());
+    }
+
+    #[test]
+    fn install_binary_tgz() {
+        let dir = TempDir::new().unwrap();
+        let library = dir.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        let pkg_dir = dir.path().join("tarpkg");
+        let r_dir = pkg_dir.join("R");
+        std::fs::create_dir_all(&r_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: tarpkg\nVersion: 1.0.0\n",
+        )
+        .unwrap();
+        std::fs::write(r_dir.join("hello.R"), "hello <- function() 1\n").unwrap();
+
+        let tarball = dir.path().join("tarpkg_1.0.0.tgz");
+        let status = std::process::Command::new("tar")
+            .args([
+                "czf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &dir.path().to_string_lossy(),
+                "tarpkg",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        install_binary_package(&tarball, &library, "tarpkg", None).unwrap();
+        assert!(library.join("tarpkg").join("DESCRIPTION").exists());
+    }
+
+    #[test]
+    fn patch_installed_so_no_libs_dir() {
+        let dir = TempDir::new().unwrap();
+        let fake_libr = dir.path().join("lib").join("libR.dylib");
+        // Should be a no-op
+        patch_installed_so_files(dir.path(), &fake_libr);
+    }
+}

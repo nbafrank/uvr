@@ -143,6 +143,14 @@ fn find_exact_version(installations: &[RInstallation], version: &str) -> Result<
         })
 }
 
+/// Given a list of installations, return the binary for an exact version match.
+/// Used by `.r-version` resolution.
+/// (Exposed for testing as `find_exact_version` is private.)
+#[cfg(test)]
+pub fn test_find_exact(installations: &[RInstallation], version: &str) -> Result<PathBuf> {
+    find_exact_version(installations, version)
+}
+
 pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     let output = Command::new(binary)
         .args([
@@ -157,5 +165,84 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_installation(version: &str, managed: bool) -> RInstallation {
+        RInstallation {
+            binary: PathBuf::from(format!("/fake/r-{version}/bin/R")),
+            version: version.to_string(),
+            managed,
+        }
+    }
+
+    #[test]
+    fn find_exact_version_found() {
+        let installations = vec![
+            fake_installation("4.3.2", true),
+            fake_installation("4.4.1", true),
+        ];
+        let result = find_exact_version(&installations, "4.4.1").unwrap();
+        assert_eq!(result, PathBuf::from("/fake/r-4.4.1/bin/R"));
+    }
+
+    #[test]
+    fn find_exact_version_not_found() {
+        let installations = vec![fake_installation("4.3.2", true)];
+        let result = find_exact_version(&installations, "4.4.1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_all_returns_something() {
+        // On a dev machine, there should be at least one R installation.
+        // This is not strictly guaranteed in CI but is a reasonable smoke test.
+        let installations = find_all();
+        // Just verify it doesn't panic and returns a Vec
+        for inst in &installations {
+            assert!(!inst.version.is_empty());
+            assert!(!inst.binary.as_os_str().is_empty());
+        }
+    }
+
+    #[test]
+    fn r_installation_struct_fields() {
+        let inst = fake_installation("4.5.0", true);
+        assert_eq!(inst.version, "4.5.0");
+        assert!(inst.managed);
+        assert!(inst.binary.to_string_lossy().contains("4.5.0"));
+    }
+
+    #[test]
+    fn find_r_binary_prefers_managed() {
+        // This tests the logic indirectly — if there are managed + system R,
+        // managed should be preferred. Since we can't mock find_all, we test
+        // the fallback logic through find_r_binary without constraint.
+        // Just verify it returns Ok (not Err) when R is available.
+        if let Ok(binary) = find_r_binary(None) {
+            assert!(binary.to_string_lossy().contains("R"));
+        }
+        // If R is not installed at all, that's fine — test is informational
+    }
+
+    #[test]
+    fn find_r_binary_with_constraint() {
+        // If we have R, a loose constraint should match
+        if let Ok(binary) = find_r_binary(Some(">=3.0.0")) {
+            assert!(binary.exists());
+        }
+    }
+
+    #[test]
+    fn find_r_binary_impossible_constraint() {
+        // A constraint for R 99.0.0 should fail (no such version exists)
+        let result = find_r_binary(Some(">=99.0.0"));
+        if !find_all().is_empty() {
+            assert!(result.is_err());
+        }
     }
 }

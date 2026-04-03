@@ -168,3 +168,116 @@ fn cache_path(r_minor: &str, key: &str) -> PathBuf {
         .join("cache")
         .join(format!("p3m-{r_minor}-{key}-{date}.txt"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_index_basic() {
+        let text = "\
+Package: ggplot2
+Version: 3.5.1
+
+Package: dplyr
+Version: 1.1.4
+
+";
+        let info = PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        };
+        let index = parse_index(text, "4.4", &info);
+        assert_eq!(index.packages.len(), 2);
+
+        let url = index.binary_url("ggplot2", "3.5.1").unwrap();
+        assert!(url.contains("ggplot2_3.5.1.tgz"));
+        assert!(url.contains("big-sur-arm64"));
+        assert!(url.contains("4.4"));
+
+        let url = index.binary_url("dplyr", "1.1.4").unwrap();
+        assert!(url.contains("dplyr_1.1.4.tgz"));
+    }
+
+    #[test]
+    fn parse_index_windows() {
+        let text = "Package: jsonlite\nVersion: 1.8.8\n\n";
+        let info = PlatformInfo {
+            url_segment: "windows",
+            cache_key: "windows",
+            pkg_ext: "zip",
+        };
+        let index = parse_index(text, "4.4", &info);
+        let url = index.binary_url("jsonlite", "1.8.8").unwrap();
+        assert!(url.contains("jsonlite_1.8.8.zip"));
+        assert!(url.contains("/windows/"));
+    }
+
+    #[test]
+    fn parse_index_empty() {
+        let info = PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        };
+        let index = parse_index("", "4.4", &info);
+        assert_eq!(index.packages.len(), 0);
+    }
+
+    #[test]
+    fn binary_url_version_mismatch() {
+        let text = "Package: ggplot2\nVersion: 3.5.1\n\n";
+        let info = PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        };
+        let index = parse_index(text, "4.4", &info);
+        // Wrong version → None
+        assert!(index.binary_url("ggplot2", "3.4.0").is_none());
+        // Wrong name → None
+        assert!(index.binary_url("dplyr", "3.5.1").is_none());
+    }
+
+    #[test]
+    fn binary_url_version_normalization() {
+        // P3M may have versions like "4.6.0-1" which normalize to "4.6.0.1"
+        let text = "Package: RcppArmadillo\nVersion: 14.2.2-1\n\n";
+        let info = PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        };
+        let index = parse_index(text, "4.4", &info);
+        // The lockfile stores the normalized version
+        let normalized = crate::resolver::normalize_version("14.2.2-1");
+        assert!(index.binary_url("RcppArmadillo", &normalized).is_some());
+    }
+
+    #[test]
+    fn platform_info_macos_arm64() {
+        let info = platform_info(Platform::MacOsArm64).unwrap();
+        assert_eq!(info.url_segment, "macosx/big-sur-arm64");
+        assert_eq!(info.pkg_ext, "tgz");
+    }
+
+    #[test]
+    fn platform_info_windows() {
+        let info = platform_info(Platform::WindowsX86_64).unwrap();
+        assert_eq!(info.url_segment, "windows");
+        assert_eq!(info.pkg_ext, "zip");
+    }
+
+    #[test]
+    fn platform_info_linux_none() {
+        assert!(platform_info(Platform::LinuxX86_64).is_none());
+        assert!(platform_info(Platform::LinuxArm64).is_none());
+    }
+
+    #[test]
+    fn empty_index() {
+        let idx = P3MBinaryIndex::empty();
+        assert!(idx.binary_url("anything", "1.0.0").is_none());
+    }
+}

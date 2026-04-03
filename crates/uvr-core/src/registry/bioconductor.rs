@@ -113,3 +113,126 @@ impl PackageRegistry for BiocRegistry {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bioc_release_mapping() {
+        assert_eq!(bioc_release_for_r(4, 5), "3.21");
+        assert_eq!(bioc_release_for_r(4, 4), "3.20");
+        assert_eq!(bioc_release_for_r(4, 3), "3.18");
+        assert_eq!(bioc_release_for_r(4, 2), "3.16");
+        assert_eq!(bioc_release_for_r(4, 1), "3.14");
+        assert_eq!(bioc_release_for_r(4, 0), "3.12");
+    }
+
+    #[test]
+    fn bioc_release_fallback() {
+        // Unknown R versions fall back to latest
+        assert_eq!(bioc_release_for_r(5, 0), "3.21");
+        assert_eq!(bioc_release_for_r(3, 6), "3.21");
+    }
+
+    #[test]
+    fn resolve_missing_package() {
+        let registry = BiocRegistry {
+            packages: HashMap::new(),
+            bioc_release: "3.20".to_string(),
+        };
+        let result = registry.resolve_package("NonExistentPkg", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_package_basic() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "DESeq2".to_string(),
+            CranPackageEntry {
+                name: "DESeq2".to_string(),
+                version: semver::Version::new(1, 42, 0),
+                raw_version: "1.42.0".to_string(),
+                depends: vec![],
+                imports: vec![],
+                linking_to: vec![],
+                md5sum: "abc123".to_string(),
+                system_requirements: None,
+            },
+        );
+        let registry = BiocRegistry {
+            packages,
+            bioc_release: "3.20".to_string(),
+        };
+        let info = registry.resolve_package("DESeq2", None).unwrap();
+        assert_eq!(info.name, "DESeq2");
+        assert_eq!(info.source, PackageSource::Bioconductor);
+        assert!(info.url.contains("bioconductor.org"));
+        assert!(info.url.contains("3.20"));
+        assert_eq!(info.checksum, Some("md5:abc123".to_string()));
+    }
+
+    #[test]
+    fn resolve_package_with_wildcard_constraint() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "GenomicRanges".to_string(),
+            CranPackageEntry {
+                name: "GenomicRanges".to_string(),
+                version: semver::Version::new(1, 54, 0),
+                raw_version: "1.54.0".to_string(),
+                depends: vec![],
+                imports: vec![],
+                linking_to: vec![],
+                md5sum: String::new(),
+                system_requirements: None,
+            },
+        );
+        let registry = BiocRegistry {
+            packages,
+            bioc_release: "3.18".to_string(),
+        };
+        // "*" constraint should match anything
+        let info = registry
+            .resolve_package("GenomicRanges", Some("*"))
+            .unwrap();
+        assert_eq!(info.name, "GenomicRanges");
+        // Empty md5 → no checksum
+        assert_eq!(info.checksum, None);
+    }
+
+    #[test]
+    fn resolve_package_constraint_mismatch() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "SummarizedExperiment".to_string(),
+            CranPackageEntry {
+                name: "SummarizedExperiment".to_string(),
+                version: semver::Version::new(1, 30, 0),
+                raw_version: "1.30.0".to_string(),
+                depends: vec![],
+                imports: vec![],
+                linking_to: vec![],
+                md5sum: String::new(),
+                system_requirements: None,
+            },
+        );
+        let registry = BiocRegistry {
+            packages,
+            bioc_release: "3.18".to_string(),
+        };
+        // Version 1.30.0 should not satisfy >=2.0.0
+        let result = registry.resolve_package("SummarizedExperiment", Some(">=2.0.0"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn release_returns_bioc_version() {
+        let registry = BiocRegistry {
+            packages: HashMap::new(),
+            bioc_release: "3.20".to_string(),
+        };
+        assert_eq!(registry.release(), "3.20");
+    }
+}
