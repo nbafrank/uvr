@@ -51,6 +51,9 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     // Write .gitignore
     write_gitignore(&cwd).context("Failed to write .gitignore")?;
 
+    // Write .Rprofile so RStudio sees the uvr library
+    ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
+
     println!(
         "{} Initialized project {}",
         style("✓").green().bold(),
@@ -72,6 +75,35 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     );
 
     Ok(())
+}
+
+const RPROFILE_MARKER: &str = "# >>> uvr >>>";
+const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
+local({
+  lib <- file.path(getwd(), ".uvr", "library")
+  if (dir.exists(lib)) .libPaths(c(lib, .libPaths()))
+})
+# <<< uvr <<<
+"#;
+
+pub fn ensure_rprofile(dir: &Path) -> std::io::Result<()> {
+    let path = dir.join(".Rprofile");
+
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path)?;
+        if existing.contains(RPROFILE_MARKER) {
+            return Ok(());
+        }
+        let mut content = existing;
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+        content.push_str(RPROFILE_SNIPPET);
+        std::fs::write(&path, content)
+    } else {
+        std::fs::write(&path, RPROFILE_SNIPPET)
+    }
 }
 
 fn write_gitignore(dir: &Path) -> std::io::Result<()> {

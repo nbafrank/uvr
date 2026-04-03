@@ -33,6 +33,10 @@ pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<(
         .ensure_library_dir()
         .context("Failed to create .uvr/library/")?;
 
+    // Ensure .Rprofile exists so RStudio sees the uvr library
+    crate::commands::init::ensure_rprofile(&project.root)
+        .context("Failed to write .Rprofile")?;
+
     let lockfile = project
         .load_lockfile()
         .context("Failed to read uvr.lock")?
