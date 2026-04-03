@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::PathBuf;
 
+use chrono::Local;
 use flate2::read::GzDecoder;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
@@ -39,17 +41,28 @@ impl BiocRegistry {
 
     /// Fetch the Bioconductor package index for a specific release (e.g. `"3.18"`).
     pub async fn fetch_release(client: &reqwest::Client, bioc_release: &str) -> Result<Self> {
-        let url = format!(
-            "https://bioconductor.org/packages/{bioc_release}/bioc/src/contrib/PACKAGES.gz"
-        );
-        info!("Downloading Bioconductor {bioc_release} PACKAGES.gz...");
-        let bytes = client.get(&url).send().await?.bytes().await?;
-        let mut gz = GzDecoder::new(bytes.as_ref());
-        let mut text = String::new();
-        gz.read_to_string(&mut text)?;
+        let cache_path = bioc_cache_path(bioc_release);
+
+        let (raw, from_cache) = if cache_path.exists() {
+            debug!(
+                "Loading Bioconductor index from cache: {}",
+                cache_path.display()
+            );
+            (std::fs::read_to_string(&cache_path)?, true)
+        } else {
+            let url = format!(
+                "https://bioconductor.org/packages/{bioc_release}/bioc/src/contrib/PACKAGES.gz"
+            );
+            info!("Downloading Bioconductor {bioc_release} PACKAGES.gz...");
+            let bytes = client.get(&url).send().await?.bytes().await?;
+            let mut gz = GzDecoder::new(bytes.as_ref());
+            let mut text = String::new();
+            gz.read_to_string(&mut text)?;
+            (text, false)
+        };
 
         let mut packages = HashMap::new();
-        for block in text.split("\n\n") {
+        for block in raw.split("\n\n") {
             let block = block.trim();
             if block.is_empty() {
                 continue;
@@ -57,6 +70,14 @@ impl BiocRegistry {
             if let Some(entry) = parse_dcf_block(block) {
                 packages.insert(entry.name.clone(), entry);
             }
+        }
+
+        // Write cache only after successful parse
+        if !from_cache {
+            if let Some(parent) = cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&cache_path, &raw);
         }
 
         info!("Bioconductor {bioc_release}: {} packages", packages.len());
@@ -112,6 +133,15 @@ impl PackageRegistry for BiocRegistry {
             system_requirements: entry.system_requirements.clone(),
         })
     }
+}
+
+fn bioc_cache_path(bioc_release: &str) -> PathBuf {
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".uvr")
+        .join("cache")
+        .join(format!("bioc-{bioc_release}-packages-{date}.txt"))
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use console::style;
 use sha2::{Digest, Sha256};
+use uvr_core::r_version::downloader::Platform;
 
 pub async fn run() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
@@ -9,7 +10,7 @@ pub async fn run() -> Result<()> {
         style("→").blue().bold()
     );
 
-    let client = crate::commands::lock::build_client()?;
+    let client = crate::commands::util::build_client()?;
     let release = fetch_latest_release(&client).await?;
 
     let latest = release.tag_name.trim_start_matches('v');
@@ -23,7 +24,9 @@ pub async fn run() -> Result<()> {
 
     println!("  {} v{current} → v{latest}", style("→").blue(),);
 
-    let target = detect_target();
+    let target = Platform::detect()
+        .map(|p| p.rust_target_triple())
+        .unwrap_or("unknown");
     let ext = if cfg!(target_os = "windows") {
         "zip"
     } else {
@@ -96,10 +99,12 @@ pub async fn run() -> Result<()> {
     let new_binary = extract_binary(&bytes, bin_name, ext)?;
 
     // Replace the current binary atomically:
-    // 1. Write new binary to a temp file next to the current one
+    // 1. Write new binary to a temp file in the same directory (atomic within filesystem)
     // 2. Rename old → old.bak, new → current
-    let tmp_path = bin_dir.join(format!("{bin_name}.new"));
-    std::fs::write(&tmp_path, &new_binary).context("Failed to write new binary")?;
+    let mut tmp_file = tempfile::NamedTempFile::new_in(bin_dir)
+        .context("Failed to create temp file for new binary")?;
+    std::io::Write::write_all(&mut tmp_file, &new_binary).context("Failed to write new binary")?;
+    let tmp_path = tmp_file.into_temp_path();
 
     #[cfg(unix)]
     {
@@ -114,10 +119,10 @@ pub async fn run() -> Result<()> {
     // On Windows, a running binary can't be deleted but CAN be renamed.
     // Move current → backup, then move new → current.
     std::fs::rename(&current_exe, &backup_path).context("Failed to back up current binary")?;
-    if let Err(e) = std::fs::rename(&tmp_path, &current_exe) {
+    if let Err(e) = tmp_path.persist(&current_exe) {
         // Restore from backup on failure
         let _ = std::fs::rename(&backup_path, &current_exe);
-        return Err(e).context("Failed to replace binary");
+        return Err(anyhow::Error::from(e).context("Failed to replace binary"));
     }
 
     // On Unix, clean up backup immediately. On Windows, leave it — the old
@@ -130,22 +135,6 @@ pub async fn run() -> Result<()> {
 
     println!("{} Updated to v{latest}", style("✓").green().bold());
     Ok(())
-}
-
-fn detect_target() -> &'static str {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        "x86_64-unknown-linux-gnu"
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        "aarch64-unknown-linux-gnu"
-    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        "x86_64-pc-windows-msvc"
-    } else {
-        "unknown"
-    }
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {

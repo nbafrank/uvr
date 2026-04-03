@@ -76,7 +76,7 @@ download_and_verify() {
     if command -v sha256sum >/dev/null 2>&1; then
         log "Verifying checksum..."
         curl -fsSL "${BASE_URL}/sha256sums.txt" -o "${TMPDIR}/sha256sums.txt"
-        EXPECTED="$(grep "$ASSET" "${TMPDIR}/sha256sums.txt" | awk '{print $1}')"
+        EXPECTED="$(grep -F "  ${ASSET}" "${TMPDIR}/sha256sums.txt" | head -1 | awk '{print $1}')"
         if [ -n "$EXPECTED" ]; then
             ACTUAL="$(sha256sum "${TMPDIR}/${ASSET}" | awk '{print $1}')"
             if [ "$EXPECTED" != "$ACTUAL" ]; then
@@ -87,7 +87,7 @@ download_and_verify() {
     elif command -v shasum >/dev/null 2>&1; then
         log "Verifying checksum..."
         curl -fsSL "${BASE_URL}/sha256sums.txt" -o "${TMPDIR}/sha256sums.txt"
-        EXPECTED="$(grep "$ASSET" "${TMPDIR}/sha256sums.txt" | awk '{print $1}')"
+        EXPECTED="$(grep -F "  ${ASSET}" "${TMPDIR}/sha256sums.txt" | head -1 | awk '{print $1}')"
         if [ -n "$EXPECTED" ]; then
             ACTUAL="$(shasum -a 256 "${TMPDIR}/${ASSET}" | awk '{print $1}')"
             if [ "$EXPECTED" != "$ACTUAL" ]; then

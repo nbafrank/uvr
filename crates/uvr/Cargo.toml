@@ -31,8 +31,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 which.workspace = true
 semver.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
-tempfile.workspace = true

@@ -108,12 +108,18 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
             }
         }
         let installed = installations
-            .first()
+            .iter()
             .map(|i| i.version.as_str())
-            .unwrap_or("unknown");
+            .collect::<Vec<_>>()
+            .join(", ");
+        let installed = if installed.is_empty() {
+            "none".to_string()
+        } else {
+            installed
+        };
         return Err(UvrError::RVersionUnsatisfied {
             constraint: constraint.to_string(),
-            installed: installed.to_string(),
+            installed,
         });
     }
 

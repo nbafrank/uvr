@@ -13,7 +13,7 @@ use uvr_core::r_version::downloader::{patch_r_dylibs, patch_renviron_site, Platf
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
-use crate::commands::lock::make_spinner;
+use crate::commands::util::make_spinner;
 
 pub async fn run(frozen: bool, jobs: usize) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -93,7 +93,8 @@ pub async fn install_from_lockfile(
         }
     }
 
-    let all_ordered = topological_install_order(&lockfile.packages);
+    let all_ordered = topological_install_order(&lockfile.packages)
+        .context("Failed to determine install order")?;
     let to_install: Vec<&LockedPackage> = all_ordered
         .into_iter()
         .filter(|p| !is_installed(p, &library))
@@ -110,7 +111,7 @@ pub async fn install_from_lockfile(
         to_install.len()
     );
 
-    let client = crate::commands::lock::build_client()?;
+    let client = crate::commands::util::build_client()?;
 
     // On Linux, check for missing system dependencies before installing.
     #[cfg(target_os = "linux")]

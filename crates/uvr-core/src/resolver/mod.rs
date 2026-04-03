@@ -240,7 +240,7 @@ pub fn normalize_version(v: &str) -> String {
 
 /// Sort `packages` into topological install order using their `requires` fields.
 /// Packages already installed (not in `all_names`) are treated as satisfied.
-pub fn topological_install_order(packages: &[LockedPackage]) -> Vec<&LockedPackage> {
+pub fn topological_install_order(packages: &[LockedPackage]) -> Result<Vec<&LockedPackage>> {
     let mut graph = DependencyGraph::default();
     let pkg_set: HashSet<&str> = packages.iter().map(|p| p.name.as_str()).collect();
 
@@ -253,9 +253,7 @@ pub fn topological_install_order(packages: &[LockedPackage]) -> Vec<&LockedPacka
         }
     }
 
-    let order = graph
-        .topological_sort()
-        .unwrap_or_else(|_| packages.iter().map(|p| p.name.clone()).collect());
+    let order = graph.topological_sort()?;
     let order_index: HashMap<&str, usize> = order
         .iter()
         .enumerate()
@@ -269,7 +267,7 @@ pub fn topological_install_order(packages: &[LockedPackage]) -> Vec<&LockedPacka
             .copied()
             .unwrap_or(usize::MAX)
     });
-    sorted
+    Ok(sorted)
 }
 
 #[cfg(test)]
@@ -467,7 +465,7 @@ mod tests {
             },
         ];
 
-        let ordered = topological_install_order(&packages);
+        let ordered = topological_install_order(&packages).unwrap();
         let pos = |name: &str| ordered.iter().position(|p| p.name == name).unwrap();
         assert!(pos("rlang") < pos("dplyr"));
         assert!(pos("dplyr") < pos("ggplot2"));

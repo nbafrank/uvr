@@ -34,6 +34,17 @@ impl Platform {
         )))
     }
 
+    /// Return the Rust target triple for this platform (e.g. `"aarch64-apple-darwin"`).
+    pub fn rust_target_triple(&self) -> &'static str {
+        match self {
+            Platform::MacOsArm64 => "aarch64-apple-darwin",
+            Platform::MacOsX86_64 => "x86_64-apple-darwin",
+            Platform::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+            Platform::LinuxArm64 => "aarch64-unknown-linux-gnu",
+            Platform::WindowsX86_64 => "x86_64-pc-windows-msvc",
+        }
+    }
+
     pub fn is_windows(&self) -> bool {
         matches!(self, Platform::WindowsX86_64)
     }
@@ -52,15 +63,59 @@ impl Platform {
                 "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
             ),
             Platform::LinuxX86_64 => {
-                format!("https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_amd64.deb")
+                let distro = detect_posit_distro_slug();
+                format!("https://cdn.posit.co/r/{distro}/pkgs/r-{version}_1_amd64.deb")
             }
             Platform::LinuxArm64 => {
-                format!("https://cdn.posit.co/r/ubuntu-2204/pkgs/r-{version}_1_arm64.deb")
+                let distro = detect_posit_distro_slug();
+                format!("https://cdn.posit.co/r/{distro}/pkgs/r-{version}_1_arm64.deb")
             }
             Platform::WindowsX86_64 => {
                 format!("https://cran.r-project.org/bin/windows/base/R-{version}-win.exe")
             }
         }
+    }
+}
+
+/// Detect the Posit CDN distro slug from `/etc/os-release`.
+///
+/// Returns strings like `"ubuntu-2204"`, `"ubuntu-2404"`, `"debian-12"`,
+/// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`. Falls back to `"ubuntu-2204"`.
+fn detect_posit_distro_slug() -> String {
+    // Read os-release; fall back to default if anything fails
+    let content = match std::fs::read_to_string("/etc/os-release") {
+        Ok(c) => c,
+        Err(_) => return "ubuntu-2204".to_string(),
+    };
+
+    let mut id = String::new();
+    let mut version_id = String::new();
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("ID=") {
+            id = val.trim_matches('"').to_lowercase();
+        } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
+            version_id = val.trim_matches('"').to_string();
+        }
+    }
+
+    // Posit CDN uses no dots in version for Ubuntu/openSUSE, but keeps them for others
+    match id.as_str() {
+        "ubuntu" => {
+            let ver = version_id.replace('.', "");
+            format!("ubuntu-{ver}")
+        }
+        "debian" => format!("debian-{version_id}"),
+        "centos" => format!("centos-{version_id}"),
+        "rhel" | "rocky" | "almalinux" => {
+            // Major version only
+            let major = version_id.split('.').next().unwrap_or(&version_id);
+            format!("rhel-{major}")
+        }
+        "opensuse-leap" | "sles" => {
+            let ver = version_id.replace('.', "");
+            format!("opensuse-{ver}")
+        }
+        _ => "ubuntu-2204".to_string(),
     }
 }
 

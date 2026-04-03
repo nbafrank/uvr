@@ -39,15 +39,20 @@ pub async fn resolve_github_package(
         .text()
         .await?;
 
-    let pkg_name =
-        parse_description_field(&desc_text, "Package").unwrap_or_else(|| repo.to_string());
-    let pkg_version =
-        parse_description_field(&desc_text, "Version").unwrap_or_else(|| "0.0.0".to_string());
+    let desc_fields = crate::dcf::parse_dcf_fields(&desc_text);
+    let pkg_name = desc_fields
+        .get("Package")
+        .cloned()
+        .unwrap_or_else(|| repo.to_string());
+    let pkg_version = desc_fields
+        .get("Version")
+        .cloned()
+        .unwrap_or_else(|| "0.0.0".to_string());
     let version = Version::parse(&crate::resolver::normalize_version(&pkg_version))
         .unwrap_or_else(|_| Version::new(0, 0, 0));
 
     // Parse dependencies from DESCRIPTION
-    let requires = parse_description_deps(&desc_text);
+    let requires = parse_description_deps(&desc_fields);
 
     let url = format!("https://api.github.com/repos/{user}/{repo}/tarball/{commit_sha}");
 
@@ -90,19 +95,12 @@ async fn fetch_commit_sha(
     Ok(sha.trim().trim_matches('"').to_string())
 }
 
-fn parse_description_field(text: &str, field: &str) -> Option<String> {
-    let prefix = format!("{field}:");
-    text.lines()
-        .find(|l| l.starts_with(&prefix))
-        .map(|l| l[prefix.len()..].trim().to_string())
-}
-
-/// Parse `Imports` and `Depends` from a DESCRIPTION file into `Dep` values.
-fn parse_description_deps(text: &str) -> Vec<Dep> {
+/// Parse `Imports` and `Depends` from parsed DESCRIPTION fields into `Dep` values.
+fn parse_description_deps(fields: &std::collections::BTreeMap<String, String>) -> Vec<Dep> {
     let mut deps = Vec::new();
     for field in &["Imports", "Depends"] {
-        if let Some(value) = parse_description_field(text, field) {
-            let parsed = crate::registry::cran::parse_dep_field(&value);
+        if let Some(value) = fields.get(*field) {
+            let parsed = crate::registry::cran::parse_dep_field(value);
             for d in parsed {
                 if !crate::resolver::is_base_package(&d.name) {
                     deps.push(Dep {
@@ -119,6 +117,37 @@ fn parse_description_deps(text: &str) -> Vec<Dep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_multiline_description_deps() {
+        let desc = "\
+Package: mypkg
+Version: 1.0.0
+Imports: cli (>= 3.4.0), generics,
+    glue,
+    lifecycle (>= 1.0.3),
+    rlang (>= 1.1.0)
+Depends: R (>= 3.5.0)
+";
+        let fields = crate::dcf::parse_dcf_fields(desc);
+        let deps = parse_description_deps(&fields);
+        let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"cli"), "missing cli: {names:?}");
+        assert!(names.contains(&"generics"), "missing generics: {names:?}");
+        assert!(names.contains(&"glue"), "missing glue: {names:?}");
+        assert!(names.contains(&"lifecycle"), "missing lifecycle: {names:?}");
+        assert!(names.contains(&"rlang"), "missing rlang: {names:?}");
+        // R itself should be filtered out as a base package
+        assert!(!names.contains(&"R"), "R should be filtered: {names:?}");
+    }
+
+    #[test]
+    fn parse_description_deps_empty() {
+        let desc = "Package: mypkg\nVersion: 1.0.0\n";
+        let fields = crate::dcf::parse_dcf_fields(desc);
+        let deps = parse_description_deps(&fields);
+        assert!(deps.is_empty());
+    }
 
     #[test]
     fn parse_spec() {

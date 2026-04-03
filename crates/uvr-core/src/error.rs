@@ -34,7 +34,7 @@ pub enum UvrError {
     #[error("R not found on PATH. Install R or use `uvr r install <version>`")]
     RNotFound,
 
-    #[error("R version constraint '{constraint}' not satisfied by installed R {installed}")]
+    #[error("R version constraint '{constraint}' not satisfied by any installed R ({installed})")]
     RVersionUnsatisfied {
         constraint: String,
         installed: String,
