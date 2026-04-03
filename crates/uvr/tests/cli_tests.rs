@@ -190,3 +190,208 @@ fn test_manifest_round_trip() {
     assert_eq!(m.project.name, "sample-project");
     assert!(m.dependencies.contains_key("ggplot2"));
 }
+
+// ─── import ────────────────────────────────────────────────
+
+#[test]
+fn test_import_from_renv_lock() {
+    let dir = TempDir::new().unwrap();
+    let renv_lock = fixture("sample_renv.lock");
+    fs::copy(&renv_lock, dir.path().join("renv.lock")).unwrap();
+
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Imported from"))
+        .stdout(predicate::str::contains("CRAN"))
+        .stdout(predicate::str::contains("Bioconductor"))
+        .stdout(predicate::str::contains("GitHub"));
+
+    // uvr.toml should exist with imported deps
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    assert!(content.contains("jsonlite"), "missing jsonlite");
+    assert!(content.contains("rlang"), "missing rlang");
+    assert!(content.contains("DESeq2"), "missing DESeq2");
+    assert!(content.contains("testuser/myPkg"), "missing GitHub dep");
+    assert!(content.contains("4.3.2"), "missing R version");
+
+    // Library dir should exist
+    assert!(dir.path().join(".uvr").join("library").exists());
+}
+
+#[test]
+fn test_import_with_explicit_path() {
+    let dir = TempDir::new().unwrap();
+    let renv_lock = fixture("sample_renv.lock");
+
+    uvr_cmd()
+        .args(["import", renv_lock.to_str().unwrap()])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Imported from"));
+
+    assert!(dir.path().join("uvr.toml").exists());
+}
+
+#[test]
+fn test_import_fails_if_manifest_exists() {
+    let dir = init_project("import-conflict");
+    let renv_lock = fixture("sample_renv.lock");
+    fs::copy(&renv_lock, dir.path().join("renv.lock")).unwrap();
+
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uvr.toml already exists"));
+}
+
+#[test]
+fn test_import_fails_if_no_renv_lock() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("File not found"));
+}
+
+// ─── export ────────────────────────────────────────────────
+
+#[test]
+fn test_export_requires_lockfile() {
+    let dir = init_project("export-test");
+    uvr_cmd()
+        .args(["export"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("lockfile").or(predicate::str::contains("uvr.lock")));
+}
+
+#[test]
+fn test_export_with_lockfile() {
+    let dir = TempDir::new().unwrap();
+    // Copy sample project with lockfile
+    let manifest = fixture("sample_project/uvr.toml");
+    let lockfile = fixture("sample_project/uvr.lock");
+    fs::copy(&manifest, dir.path().join("uvr.toml")).unwrap();
+    fs::copy(&lockfile, dir.path().join("uvr.lock")).unwrap();
+    fs::create_dir_all(dir.path().join(".uvr").join("library")).unwrap();
+
+    uvr_cmd()
+        .args(["export"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Packages"));
+}
+
+// ─── tree ──────────────────────────────────────────────────
+
+#[test]
+fn test_tree_requires_lockfile() {
+    let dir = init_project("tree-test");
+    uvr_cmd()
+        .args(["tree"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("lockfile").or(predicate::str::contains("uvr.lock")));
+}
+
+#[test]
+fn test_tree_with_lockfile() {
+    let dir = TempDir::new().unwrap();
+    let manifest = fixture("sample_project/uvr.toml");
+    let lockfile = fixture("sample_project/uvr.lock");
+    fs::copy(&manifest, dir.path().join("uvr.toml")).unwrap();
+    fs::copy(&lockfile, dir.path().join("uvr.lock")).unwrap();
+    fs::create_dir_all(dir.path().join(".uvr").join("library")).unwrap();
+
+    uvr_cmd()
+        .args(["tree"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ggplot2"));
+}
+
+#[test]
+fn test_tree_with_depth() {
+    let dir = TempDir::new().unwrap();
+    let manifest = fixture("sample_project/uvr.toml");
+    let lockfile = fixture("sample_project/uvr.lock");
+    fs::copy(&manifest, dir.path().join("uvr.toml")).unwrap();
+    fs::copy(&lockfile, dir.path().join("uvr.lock")).unwrap();
+    fs::create_dir_all(dir.path().join(".uvr").join("library")).unwrap();
+
+    uvr_cmd()
+        .args(["tree", "--depth", "1"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
+// ─── doctor ────────────────────────────────────────────────
+
+#[test]
+fn test_doctor_runs() {
+    uvr_cmd().args(["doctor"]).assert().success();
+}
+
+// ─── completions ───────────────────────────────────────────
+
+#[test]
+fn test_completions_zsh() {
+    uvr_cmd()
+        .args(["completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compdef").or(predicate::str::contains("_uvr")));
+}
+
+#[test]
+fn test_completions_bash() {
+    uvr_cmd()
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty().not());
+}
+
+// ─── update ────────────────────────────────────────────────
+
+#[test]
+fn test_update_dry_run_on_empty_project() {
+    let dir = init_project("update-test");
+    uvr_cmd()
+        .args(["update", "--dry-run"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dry run"));
+}
+
+// ─── cache ─────────────────────────────────────────────────
+
+#[test]
+fn test_cache_clean() {
+    uvr_cmd().args(["cache", "clean"]).assert().success();
+}
+
+// ─── help ──────────────────────────────────────────────────
+
+#[test]
+fn test_import_help() {
+    uvr_cmd()
+        .args(["import", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("renv"));
+}

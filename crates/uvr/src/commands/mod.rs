@@ -3,6 +3,7 @@ pub mod cache;
 pub mod completions;
 pub mod doctor;
 pub mod export;
+pub mod import;
 pub mod init;
 pub mod lock;
 pub mod r_cmd;

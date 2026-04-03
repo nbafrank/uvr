@@ -1,0 +1,38 @@
+{
+  "R": {
+    "Version": "4.3.2",
+    "Repositories": [
+      {
+        "Name": "CRAN",
+        "URL": "https://cloud.r-project.org"
+      }
+    ]
+  },
+  "Packages": {
+    "jsonlite": {
+      "Package": "jsonlite",
+      "Version": "1.8.8",
+      "Source": "Repository",
+      "Repository": "CRAN"
+    },
+    "rlang": {
+      "Package": "rlang",
+      "Version": "1.1.3",
+      "Source": "Repository",
+      "Repository": "CRAN"
+    },
+    "DESeq2": {
+      "Package": "DESeq2",
+      "Version": "1.42.0",
+      "Source": "Bioconductor"
+    },
+    "myPkg": {
+      "Package": "myPkg",
+      "Version": "0.1.0",
+      "Source": "GitHub",
+      "RemoteUsername": "testuser",
+      "RemoteRepo": "myPkg",
+      "RemoteRef": "main"
+    }
+  }
+}

@@ -202,6 +202,8 @@ uvr tree
 | `uvr r pin <ver>` | Write exact version to `.r-version` |
 | `uvr export` | Export lockfile to renv.lock format |
 | `uvr export -o renv.lock` | Export to a file |
+| `uvr import` | Import packages from an renv.lock file |
+| `uvr import --lock` | Import and immediately resolve + install |
 | `uvr self-update` | Update uvr itself to the latest GitHub release |
 | `uvr doctor` | Diagnose environment issues (R, build tools, project status) |
 | `uvr completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |

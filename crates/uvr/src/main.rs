@@ -71,6 +71,9 @@ async fn run() -> Result<()> {
         Commands::Export(args) => {
             commands::export::run(args.format, args.output)?;
         }
+        Commands::Import(args) => {
+            commands::import::run(args.path, args.lock, args.jobs).await?;
+        }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
         }

@@ -52,6 +52,9 @@ pub enum Commands {
     /// Export lockfile to other formats (e.g. renv.lock)
     Export(ExportArgs),
 
+    /// Import packages from an renv.lock file
+    Import(ImportArgs),
+
     /// Generate shell completions
     Completions(CompletionsArgs),
 
@@ -208,6 +211,24 @@ pub struct ExportArgs {
     /// Output file path (prints to stdout if omitted)
     #[arg(short, long)]
     pub output: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  import
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Path to renv.lock file (defaults to ./renv.lock)
+    pub path: Option<String>,
+
+    /// Resolve and install packages after import
+    #[arg(long)]
+    pub lock: bool,
+
+    /// Number of parallel download jobs
+    #[arg(short, long, default_value = "4", value_name = "N")]
+    pub jobs: usize,
 }
 
 // ────────────────────────────────────────────────────────────
