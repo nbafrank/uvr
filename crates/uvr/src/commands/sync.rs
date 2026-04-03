@@ -37,6 +37,10 @@ pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<(
     crate::commands::init::ensure_rprofile(&project.root)
         .context("Failed to write .Rprofile")?;
 
+    // Write .vscode/settings.json for Positron R interpreter
+    crate::commands::init::ensure_positron_settings(&project.root)
+        .context("Failed to write Positron settings")?;
+
     let lockfile = project
         .load_lockfile()
         .context("Failed to read uvr.lock")?

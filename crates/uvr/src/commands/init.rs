@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use console::style;
 
 use uvr_core::manifest::Manifest;
-use uvr_core::project::{DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
+use uvr_core::project::{DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE};
 
 pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
@@ -53,6 +53,9 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
 
     // Write .Rprofile so RStudio sees the uvr library
     ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
+
+    // Write .vscode/settings.json for Positron R interpreter
+    ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
 
     println!(
         "{} Initialized project {}",
@@ -104,6 +107,62 @@ pub fn ensure_rprofile(dir: &Path) -> std::io::Result<()> {
     } else {
         std::fs::write(&path, RPROFILE_SNIPPET)
     }
+}
+
+/// Write `.vscode/settings.json` with Positron R interpreter path if a pinned
+/// R version is managed by uvr.
+pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
+    // Determine the pinned R version from .r-version
+    let r_version_path = dir.join(R_VERSION_FILE);
+    let version = match std::fs::read_to_string(&r_version_path) {
+        Ok(v) => {
+            let v = v.trim().to_string();
+            if v.is_empty() {
+                return Ok(());
+            }
+            v
+        }
+        Err(_) => return Ok(()), // No .r-version, nothing to do
+    };
+
+    // Check the R binary actually exists
+    let r_home = dirs::home_dir().unwrap_or_default();
+    let r_binary = r_home
+        .join(".uvr")
+        .join("r-versions")
+        .join(&version)
+        .join("bin")
+        .join("R");
+    if !r_binary.exists() {
+        return Ok(()); // Not a uvr-managed R version
+    }
+
+    let r_binary_str = r_binary.to_string_lossy();
+    let vscode_dir = dir.join(".vscode");
+    std::fs::create_dir_all(&vscode_dir)?;
+    let settings_path = vscode_dir.join("settings.json");
+
+    let key = "positron.r.interpreters.default";
+
+    if settings_path.exists() {
+        let existing = std::fs::read_to_string(&settings_path)?;
+        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&existing) {
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(r_binary_str.into_owned()),
+                );
+                let pretty = serde_json::to_string_pretty(&json).unwrap_or(existing);
+                return std::fs::write(&settings_path, pretty + "\n");
+            }
+        }
+        // If we can't parse existing JSON, don't clobber it
+        return Ok(());
+    }
+
+    let content = serde_json::json!({ key: r_binary_str });
+    let pretty = serde_json::to_string_pretty(&content).unwrap();
+    std::fs::write(&settings_path, pretty + "\n")
 }
 
 fn write_gitignore(dir: &Path) -> std::io::Result<()> {
