@@ -1,5 +1,6 @@
 \name{uvr-package}
 \alias{uvr-package}
+\alias{uvr}
 \docType{package}
 \title{R Interface to the 'uvr' Package Manager}
 \description{

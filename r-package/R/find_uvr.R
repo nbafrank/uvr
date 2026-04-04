@@ -16,6 +16,15 @@ find_uvr <- function() {
     return(path)
   }
 
+  if (interactive()) {
+    message("The 'uvr' binary was not found on this system.")
+    ans <- readline("Would you like to install it now? (Y/n) ")
+    if (!nzchar(ans) || tolower(substr(ans, 1, 1)) == "y") {
+      path <- install_uvr()
+      return(path)
+    }
+  }
+
   stop(
     "Could not find the 'uvr' binary.\n",
     "Install it from R with: uvr::install_uvr()\n",

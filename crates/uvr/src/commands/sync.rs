@@ -320,8 +320,15 @@ pub async fn install_from_lockfile(
 /// if it's not already installed. Failures are silently ignored — the companion
 /// package is a convenience, not a requirement.
 pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path::Path) {
-    if library.join("uvr").join("DESCRIPTION").exists() {
-        return;
+    let desc_path = library.join("uvr").join("DESCRIPTION");
+    if desc_path.exists() {
+        // Check if the companion was built with a different R major.minor.
+        // If so, reinstall to avoid "built under R x.y.z" warnings.
+        if !companion_needs_rebuild(&desc_path, r_binary) {
+            return;
+        }
+        // Remove stale companion before reinstalling
+        let _ = std::fs::remove_dir_all(library.join("uvr"));
     }
 
     let cache_dir = dirs::home_dir()
@@ -364,6 +371,42 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
 
     // Clean up tarball
     let _ = std::fs::remove_file(&tarball);
+}
+
+/// Check if the installed companion package was built under a different R major.minor.
+fn companion_needs_rebuild(desc_path: &std::path::Path, r_binary: &std::path::Path) -> bool {
+    let desc = match std::fs::read_to_string(desc_path) {
+        Ok(d) => d,
+        Err(_) => return true,
+    };
+
+    // Extract "Built: R x.y.z; ..." line from DESCRIPTION
+    let built_version = desc.lines().find_map(|line| {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Built:") {
+            // Format: "R 4.5.3; ; 2026-04-03 ..."
+            let rest = rest.trim();
+            rest.strip_prefix("R ")
+                .and_then(|v| v.split(';').next())
+                .map(|v| v.trim().to_string())
+        } else {
+            None
+        }
+    });
+
+    let built_minor = match built_version {
+        Some(v) => r_minor(&v),
+        None => return false, // No Built field, don't rebuild
+    };
+
+    // Get current R version
+    let current_r = query_r_version(r_binary);
+    let current_minor = match current_r {
+        Some(v) => r_minor(&v),
+        None => return false,
+    };
+
+    built_minor != current_minor
 }
 
 fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
