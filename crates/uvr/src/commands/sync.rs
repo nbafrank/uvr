@@ -34,8 +34,7 @@ pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<(
         .context("Failed to create .uvr/library/")?;
 
     // Ensure .Rprofile exists so RStudio sees the uvr library
-    crate::commands::init::ensure_rprofile(&project.root)
-        .context("Failed to write .Rprofile")?;
+    crate::commands::init::ensure_rprofile(&project.root).context("Failed to write .Rprofile")?;
 
     // Write .vscode/settings.json for Positron R interpreter
     crate::commands::init::ensure_positron_settings(&project.root)
@@ -362,10 +361,7 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
 
     if let Ok(status) = result {
         if status.success() {
-            println!(
-                "  {} uvr R companion package installed",
-                style("✓").green(),
-            );
+            println!("  {} uvr R companion package installed", style("✓").green(),);
         }
     }
 

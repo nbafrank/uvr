@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use console::style;
 
 use uvr_core::manifest::Manifest;
-use uvr_core::project::{DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE};
+use uvr_core::project::{
+    DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE,
+};
 use uvr_core::r_version::detector::find_r_binary;
 
 pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
