@@ -366,17 +366,21 @@ P3M binary packages are sourced from [Posit Package Manager](https://packagemana
 
 ## R companion package
 
-The `r-package/` directory contains an R package that wraps the `uvr` CLI for use from R/RStudio:
+The [`uvr` R package](https://github.com/nbafrank/uvr-r) wraps the CLI for use from R/RStudio/Positron — no terminal needed:
 
 ```r
-uvr::init()                    # uvr init
-uvr::add("ggplot2")            # uvr add ggplot2
-uvr::sync()                    # uvr sync
-uvr::run("analysis.R")         # uvr run analysis.R
-uvr::install_uvr()             # download + install the uvr binary
+# install.packages("pak")
+pak::pak("nbafrank/uvr-r")
+
+library(uvr)
+init()                         # uvr init
+add("ggplot2")                 # uvr add ggplot2
+sync()                         # uvr sync
+run("analysis.R")              # uvr run analysis.R
+install_uvr()                  # download + install the uvr binary
 ```
 
-See `r-package/` for installation instructions.
+See the [uvr-r repo](https://github.com/nbafrank/uvr-r) for full documentation.
 
 ---
 

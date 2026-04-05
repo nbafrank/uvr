@@ -1,4 +1,4 @@
-# uvr <img src="man/figures/logo.png" align="right" height="139" alt="" />
+# uvr <img src="man/figures/logo.png" align="right" height="139" alt="uvr hex logo" />
 
 <!-- badges: start -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
