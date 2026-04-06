@@ -145,6 +145,18 @@ install.packages("uvr", repos = NULL, type = "source",
 uvr::install_uvr()
 ```
 
+### Arch Linux (AUR)
+
+```sh
+# Pre-built binary
+yay -S uvr-bin
+
+# Or build from source
+yay -S uvr
+```
+
+See [uvr](https://aur.archlinux.org/packages/uvr) and [uvr-bin](https://aur.archlinux.org/packages/uvr-bin) on the AUR.
+
 ### From source (requires [Rust](https://rustup.rs))
 
 ```sh
