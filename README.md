@@ -86,8 +86,8 @@ Cold-install wall time (empty library -> all packages installed). P3M binaries f
 
 | Scenario | Packages | uvr sync | install.packages | Speedup |
 |----------|----------|----------|------------------|---------|
-| ggplot2  | 17       | **0.5s** | 13.9s            | ~28x    |
-| tidyverse| 99       | **1.6s** | 6.8s             | ~4x     |
+| ggplot2  | 17       | **3.7s** | 15.3s            | ~4x     |
+| tidyverse| 99       | **4.8s** | 6.8s             | ~1.4x   |
 
 > Run `bash benchmarks/bench.sh` to reproduce. Results vary by machine and network.
 

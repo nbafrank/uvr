@@ -318,6 +318,9 @@ pub async fn install_from_lockfile(
 /// Install the uvr R companion package from GitHub into the project library
 /// if it's not already installed. Failures are silently ignored — the companion
 /// package is a convenience, not a requirement.
+///
+/// The tarball is cached in `~/.uvr/cache/` for 24 hours to avoid re-downloading
+/// on every sync.
 pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path::Path) {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
@@ -334,21 +337,39 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".uvr")
         .join("cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
     let tarball = cache_dir.join("uvr-r-latest.tar.gz");
 
-    // Download the companion package tarball from GitHub
-    let url = "https://api.github.com/repos/nbafrank/uvr-r/tarball/main";
-    let download_ok = std::process::Command::new("curl")
-        .args(["-fsSL", url, "-o"])
-        .arg(&tarball)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    // Only download if the cached tarball is missing or older than 24 hours
+    let needs_download = if tarball.exists() {
+        tarball
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| {
+                mtime
+                    .elapsed()
+                    .map(|age| age.as_secs() > 86400)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true)
+    } else {
+        true
+    };
 
-    if !download_ok {
-        return;
+    if needs_download {
+        let url = "https://api.github.com/repos/nbafrank/uvr-r/tarball/main";
+        let download_ok = std::process::Command::new("curl")
+            .args(["-fsSL", url, "-o"])
+            .arg(&tarball)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !download_ok {
+            return;
+        }
     }
 
     let result = std::process::Command::new(r_binary)
@@ -364,9 +385,6 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
             println!("  {} uvr R companion package installed", style("✓").green(),);
         }
     }
-
-    // Clean up tarball
-    let _ = std::fs::remove_file(&tarball);
 }
 
 /// Check if the installed companion package was built under a different R major.minor.

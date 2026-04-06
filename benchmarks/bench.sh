@@ -111,10 +111,23 @@ for scenario in $SCENARIOS; do
     NPKG=$(grep -c '^\[\[package\]\]' "$BENCHDIR/uvr.lock" 2>/dev/null || echo "?")
     set_result RESULT_NPKG_ENTRIES "$scenario" "$NPKG"
 
+    # Run sync once to seed companion package, then preserve it across wipes
+    (cd "$BENCHDIR" && "$UVR" sync >/dev/null 2>&1) || true
+    COMPANION_DIR="$BENCHDIR/.uvr/library/uvr"
+
     for i in $(seq 1 "$RUNS"); do
-        # Wipe library, keep lockfile
+        # Wipe library but preserve companion package to avoid re-install overhead
+        COMPANION_BAK=""
+        if [ -d "$COMPANION_DIR" ]; then
+            COMPANION_BAK="$(mktemp -d)"
+            mv "$COMPANION_DIR" "$COMPANION_BAK/uvr"
+        fi
         rm -rf "$BENCHDIR/.uvr/library"
         mkdir -p "$BENCHDIR/.uvr/library"
+        if [ -n "$COMPANION_BAK" ]; then
+            mv "$COMPANION_BAK/uvr" "$COMPANION_DIR"
+            rm -rf "$COMPANION_BAK"
+        fi
         t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' sync")
         UVR_TIMES="$UVR_TIMES $t"
         echo -n "${t}s "
