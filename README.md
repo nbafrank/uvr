@@ -155,7 +155,7 @@ yay -S uvr-bin
 yay -S uvr
 ```
 
-See [uvr](https://aur.archlinux.org/packages/uvr) and [uvr-bin](https://aur.archlinux.org/packages/uvr-bin) on the AUR.
+Packages maintained by [@novica](https://github.com/novica). See [uvr](https://aur.archlinux.org/packages/uvr) and [uvr-bin](https://aur.archlinux.org/packages/uvr-bin) on the AUR.
 
 ### From source (requires [Rust](https://rustup.rs))
 
