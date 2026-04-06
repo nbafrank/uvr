@@ -1,4 +1,4 @@
-# uvr
+# uvr <img src="r-package/man/figures/logo.jpg" align="right" height="139" alt="uvr hex logo" />
 
 [![CI](https://github.com/nbafrank/uvr/actions/workflows/ci.yml/badge.svg)](https://github.com/nbafrank/uvr/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -15,6 +15,20 @@ $ uvr init my-analysis
 $ uvr add ggplot2 dplyr tidymodels
 $ uvr sync          # installs from lockfile, idempotent
 $ uvr run analysis.R
+```
+
+### R companion package
+
+Prefer working from the R console? The [`uvr` R package](https://github.com/nbafrank/uvr-r) wraps the CLI for use from R/RStudio/Positron — no terminal needed:
+
+```r
+pak::pak("nbafrank/uvr-r")
+
+library(uvr)
+init()                         # uvr init
+add("ggplot2")                 # uvr add ggplot2
+sync()                         # uvr sync
+run("analysis.R")              # uvr run analysis.R
 ```
 
 ---
@@ -373,26 +387,6 @@ Cache
 | Windows x86-64 | P3M | Y (with Rtools) | Y (no admin required) |
 
 P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). Linux R binaries are sourced from [Posit CDN](https://cdn.posit.co/) (Ubuntu 22.04+ only); macOS R binaries from CRAN; Windows R from the CRAN Inno Setup installer.
-
----
-
-## R companion package
-
-The [`uvr` R package](https://github.com/nbafrank/uvr-r) wraps the CLI for use from R/RStudio/Positron — no terminal needed:
-
-```r
-# install.packages("pak")
-pak::pak("nbafrank/uvr-r")
-
-library(uvr)
-init()                         # uvr init
-add("ggplot2")                 # uvr add ggplot2
-sync()                         # uvr sync
-run("analysis.R")              # uvr run analysis.R
-install_uvr()                  # download + install the uvr binary
-```
-
-See the [uvr-r repo](https://github.com/nbafrank/uvr-r) for full documentation.
 
 ---
 
