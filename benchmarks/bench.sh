@@ -52,22 +52,24 @@ echo "uvr:  $($UVR --version 2>&1 || echo 'unknown')"
 echo "runs: $RUNS per tool"
 echo ""
 
-# Check if pak is available via uvr run
+# Check if pak / renv are available
 HAS_PAK=false
+HAS_RENV=false
 TMPCHECK="$(mktemp -d)"
 cp "$SCRIPT_DIR/uvr-ggplot2.toml" "$TMPCHECK/uvr.toml"
 mkdir -p "$TMPCHECK/.uvr/library"
-if (cd "$TMPCHECK" && "$UVR" run -e 'if (requireNamespace("pak", quietly=TRUE)) cat("yes") else cat("no")' 2>/dev/null) | grep -q yes; then
-    HAS_PAK=true
-fi
+cat > "$TMPCHECK/check_tools.R" <<'REOF'
+if (requireNamespace("pak", quietly=TRUE)) cat("pak:yes\n") else cat("pak:no\n")
+if (requireNamespace("renv", quietly=TRUE)) cat("renv:yes\n") else cat("renv:no\n")
+REOF
+TOOL_CHECK=$(cd "$TMPCHECK" && "$UVR" run check_tools.R 2>/dev/null)
+if echo "$TOOL_CHECK" | grep -q "pak:yes"; then HAS_PAK=true; fi
+if echo "$TOOL_CHECK" | grep -q "renv:yes"; then HAS_RENV=true; fi
 rm -rf "$TMPCHECK"
 
 echo "tools: uvr, install.packages"
-if $HAS_PAK; then
-    echo "       pak (detected)"
-else
-    echo "       pak (not found — skipping)"
-fi
+if $HAS_PAK; then echo "       pak (detected)"; else echo "       pak (not found — skipping)"; fi
+if $HAS_RENV; then echo "       renv (detected)"; else echo "       renv (not found — skipping)"; fi
 echo ""
 
 # ─── storage (flat arrays — bash 3 compatible) ─────────────────────────────
@@ -76,6 +78,7 @@ echo ""
 RESULT_UVR_ENTRIES=""
 RESULT_IP_ENTRIES=""
 RESULT_PAK_ENTRIES=""
+RESULT_RENV_ENTRIES=""
 RESULT_NPKG_ENTRIES=""
 
 set_result() { eval "${1}=\"\${${1}} ${2}:${3}\""; }
@@ -187,6 +190,36 @@ REOF
         echo "→ median ${MED}s"
     fi
 
+    # ── renv ────────────────────────────────────────────────────────────────
+
+    if $HAS_RENV; then
+        echo -n "  renv::restore:       "
+        RENV_TIMES=""
+        for i in $(seq 1 "$RUNS"); do
+            BENCHDIR="$(mktemp -d)"
+            cp "$MANIFEST" "$BENCHDIR/uvr.toml"
+            mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/renvlib"
+
+            # Generate an renv.lock from the uvr lockfile, then restore from it
+            cat > "$BENCHDIR/bench_renv.R" <<REOF
+lib <- file.path(getwd(), "renvlib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+options(repos = c(CRAN = "${P3M_REPO}"))
+# Bootstrap renv in this temp project
+renv::init(bare = TRUE, settings = list(use.cache = FALSE))
+# Install the target package + deps into the renv library
+renv::install("${scenario}", prompt = FALSE)
+REOF
+            t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_renv.R")
+            RENV_TIMES="$RENV_TIMES $t"
+            rm -rf "$BENCHDIR"
+            echo -n "${t}s "
+        done
+        MED=$(median $RENV_TIMES)
+        set_result RESULT_RENV_ENTRIES "$scenario" "$MED"
+        echo "→ median ${MED}s"
+    fi
+
     echo ""
 done
 
@@ -195,24 +228,23 @@ done
 echo ""
 echo "## Results"
 echo ""
-if $HAS_PAK; then
-    echo "| Scenario | Packages | uvr sync | install.packages | pak |"
-    echo "|----------|----------|----------|------------------|-----|"
-else
-    echo "| Scenario | Packages | uvr sync | install.packages |"
-    echo "|----------|----------|----------|------------------|"
-fi
+
+# Build header dynamically
+HEADER="| Scenario | Packages | uvr sync | install.packages"
+SEPARATOR="|----------|----------|----------|------------------"
+if $HAS_PAK; then HEADER="$HEADER | pak"; SEPARATOR="$SEPARATOR|-----"; fi
+if $HAS_RENV; then HEADER="$HEADER | renv"; SEPARATOR="$SEPARATOR|------"; fi
+echo "$HEADER |"
+echo "$SEPARATOR|"
 
 for scenario in $SCENARIOS; do
     npkg=$(get_result RESULT_NPKG_ENTRIES "$scenario")
     uvr_t="$(get_result RESULT_UVR_ENTRIES "$scenario")s"
     ip_t="$(get_result RESULT_IP_ENTRIES "$scenario")s"
-    if $HAS_PAK; then
-        pak_t="$(get_result RESULT_PAK_ENTRIES "$scenario")s"
-        echo "| $scenario | $npkg | **$uvr_t** | $ip_t | $pak_t |"
-    else
-        echo "| $scenario | $npkg | **$uvr_t** | $ip_t |"
-    fi
+    ROW="| $scenario | $npkg | **$uvr_t** | $ip_t"
+    if $HAS_PAK; then ROW="$ROW | $(get_result RESULT_PAK_ENTRIES "$scenario")s"; fi
+    if $HAS_RENV; then ROW="$ROW | $(get_result RESULT_RENV_ENTRIES "$scenario")s"; fi
+    echo "$ROW |"
 done
 
 echo ""
