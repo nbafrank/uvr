@@ -488,4 +488,16 @@ mod tests {
         assert!(pos("rlang") < pos("dplyr"));
         assert!(pos("dplyr") < pos("ggplot2"));
     }
+
+    #[test]
+    fn four_component_version_matches_constraint() {
+        // Regression: data.table 1.18.2.1 → semver 1.18.2-4.1
+        // >=1.13.0 must match despite the pre-release tag
+        let normalized = normalize_version("1.18.2.1");
+        assert_eq!(normalized, "1.18.2-4.1");
+
+        let v = Version::parse(&normalized).unwrap();
+        let req = parse_version_req(">=1.13.0").unwrap();
+        assert!(version_matches_req(&v, &req));
+    }
 }
