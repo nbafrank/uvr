@@ -105,6 +105,10 @@ pub struct AddArgs {
     #[arg(long)]
     pub bioc: bool,
 
+    /// Custom repository URL (CRAN-like), e.g. https://community.r-multiverse.org
+    #[arg(long, value_name = "URL")]
+    pub source: Option<String>,
+
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "4", value_name = "N")]
     pub jobs: usize,

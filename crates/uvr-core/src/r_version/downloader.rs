@@ -566,10 +566,15 @@ fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()>
 
     info!("Installing R {version} silently to {}", dest.display());
 
-    // Quote the /DIR= value — Windows usernames frequently contain spaces
-    // (e.g. C:\Users\John Smith\...) and Inno Setup splits on unquoted spaces.
-    let dir_arg = format!("/DIR=\"{}\"", dest.to_string_lossy());
-    let status = Command::new(&exe_path)
+    // Inno Setup log for diagnosing install failures
+    let log_path = tmp.path().join("r-install.log");
+
+    // Do NOT embed extra quotes around the /DIR= path — Rust's Command API
+    // already quotes arguments when building the Windows command line.
+    // Embedding quotes causes double-escaping that Inno Setup rejects (exit 1).
+    let dir_arg = format!("/DIR={}", dest.to_string_lossy());
+    let log_arg = format!("/LOG={}", log_path.to_string_lossy());
+    let output = Command::new(&exe_path)
         .args([
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
@@ -577,14 +582,37 @@ fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()>
             "/CURRENTUSER",
             "/NOICONS",
             "/NORESTART",
+            &log_arg,
         ])
-        .status()?;
+        .output()?;
 
-    if !status.success() {
-        return Err(UvrError::Other(format!(
+    if !output.status.success() {
+        let mut detail = format!(
             "R {version} silent installer failed (exit {})",
-            status.code().unwrap_or(-1)
-        )));
+            output.status.code().unwrap_or(-1)
+        );
+
+        // Include Inno Setup log if available
+        if let Ok(log) = std::fs::read_to_string(&log_path) {
+            let lines: Vec<&str> = log.lines().collect();
+            let start = lines.len().saturating_sub(20);
+            let last_lines = lines[start..].join("\n");
+            detail.push_str(&format!("\n\nInstaller log (last 20 lines):\n{last_lines}"));
+        }
+
+        // Include stdout/stderr if any
+        if !output.stdout.is_empty() {
+            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                detail.push_str(&format!("\n\nstdout: {stdout}"));
+            }
+        }
+        if !output.stderr.is_empty() {
+            if let Ok(stderr) = String::from_utf8(output.stderr) {
+                detail.push_str(&format!("\n\nstderr: {stderr}"));
+            }
+        }
+
+        return Err(UvrError::Other(detail));
     }
 
     Ok(())

@@ -57,10 +57,11 @@ impl CranPackageEntry {
     }
 
     pub fn tarball_url(&self) -> String {
-        format!(
-            "{}/{}_{}.tar.gz",
-            CRAN_SRC_BASE, self.name, self.raw_version
-        )
+        self.tarball_url_with_base(CRAN_SRC_BASE)
+    }
+
+    pub fn tarball_url_with_base(&self, base: &str) -> String {
+        format!("{}/{}_{}.tar.gz", base, self.name, self.raw_version)
     }
 }
 
@@ -117,21 +118,86 @@ impl CranIndex {
 }
 
 /// The CRAN registry — downloads and caches the package index.
+/// Also used for CRAN-like repositories (r-multiverse, r-universe, PPM)
+/// via `fetch_from()`.
 pub struct CranRegistry {
     index: CranIndex,
+    /// Base URL for tarballs (e.g. `https://cran.r-project.org/src/contrib`).
+    src_base: String,
+    /// Package source to record in the lockfile.
+    source: PackageSource,
 }
 
 impl CranRegistry {
     /// Fetch (or load from cache) the CRAN index.
     pub async fn fetch(client: &reqwest::Client, force_refresh: bool) -> Result<Self> {
-        let cache_path = cache_path_for_today();
+        Self::fetch_from(
+            client,
+            "cran",
+            CRAN_PACKAGES_URL,
+            CRAN_SRC_BASE,
+            PackageSource::Cran,
+            force_refresh,
+        )
+        .await
+    }
+
+    /// Fetch a CRAN-like index from any repository that serves PACKAGES.gz.
+    /// Used for custom repositories like r-multiverse, r-universe, etc.
+    pub async fn fetch_custom(
+        client: &reqwest::Client,
+        repo_name: &str,
+        base_url: &str,
+        force_refresh: bool,
+    ) -> Result<Self> {
+        let base_url = base_url.trim_end_matches('/');
+        let packages_url = format!("{base_url}/src/contrib/PACKAGES.gz");
+        let src_base = format!("{base_url}/src/contrib");
+        // Use repo_name + URL hash as cache key to avoid collisions
+        // between repos on the same hostname with different paths.
+        use md5::{Digest, Md5};
+        let hash = hex::encode(Md5::digest(base_url.as_bytes()));
+        let cache_key = format!("{repo_name}-{}", &hash[..8]);
+        Self::fetch_from(
+            client,
+            &cache_key,
+            &packages_url,
+            &src_base,
+            PackageSource::Custom {
+                name: repo_name.to_string(),
+            },
+            force_refresh,
+        )
+        .await
+    }
+
+    async fn fetch_from(
+        client: &reqwest::Client,
+        cache_key: &str,
+        packages_url: &str,
+        src_base: &str,
+        source: PackageSource,
+        force_refresh: bool,
+    ) -> Result<Self> {
+        let cache_path = cache_path_for(cache_key);
 
         let (raw, from_cache) = if !force_refresh && cache_path.exists() {
-            debug!("Loading CRAN index from cache: {}", cache_path.display());
+            debug!(
+                "Loading {} index from cache: {}",
+                cache_key,
+                cache_path.display()
+            );
             (std::fs::read(&cache_path)?, true)
         } else {
-            info!("Downloading CRAN PACKAGES.gz...");
-            let bytes = client.get(CRAN_PACKAGES_URL).send().await?.bytes().await?;
+            info!("Downloading {} PACKAGES.gz...", cache_key);
+            let resp = client.get(packages_url).send().await?;
+            if !resp.status().is_success() {
+                return Err(UvrError::Other(format!(
+                    "Failed to fetch package index from {packages_url} (HTTP {})",
+                    resp.status()
+                )));
+            }
+            let bytes = resp.bytes().await?;
             let mut gz = GzDecoder::new(bytes.as_ref());
             let mut decompressed = Vec::new();
             gz.read_to_end(&mut decompressed)?;
@@ -150,8 +216,20 @@ impl CranRegistry {
             let _ = std::fs::write(&cache_path, &raw);
         }
 
-        info!("CRAN index: {} packages", index.len());
-        Ok(CranRegistry { index })
+        info!("{} index: {} packages", cache_key, index.len());
+        Ok(CranRegistry {
+            index,
+            src_base: src_base.to_string(),
+            source,
+        })
+    }
+
+    /// Build a tarball URL for a package entry using this registry's base URL.
+    fn tarball_url(&self, entry: &CranPackageEntry) -> String {
+        format!(
+            "{}/{}_{}.tar.gz",
+            self.src_base, entry.name, entry.raw_version
+        )
     }
 }
 
@@ -161,27 +239,27 @@ impl PackageRegistry for CranRegistry {
         Ok(PackageInfo {
             name: entry.name.clone(),
             version: entry.version.clone(),
-            source: PackageSource::Cran,
+            source: self.source.clone(),
             checksum: if entry.md5sum.is_empty() {
                 None
             } else {
                 Some(format!("md5:{}", entry.md5sum))
             },
             requires: entry.requires_as_deps(),
-            url: entry.tarball_url(),
+            url: self.tarball_url(entry),
             raw_version: Some(entry.raw_version.clone()),
             system_requirements: entry.system_requirements.clone(),
         })
     }
 }
 
-fn cache_path_for_today() -> PathBuf {
+fn cache_path_for(key: &str) -> PathBuf {
     let date = Local::now().format("%Y-%m-%d").to_string();
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".uvr")
         .join("cache")
-        .join(format!("cran-packages-{date}.txt"))
+        .join(format!("{key}-packages-{date}.txt"))
 }
 
 /// Parse DCF-format PACKAGES text into a `CranIndex`.

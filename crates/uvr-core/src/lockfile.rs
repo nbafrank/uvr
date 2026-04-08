@@ -50,13 +50,42 @@ pub struct LockedPackage {
     pub system_requirements: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PackageSource {
     Cran,
     Bioconductor,
     GitHub,
     Local,
+    /// A custom CRAN-like repository (r-multiverse, r-universe, PPM, etc.)
+    Custom {
+        name: String,
+    },
+}
+
+impl Serialize for PackageSource {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageSource {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "cran" => PackageSource::Cran,
+            "bioconductor" => PackageSource::Bioconductor,
+            "github" => PackageSource::GitHub,
+            "local" => PackageSource::Local,
+            other => PackageSource::Custom {
+                name: other.to_string(),
+            },
+        })
+    }
 }
 
 impl std::fmt::Display for PackageSource {
@@ -66,6 +95,7 @@ impl std::fmt::Display for PackageSource {
             PackageSource::Bioconductor => write!(f, "bioconductor"),
             PackageSource::GitHub => write!(f, "github"),
             PackageSource::Local => write!(f, "local"),
+            PackageSource::Custom { name } => write!(f, "{name}"),
         }
     }
 }
@@ -194,5 +224,32 @@ source = "cran"
 "#;
         let lf: Lockfile = old.parse().unwrap();
         assert!(lf.get_package("ggplot2").unwrap().url.is_none());
+    }
+
+    #[test]
+    fn round_trip_custom_source() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "polars"
+version = "0.20.0"
+source = "community.r-multiverse.org"
+url = "https://community.r-multiverse.org/src/contrib/polars_0.20.0.tar.gz"
+"#;
+        let lf: Lockfile = input.parse().expect("parse custom source");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Custom {
+                name: "community.r-multiverse.org".to_string()
+            }
+        );
+
+        // Serialize and parse back — must survive the round-trip
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "community.r-multiverse.org""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
     }
 }

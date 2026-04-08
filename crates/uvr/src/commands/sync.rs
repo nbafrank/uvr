@@ -490,6 +490,11 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
             )
         }
         PackageSource::GitHub | PackageSource::Local => String::new(),
+        PackageSource::Custom { .. } => {
+            // Custom repo packages should always have a stored URL from resolution.
+            // Fall back to empty if somehow missing.
+            String::new()
+        }
     }
 }
 

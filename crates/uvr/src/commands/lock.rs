@@ -6,8 +6,8 @@ use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
-use uvr_core::registry::CompositeRegistry;
-use uvr_core::resolver::Resolver;
+use uvr_core::registry::RegistryChain;
+use uvr_core::resolver::{PackageRegistry, Resolver};
 
 pub async fn run(upgrade: bool) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -62,6 +62,15 @@ async fn resolve_lockfile(
         .await
         .context("Failed to fetch CRAN index")?;
 
+    // Fetch custom repository indices from manifest [[sources]].
+    let mut custom_registries: Vec<CranRegistry> = Vec::new();
+    for source in &project.manifest.sources {
+        let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade)
+            .await
+            .with_context(|| format!("Failed to fetch index for repository '{}'", source.name))?;
+        custom_registries.push(reg);
+    }
+
     // Fetch Bioconductor index only when the manifest has bioc deps.
     let has_bioc = project.manifest.dependencies.values().any(|s| s.is_bioc())
         || project
@@ -72,12 +81,10 @@ async fn resolve_lockfile(
 
     let bioc_opt: Option<BiocRegistry> = if has_bioc {
         let bioc = if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
-            // Explicit bioc_version in manifest — use it directly.
             BiocRegistry::fetch_release(client, bioc_ver)
                 .await
                 .context("Failed to fetch Bioconductor index")?
         } else {
-            // Auto-detect Bioconductor release from the active R version.
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
             BiocRegistry::fetch(client, r_ver)
                 .await
@@ -88,9 +95,18 @@ async fn resolve_lockfile(
         None
     };
 
-    let mut lockfile = if let Some(ref bioc) = bioc_opt {
-        let composite = CompositeRegistry::new(&cran, bioc);
-        Resolver::new(&composite)
+    // Build the registry chain: CRAN → custom sources → Bioconductor
+    let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
+        let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
+        chain.push(&cran);
+        for reg in &custom_registries {
+            chain.push(reg);
+        }
+        if let Some(ref bioc) = bioc_opt {
+            chain.push(bioc);
+        }
+        let registry = RegistryChain::new(chain);
+        Resolver::new(&registry)
             .resolve(&project.manifest, actual_r_version.as_deref())
             .context("Dependency resolution failed")?
     } else {

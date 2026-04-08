@@ -72,8 +72,46 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     Ok((name, spec))
 }
 
-pub async fn run(packages: Vec<String>, dev: bool, bioc: bool, jobs: usize) -> Result<()> {
+pub async fn run(
+    packages: Vec<String>,
+    dev: bool,
+    bioc: bool,
+    source: Option<String>,
+    jobs: usize,
+) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
+
+    // If --source is provided, ensure it's in the manifest's [[sources]]
+    if let Some(ref url) = source {
+        let url_trimmed = url.trim_end_matches('/');
+        let already_exists = project
+            .manifest
+            .sources
+            .iter()
+            .any(|s| s.url.trim_end_matches('/') == url_trimmed);
+        if !already_exists {
+            // Derive a short name from the URL hostname
+            let name = url_trimmed
+                .strip_prefix("https://")
+                .or_else(|| url_trimmed.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("custom")
+                .to_string();
+            project
+                .manifest
+                .sources
+                .push(uvr_core::manifest::PackageSource {
+                    name: name.clone(),
+                    url: url_trimmed.to_string(),
+                });
+            println!(
+                "{} Added source '{}' ({})",
+                style("+").green().bold(),
+                style(&name).cyan(),
+                url_trimmed
+            );
+        }
+    }
 
     let parsed: Vec<(String, DependencySpec)> = packages
         .iter()
@@ -113,6 +151,10 @@ pub async fn run(packages: Vec<String>, dev: bool, bioc: bool, jobs: usize) -> R
         // Roll back the manifest to its original state
         if let Some(original) = original_manifest {
             let _ = std::fs::write(&manifest_path, original);
+            println!(
+                "{} Rolled back uvr.toml (resolution failed)",
+                style("!").yellow().bold()
+            );
         }
         return Err(e).context("Failed to resolve dependencies after add");
     }

@@ -32,27 +32,31 @@ impl Dep {
     }
 }
 
-/// A registry that tries a primary source and falls back to a secondary on
-/// `PackageNotFound`. This routes most packages through CRAN while transparently
-/// resolving Bioconductor-only packages (and their transitive deps) without
-/// requiring the caller to know which registry a given package lives in.
-pub struct CompositeRegistry<'a> {
-    primary: &'a dyn PackageRegistry,
-    fallback: &'a dyn PackageRegistry,
+/// A registry chain that tries multiple registries in order, falling back
+/// to the next on `PackageNotFound`. Used when custom repositories are configured.
+pub struct RegistryChain<'a> {
+    registries: Vec<&'a dyn PackageRegistry>,
 }
 
-impl<'a> CompositeRegistry<'a> {
-    pub fn new(primary: &'a dyn PackageRegistry, fallback: &'a dyn PackageRegistry) -> Self {
-        CompositeRegistry { primary, fallback }
+impl<'a> RegistryChain<'a> {
+    pub fn new(registries: Vec<&'a dyn PackageRegistry>) -> Self {
+        RegistryChain { registries }
     }
 }
 
-impl<'a> PackageRegistry for CompositeRegistry<'a> {
+impl<'a> PackageRegistry for RegistryChain<'a> {
     fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
-        match self.primary.resolve_package(name, constraint) {
-            Err(UvrError::PackageNotFound(_)) => self.fallback.resolve_package(name, constraint),
-            other => other,
+        let mut last_err = None;
+        for registry in &self.registries {
+            match registry.resolve_package(name, constraint) {
+                Ok(info) => return Ok(info),
+                Err(UvrError::PackageNotFound(_)) => {
+                    last_err = Some(UvrError::PackageNotFound(name.to_string()));
+                }
+                Err(e) => return Err(e),
+            }
         }
+        Err(last_err.unwrap_or_else(|| UvrError::PackageNotFound(name.to_string())))
     }
 }
 

@@ -65,11 +65,12 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
 
     let mut packages = HashMap::new();
     for pkg in &lockfile.packages {
-        let (source, repository) = match pkg.source {
+        let (source, repository) = match &pkg.source {
             PackageSource::Cran => ("Repository".to_string(), Some("CRAN".to_string())),
             PackageSource::Bioconductor => ("Bioconductor".to_string(), None),
             PackageSource::GitHub => ("GitHub".to_string(), None),
             PackageSource::Local => ("Local".to_string(), None),
+            PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
         };
 
         let version = pkg

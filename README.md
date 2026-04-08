@@ -86,10 +86,10 @@ Cold-install wall time (empty library -> all packages installed). P3M binaries, 
 
 | Scenario  | Packages | uvr sync  | pak       | renv     | install.packages |
 |-----------|----------|-----------|-----------|----------|------------------|
-| ggplot2   | 17       | **3.7s**  | 3.3s      | 3.7s     | 17.0s            |
-| tidyverse | 99       | **4.9s**  | 7.5s      | 8.1s     | 8.1s             |
+| ggplot2   | 17       | **0.6s**  | 2.8s      | 3.6s     | 13.9s            |
+| tidyverse | 99       | **1.6s**  | 5.6s      | 6.4s     | 7.0s             |
 
-For small installs, uvr, pak, and renv are comparable. As dependency trees grow, uvr's parallel download + direct extraction approach pulls ahead. `install.packages()` is consistently the slowest.
+uvr is consistently the fastest — ~5x faster than pak on ggplot2, ~3.5x on tidyverse. The speed comes from parallel downloads, direct binary extraction (no R overhead), and aggressive caching.
 
 > Run `bash benchmarks/bench.sh` to reproduce. Requires pak and renv for full comparison. Results vary by machine and network.
 
