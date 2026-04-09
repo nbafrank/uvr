@@ -358,12 +358,18 @@ pub async fn install_from_lockfile(
     Ok(())
 }
 
+/// Pinned commit SHA and expected SHA-256 hash of the companion R package tarball.
+/// Update these together when releasing a new companion version.
+const COMPANION_SHA: &str = "4e89ec7806df9d5e19870e515d24feed50b3bbb4";
+const COMPANION_HASH: &str = "5942b23cfcafe6b83b3c500f4820434944051ab30b21e91e49fdd4be405002b8";
+
 /// Install the uvr R companion package from GitHub into the project library
 /// if it's not already installed. Failures are silently ignored — the companion
 /// package is a convenience, not a requirement.
 ///
-/// The tarball is cached in `~/.uvr/cache/` for 24 hours to avoid re-downloading
-/// on every sync.
+/// Security: the download is pinned to an immutable commit SHA and verified
+/// against a hardcoded SHA-256 hash, preventing supply-chain attacks via the
+/// companion repo.
 pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path::Path) {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
@@ -381,28 +387,16 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
         .join(".uvr")
         .join("cache");
     let _ = std::fs::create_dir_all(&cache_dir);
-    let tarball = cache_dir.join("uvr-r-latest.tar.gz");
+    let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
 
-    // Only download if the cached tarball is missing or older than 24 hours
-    let needs_download = if tarball.exists() {
-        tarball
-            .metadata()
-            .and_then(|m| m.modified())
-            .map(|mtime| {
-                mtime
-                    .elapsed()
-                    .map(|age| age.as_secs() > 86400)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(true)
-    } else {
-        true
-    };
-
-    if needs_download {
-        let url = "https://api.github.com/repos/nbafrank/uvr-r/tarball/main";
+    // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
+    // If the hash changes (new companion release), the filename changes too.
+    if !tarball.exists() {
+        let url = format!(
+            "https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}"
+        );
         let download_ok = std::process::Command::new("curl")
-            .args(["-fsSL", url, "-o"])
+            .args(["-fsSL", &url, "-o"])
             .arg(&tarball)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -411,6 +405,24 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
             .unwrap_or(false);
 
         if !download_ok {
+            let _ = std::fs::remove_file(&tarball);
+            return;
+        }
+
+        // Verify SHA-256 checksum
+        if let Ok(bytes) = std::fs::read(&tarball) {
+            use sha2::{Digest, Sha256};
+            let hash = hex::encode(Sha256::digest(&bytes));
+            if hash != COMPANION_HASH {
+                tracing::warn!(
+                    "Companion package checksum mismatch (expected {}, got {}), skipping install",
+                    &COMPANION_HASH[..12],
+                    &hash[..12]
+                );
+                let _ = std::fs::remove_file(&tarball);
+                return;
+            }
+        } else {
             return;
         }
     }

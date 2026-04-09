@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
+use flate2::read::GzDecoder;
+use tracing::debug;
+
 use crate::error::{Result, UvrError};
 
 /// Extract a pre-built R binary package into `library`.
@@ -26,22 +29,7 @@ pub fn install_binary_package(
     if is_zip {
         extract_zip(tarball, library, package_name)?;
     } else {
-        let out = Command::new("tar")
-            .args([
-                "xf",
-                &tarball.to_string_lossy(),
-                "-C",
-                &library.to_string_lossy(),
-            ])
-            .output()?;
-
-        if !out.status.success() {
-            return Err(UvrError::Other(format!(
-                "Binary extraction failed for '{}': {}",
-                package_name,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
+        extract_tgz(tarball, library, package_name)?;
     }
 
     // Patch libR.dylib references in all .so files when using managed R (macOS only).
@@ -99,6 +87,80 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
             package_name, e
         ))
     })?;
+    Ok(())
+}
+
+/// Extract a `.tgz` binary package into the library directory.
+///
+/// Uses the pure-Rust `tar` + `flate2` crates instead of shelling out to `tar`,
+/// with path-traversal validation to prevent malicious tarballs from writing
+/// files outside the library directory.
+fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()> {
+    let file = std::fs::File::open(tgz_path)?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    let canonical_lib = library
+        .canonicalize()
+        .unwrap_or_else(|_| library.to_path_buf());
+
+    for entry in archive.entries().map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to read tgz for '{}': {}",
+            package_name, e
+        ))
+    })? {
+        let mut entry = entry.map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to read tgz entry for '{}': {}",
+                package_name, e
+            ))
+        })?;
+
+        let path = entry
+            .path()
+            .map_err(|e| {
+                UvrError::Other(format!(
+                    "Invalid path in tgz for '{}': {}",
+                    package_name, e
+                ))
+            })?
+            .into_owned();
+
+        // Guard against path traversal: reject entries with `..` components
+        // or absolute paths that would escape the library directory.
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(UvrError::Other(format!(
+                "Path traversal detected in package '{}': {}",
+                package_name,
+                path.display()
+            )));
+        }
+
+        let dest = canonical_lib.join(&path);
+        if !dest.starts_with(&canonical_lib) {
+            return Err(UvrError::Other(format!(
+                "Path traversal detected in package '{}': {}",
+                package_name,
+                path.display()
+            )));
+        }
+
+        entry.unpack(&dest).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to extract '{}' from '{}': {}",
+                path.display(),
+                package_name,
+                e
+            ))
+        })?;
+    }
+
+    debug!("Extracted tgz for {package_name} into {}", library.display());
     Ok(())
 }
 

@@ -31,13 +31,19 @@ pub async fn resolve_github_package(
 
     let desc_url =
         format!("https://raw.githubusercontent.com/{user}/{repo}/{commit_sha}/DESCRIPTION");
-    let desc_text = client
+    let desc_resp = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
         .send()
-        .await?
-        .text()
         .await?;
+    if !desc_resp.status().is_success() {
+        return Err(UvrError::Other(format!(
+            "Failed to fetch DESCRIPTION for {user}/{repo}@{commit_sha} (HTTP {}). \
+             Check that the repository contains a DESCRIPTION file at the root.",
+            desc_resp.status()
+        )));
+    }
+    let desc_text = desc_resp.text().await?;
 
     let desc_fields = crate::dcf::parse_dcf_fields(&desc_text);
     let pkg_name = desc_fields
