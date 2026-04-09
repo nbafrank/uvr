@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use console::style;
 
 use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
-use uvr_core::installer::download::Downloader;
+use uvr_core::installer::download::{DownloadSpec, Downloader};
 use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
 use uvr_core::project::Project;
@@ -251,19 +251,50 @@ pub async fn install_from_lockfile(
 
     // Decide URL and install method for each package.
     // Prefer P3M binary if available for the exact version; fall back to source.
-    let pkg_urls: Vec<(&LockedPackage, String, bool)> = to_install
+    // Each binary package also carries a source fallback URL in case the P3M
+    // server returns an error (e.g. HTTP 500).
+    struct PkgPlan<'a> {
+        pkg: &'a LockedPackage,
+        url: String,
+        fallback_url: Option<String>,
+        is_binary: bool,
+    }
+
+    let plans: Vec<PkgPlan> = to_install
         .iter()
         .map(|p| {
             if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
-                (*p, bin_url.to_string(), true)
+                PkgPlan {
+                    pkg: p,
+                    url: bin_url.to_string(),
+                    fallback_url: Some(source_url(p, bioc_release)),
+                    is_binary: true,
+                }
             } else {
-                (*p, source_url(p, bioc_release), false)
+                PkgPlan {
+                    pkg: p,
+                    url: source_url(p, bioc_release),
+                    fallback_url: None,
+                    is_binary: false,
+                }
             }
         })
         .collect();
 
-    let binary_count = pkg_urls.iter().filter(|(_, _, b)| *b).count();
-    let source_count = pkg_urls.len() - binary_count;
+    // Guard against packages with no download URL (e.g. GitHub/Local without a
+    // stored URL). Fail early with a clear message instead of firing a request
+    // against an empty string.
+    for plan in &plans {
+        if plan.url.is_empty() {
+            anyhow::bail!(
+                "Package '{}' has no download URL. Re-run `uvr lock` to regenerate the lockfile.",
+                plan.pkg.name
+            );
+        }
+    }
+
+    let binary_count = plans.iter().filter(|p| p.is_binary).count();
+    let source_count = plans.len() - binary_count;
     if binary_count > 0 {
         println!(
             "  {} binary, {} from source",
@@ -272,37 +303,49 @@ pub async fn install_from_lockfile(
         );
     }
 
-    let pairs: Vec<(&LockedPackage, &str, bool)> = pkg_urls
+    let specs: Vec<DownloadSpec> = plans
         .iter()
-        .map(|(p, url, is_binary)| (*p, url.as_str(), *is_binary))
+        .map(|p| DownloadSpec {
+            pkg: p.pkg,
+            url: &p.url,
+            fallback_url: p.fallback_url.as_deref(),
+            is_binary: p.is_binary,
+        })
         .collect();
 
     let downloader = Downloader::new(client, cache_dir, jobs);
-    let tarballs = downloader
-        .download_all(&pairs)
+    let results = downloader
+        .download_all(&specs)
         .await
         .context("Download failed")?;
 
     let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
-    for ((pkg, _, is_binary), tarball) in pkg_urls.iter().zip(tarballs.iter()) {
-        let pb = make_spinner(&format!("Installing {} {}...", pkg.name, pkg.version));
+    for (plan, result) in plans.iter().zip(results.iter()) {
+        let pb = make_spinner(&format!(
+            "Installing {} {}...",
+            plan.pkg.name, plan.pkg.version
+        ));
 
-        if *is_binary {
-            install_binary_package(tarball, &library, &pkg.name, libr_path.as_deref())
-                .with_context(|| format!("Failed to install {}", pkg.name))?;
+        if result.used_binary {
+            install_binary_package(&result.path, &library, &plan.pkg.name, libr_path.as_deref())
+                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
         } else {
             installer
-                .install(tarball, &library, &pkg.name)
-                .with_context(|| format!("Failed to install {}", pkg.name))?;
+                .install(&result.path, &library, &plan.pkg.name)
+                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
         }
 
         pb.finish_with_message(format!(
             "{} {} {}{}",
             style("✓").green(),
-            pkg.name,
-            style(&pkg.version).dim(),
-            if *is_binary { "" } else { " (compiled)" },
+            plan.pkg.name,
+            style(&plan.pkg.version).dim(),
+            if result.used_binary {
+                ""
+            } else {
+                " (compiled)"
+            },
         ));
     }
 

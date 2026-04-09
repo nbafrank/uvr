@@ -24,7 +24,8 @@ pub async fn run(upgrade: bool) -> Result<()> {
 /// Called by `uvr lock`, `uvr add`, and `uvr remove`.
 pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfile> {
     let client = build_client()?;
-    let lockfile = resolve_lockfile(project, &client, upgrade).await?;
+    let existing = load_existing_lockfile(project);
+    let lockfile = resolve_lockfile(project, &client, upgrade, existing.as_ref()).await?;
     project
         .save_lockfile(&lockfile)
         .context("Failed to write uvr.lock")?;
@@ -35,21 +36,26 @@ pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfi
 /// Used by `uvr sync --frozen` to verify the existing lockfile is current.
 pub async fn resolve_only(project: &Project) -> Result<Lockfile> {
     let client = build_client()?;
-    resolve_lockfile(project, &client, false).await
+    let existing = load_existing_lockfile(project);
+    resolve_lockfile(project, &client, false, existing.as_ref()).await
 }
 
 /// Resolve with upgrade=true WITHOUT writing the lockfile.
 /// Used by `uvr update --dry-run`.
 pub async fn resolve_only_upgraded(project: &Project) -> Result<Lockfile> {
     let client = build_client()?;
-    resolve_lockfile(project, &client, true).await
+    // --upgrade: don't reuse locked bioc_version, re-detect fresh
+    resolve_lockfile(project, &client, true, None).await
 }
 
 /// Core resolution logic shared by `resolve_and_lock` and `resolve_only`.
+/// `existing` is the current lockfile on disk, used to preserve the locked
+/// Bioconductor version across re-resolves (unless `upgrade` is true).
 async fn resolve_lockfile(
     project: &Project,
     client: &reqwest::Client,
     upgrade: bool,
+    existing: Option<&Lockfile>,
 ) -> Result<Lockfile> {
     // Query the actual running R version to pin in the lockfile.
     let r_constraint = project.manifest.project.r_version.as_deref();
@@ -81,10 +87,18 @@ async fn resolve_lockfile(
 
     let bioc_opt: Option<BiocRegistry> = if has_bioc {
         let bioc = if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
+            // Explicit bioc_version in manifest — always use it.
             BiocRegistry::fetch_release(client, bioc_ver)
                 .await
                 .context("Failed to fetch Bioconductor index")?
+        } else if let Some(locked_bioc) = existing.and_then(|lf| lf.r.bioc_version.as_deref()) {
+            // Reuse the Bioconductor version from the existing lockfile to prevent
+            // silent drift between resolves. Use `uvr lock --upgrade` to update.
+            BiocRegistry::fetch_release(client, locked_bioc)
+                .await
+                .context("Failed to fetch Bioconductor index")?
         } else {
+            // First resolve or no existing lockfile — auto-detect from R version.
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
             BiocRegistry::fetch(client, r_ver)
                 .await
@@ -122,6 +136,19 @@ async fn resolve_lockfile(
 
     spinner.finish_with_message(format!("Resolved {} packages", lockfile.packages.len()));
     Ok(lockfile)
+}
+
+/// Load the existing lockfile, warning (not erroring) on parse failures.
+/// A missing lockfile returns `None`; a corrupt lockfile logs a warning and
+/// returns `None` so resolution can proceed without stale bioc pins.
+fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
+    match project.load_lockfile() {
+        Ok(opt) => opt,
+        Err(e) => {
+            tracing::warn!("Failed to read existing lockfile, proceeding without it: {e}");
+            None
+        }
+    }
 }
 
 // Re-export from util for backward compatibility within this module

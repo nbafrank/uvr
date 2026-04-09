@@ -27,47 +27,81 @@ impl Downloader {
     }
 
     /// Download all packages in parallel (bounded by `self.concurrency`).
-    /// Returns paths to the downloaded tarballs in the same order as `packages`.
+    /// Returns `(tarball_path, was_binary)` in the same order as `packages`.
     ///
+    /// Each entry has a primary URL and an optional fallback URL. If the primary
+    /// download fails (e.g. P3M 500), the fallback is tried automatically.
     /// `is_binary` signals a P3M pre-built binary: checksum in the lockfile was
     /// recorded for the source tarball and must not be checked against the binary.
-    pub async fn download_all(
-        &self,
-        packages: &[(&LockedPackage, &str, bool)], // (package, url, is_binary)
-    ) -> Result<Vec<PathBuf>> {
+    pub async fn download_all(&self, packages: &[DownloadSpec<'_>]) -> Result<Vec<DownloadResult>> {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         let mp = Arc::new(MultiProgress::new());
 
         let tasks: Vec<_> = packages
             .iter()
-            .map(|(pkg, url, is_binary)| {
+            .map(|spec| {
                 let sem = semaphore.clone();
                 let mp = mp.clone();
                 let client = self.client.clone();
                 let cache_dir = self.cache_dir.clone();
-                let pkg_name = pkg.name.clone();
-                let pkg_version = pkg.version.clone();
-                let url = url.to_string();
-                // Binary packages: checksum in lockfile is for the source tarball;
-                // skip verification so we don't reject a valid P3M binary.
-                let checksum = if *is_binary {
+                let pkg_name = spec.pkg.name.clone();
+                let pkg_version = spec.pkg.version.clone();
+                let url = spec.url.to_string();
+                let fallback_url = spec.fallback_url.map(str::to_string);
+                let is_binary = spec.is_binary;
+                // Binary packages: lockfile checksum is for the source tarball, not the
+                // P3M binary. Skip verification on binary downloads, but keep the
+                // checksum for the fallback path which downloads the source tarball.
+                let source_checksum = spec.pkg.checksum.clone();
+                let primary_checksum = if is_binary {
                     None
                 } else {
-                    pkg.checksum.clone()
+                    source_checksum.clone()
                 };
 
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
-                    download_one(
+
+                    // Try primary URL
+                    let primary_result = download_one(
                         &client,
                         &cache_dir,
                         &pkg_name,
                         &pkg_version,
                         &url,
-                        checksum.as_deref(),
+                        primary_checksum.as_deref(),
                         &mp,
                     )
-                    .await
+                    .await;
+
+                    match primary_result {
+                        Ok(path) => Ok(DownloadResult {
+                            path,
+                            used_binary: is_binary,
+                        }),
+                        Err(e) if is_binary && fallback_url.is_some() => {
+                            // Binary download failed — fall back to source tarball
+                            let fallback = fallback_url.as_ref().unwrap();
+                            tracing::warn!(
+                                "P3M binary download failed for {pkg_name}, falling back to source: {e}"
+                            );
+                            let path = download_one(
+                                &client,
+                                &cache_dir,
+                                &pkg_name,
+                                &pkg_version,
+                                fallback,
+                                source_checksum.as_deref(),
+                                &mp,
+                            )
+                            .await?;
+                            Ok(DownloadResult {
+                                path,
+                                used_binary: false,
+                            })
+                        }
+                        Err(e) => Err(e),
+                    }
                 })
             })
             .collect();
@@ -78,6 +112,22 @@ impl Downloader {
         }
         Ok(results)
     }
+}
+
+/// Specification for downloading a single package.
+pub struct DownloadSpec<'a> {
+    pub pkg: &'a LockedPackage,
+    pub url: &'a str,
+    /// Fallback URL to try if primary fails (e.g. source tarball when P3M binary 500s).
+    pub fallback_url: Option<&'a str>,
+    pub is_binary: bool,
+}
+
+/// Result of downloading a single package.
+pub struct DownloadResult {
+    pub path: PathBuf,
+    /// Whether the download used the binary (P3M) URL or fell back to source.
+    pub used_binary: bool,
 }
 
 async fn download_one(

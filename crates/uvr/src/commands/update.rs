@@ -69,7 +69,7 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
 
         let mut merged_packages = Vec::new();
         for pkg in &new_lockfile.packages {
-            if packages.contains(&pkg.name) || packages.iter().any(|p| p == &pkg.name) {
+            if packages.contains(&pkg.name) {
                 // Requested for update — use the new version
                 merged_packages.push(pkg.clone());
             } else if let Some(old_pkg) = old_pkg_map.get(pkg.name.as_str()) {
