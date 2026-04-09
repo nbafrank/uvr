@@ -392,9 +392,7 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
     // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
     // If the hash changes (new companion release), the filename changes too.
     if !tarball.exists() {
-        let url = format!(
-            "https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}"
-        );
+        let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
         let download_ok = std::process::Command::new("curl")
             .args(["-fsSL", &url, "-o"])
             .arg(&tarball)

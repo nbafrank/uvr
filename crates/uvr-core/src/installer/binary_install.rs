@@ -104,12 +104,10 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
         .canonicalize()
         .unwrap_or_else(|_| library.to_path_buf());
 
-    for entry in archive.entries().map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to read tgz for '{}': {}",
-            package_name, e
-        ))
-    })? {
+    for entry in archive
+        .entries()
+        .map_err(|e| UvrError::Other(format!("Failed to read tgz for '{}': {}", package_name, e)))?
+    {
         let mut entry = entry.map_err(|e| {
             UvrError::Other(format!(
                 "Failed to read tgz entry for '{}': {}",
@@ -120,10 +118,7 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
         let path = entry
             .path()
             .map_err(|e| {
-                UvrError::Other(format!(
-                    "Invalid path in tgz for '{}': {}",
-                    package_name, e
-                ))
+                UvrError::Other(format!("Invalid path in tgz for '{}': {}", package_name, e))
             })?
             .into_owned();
 
@@ -160,7 +155,10 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
         })?;
     }
 
-    debug!("Extracted tgz for {package_name} into {}", library.display());
+    debug!(
+        "Extracted tgz for {package_name} into {}",
+        library.display()
+    );
     Ok(())
 }
 
