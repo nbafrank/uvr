@@ -210,13 +210,41 @@ pub fn version_matches_req(version: &Version, req: &VersionReq) -> bool {
 }
 
 /// Parse a version constraint string into a `semver::VersionReq`.
+///
+/// R version constraints may use 1 or 2 components (e.g. `> 2.4`), but semver
+/// requires 3. We pad with `.0` so that `> 2.4` becomes `> 2.4.0`.
 pub fn parse_version_req(s: &str) -> Result<VersionReq> {
     let s = s.trim();
     if s == "*" || s.is_empty() {
         return Ok(VersionReq::STAR);
     }
     let normalized = s.replace('-', ".");
-    VersionReq::parse(&normalized).map_err(UvrError::Semver)
+    // Pad each comparator's version to 3 components (semver requires major.minor.patch).
+    let padded = pad_version_in_req(&normalized);
+    VersionReq::parse(&padded).map_err(UvrError::Semver)
+}
+
+/// Pad version numbers in a requirement string to 3 components.
+/// E.g. `"> 2.4"` → `"> 2.4.0"`, `">= 3"` → `">= 3.0.0"`, `">= 1.0.0"` unchanged.
+fn pad_version_in_req(s: &str) -> String {
+    // Split on comma for compound requirements like ">= 1.0, < 2.0"
+    s.split(',')
+        .map(|part| {
+            let part = part.trim();
+            // Find where the version number starts (after operator chars and spaces)
+            let ver_start = part
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(part.len());
+            let (prefix, ver) = part.split_at(ver_start);
+            let dot_count = ver.chars().filter(|&c| c == '.').count();
+            match dot_count {
+                0 if !ver.is_empty() => format!("{prefix}{ver}.0.0"),
+                1 => format!("{prefix}{ver}.0"),
+                _ => part.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Normalize an R version string to semver.
@@ -487,6 +515,23 @@ mod tests {
         let pos = |name: &str| ordered.iter().position(|p| p.name == name).unwrap();
         assert!(pos("rlang") < pos("dplyr"));
         assert!(pos("dplyr") < pos("ggplot2"));
+    }
+
+    #[test]
+    fn strict_greater_than_constraint() {
+        // rbibutils 2.4.1 must satisfy > 2.4
+        let v = Version::parse(&normalize_version("2.4.1")).unwrap();
+        let req = parse_version_req("> 2.4").unwrap();
+        assert!(version_matches_req(&v, &req));
+
+        // 2-component: >= 3 should match 3.0.0
+        let v2 = Version::parse("3.0.0").unwrap();
+        let req2 = parse_version_req(">= 3").unwrap();
+        assert!(version_matches_req(&v2, &req2));
+
+        // Already 3-component should still work
+        let req3 = parse_version_req(">= 1.0.0").unwrap();
+        assert!(version_matches_req(&v, &req3));
     }
 
     #[test]

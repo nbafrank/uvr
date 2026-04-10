@@ -66,6 +66,7 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
                 // Check if this is a non-CRAN repository
                 if let Some(ref repo_url) = pkg.repository {
                     let is_cran = repo_url.eq_ignore_ascii_case("CRAN")
+                        || repo_url.eq_ignore_ascii_case("RSPM")
                         || repo_url.contains("cran.r-project.org")
                         || repo_url.contains("cran.rstudio.com")
                         || repo_url.contains("packagemanager.posit.co")
