@@ -237,8 +237,8 @@ fn test_import_with_explicit_path() {
 }
 
 #[test]
-fn test_import_fails_if_manifest_exists() {
-    let dir = init_project("import-conflict");
+fn test_import_merges_into_existing_manifest() {
+    let dir = init_project("import-merge");
     let renv_lock = fixture("sample_renv.lock");
     fs::copy(&renv_lock, dir.path().join("renv.lock")).unwrap();
 
@@ -246,8 +246,8 @@ fn test_import_fails_if_manifest_exists() {
         .args(["import"])
         .current_dir(dir.path())
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("uvr.toml already exists"));
+        .success()
+        .stdout(predicate::str::contains("Merged from renv.lock"));
 }
 
 #[test]
