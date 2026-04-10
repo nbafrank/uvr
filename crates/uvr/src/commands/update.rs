@@ -151,7 +151,7 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
         );
     } else {
         // Install updated packages
-        install_from_lockfile(&project, &effective_lockfile, jobs).await?;
+        install_from_lockfile(&project, &effective_lockfile, jobs, None).await?;
     }
 
     Ok(())

@@ -15,9 +15,9 @@ use uvr_core::resolver::topological_install_order;
 
 use crate::commands::util::make_spinner;
 
-pub async fn run(frozen: bool, jobs: usize) -> Result<()> {
+pub async fn run(frozen: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
-    run_inner(&project, frozen, jobs).await
+    run_inner(&project, frozen, jobs, library.as_deref()).await
 }
 
 /// Install all packages from the existing lockfile.
@@ -28,10 +28,20 @@ pub async fn run(frozen: bool, jobs: usize) -> Result<()> {
 /// With `frozen = true` (CI mode): first verify that the lockfile is consistent
 /// with the current manifest. If the manifest has diverged, exit with an error
 /// rather than silently installing a stale environment.
-pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<()> {
-    project
-        .ensure_library_dir()
-        .context("Failed to create .uvr/library/")?;
+pub async fn run_inner(
+    project: &Project,
+    frozen: bool,
+    jobs: usize,
+    library_override: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(lib) = library_override {
+        std::fs::create_dir_all(lib)
+            .with_context(|| format!("Failed to create library dir: {}", lib.display()))?;
+    } else {
+        project
+            .ensure_library_dir()
+            .context("Failed to create .uvr/library/")?;
+    }
 
     // Ensure .Rprofile exists so RStudio sees the uvr library
     crate::commands::init::ensure_rprofile(&project.root).context("Failed to write .Rprofile")?;
@@ -57,7 +67,7 @@ pub async fn run_inner(project: &Project, frozen: bool, jobs: usize) -> Result<(
         }
     }
 
-    install_from_lockfile(project, &lockfile, jobs).await
+    install_from_lockfile(project, &lockfile, jobs, library_override).await
 }
 
 /// Download and install any packages in `lockfile` not yet present in the project library.
@@ -73,8 +83,11 @@ pub async fn install_from_lockfile(
     project: &Project,
     lockfile: &Lockfile,
     jobs: usize,
+    library_override: Option<&std::path::Path>,
 ) -> Result<()> {
-    let library = project.library_path();
+    let library = library_override
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| project.library_path());
 
     // Detect R version mismatch: compare lockfile major.minor against current R.
     let r_constraint = project.manifest.project.r_version.as_deref();

@@ -160,7 +160,7 @@ pub async fn run(
     }
     let lockfile = resolve_result.unwrap();
 
-    crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs)
+    crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None)
         .await
         .context("Failed to install packages after add")?;
 

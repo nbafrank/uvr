@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -138,6 +140,10 @@ pub struct SyncArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "4", value_name = "N")]
     pub jobs: usize,
+
+    /// Install packages to a custom library path instead of .uvr/library/
+    #[arg(long, value_name = "PATH")]
+    pub library: Option<PathBuf>,
 }
 
 // ────────────────────────────────────────────────────────────

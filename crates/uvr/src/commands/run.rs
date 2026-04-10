@@ -154,7 +154,7 @@ async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf
 
     // Resolve and install.
     let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
-    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4).await?;
+    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4, None).await?;
 
     Ok(lib_dir)
 }
