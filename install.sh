@@ -27,10 +27,17 @@ detect_platform() {
 
     case "$OS" in
         Linux)
+            # Detect MUSL (Alpine, etc.) vs glibc
+            LIBC="gnu"
+            if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+                LIBC="musl"
+            elif [ -f /etc/alpine-release ]; then
+                LIBC="musl"
+            fi
             case "$ARCH" in
-                x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
-                aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-                arm64)   TARGET="aarch64-unknown-linux-gnu" ;;
+                x86_64)  TARGET="x86_64-unknown-linux-${LIBC}" ;;
+                aarch64) TARGET="aarch64-unknown-linux-${LIBC}" ;;
+                arm64)   TARGET="aarch64-unknown-linux-${LIBC}" ;;
                 *)       err "Unsupported architecture: $ARCH" ;;
             esac
             ;;
