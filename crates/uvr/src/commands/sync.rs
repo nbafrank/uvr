@@ -475,7 +475,7 @@ fn companion_needs_rebuild(desc_path: &std::path::Path, r_binary: &std::path::Pa
 
     let built_minor = match built_version {
         Some(v) => r_minor(&v),
-        None => return false, // No Built field, don't rebuild
+        None => return true, // No Built field — can't verify, rebuild to be safe
     };
 
     // Get current R version

@@ -54,6 +54,7 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
     // Import packages — all become direct dependencies since renv.lock
     // doesn't distinguish direct vs transitive deps.
     let mut cran_count = 0;
+    let mut custom_count = 0;
     let mut bioc_count = 0;
     let mut github_count = 0;
     let mut skipped = Vec::new();
@@ -64,6 +65,7 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
         let spec = match pkg.source.as_str() {
             "Repository" => {
                 // Check if this is a non-CRAN repository
+                let mut is_custom = false;
                 if let Some(ref repo_url) = pkg.repository {
                     let is_cran = repo_url.eq_ignore_ascii_case("CRAN")
                         || repo_url.eq_ignore_ascii_case("RSPM")
@@ -72,6 +74,7 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
                         || repo_url.contains("packagemanager.posit.co")
                         || repo_url.contains("packagemanager.rstudio.com");
                     if !is_cran {
+                        is_custom = true;
                         // Extract hostname as source name (e.g. "https://rpolars.r-universe.dev" -> "rpolars.r-universe.dev")
                         let source_name = repo_url
                             .strip_prefix("https://")
@@ -90,7 +93,11 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
                         }
                     }
                 }
-                cran_count += 1;
+                if is_custom {
+                    custom_count += 1;
+                } else {
+                    cran_count += 1;
+                }
                 DependencySpec::Version("*".to_string())
             }
             "Bioconductor" => {
@@ -155,10 +162,17 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
             style(renv_path.display()).cyan()
         );
     }
-    println!(
-        "  {} CRAN, {} Bioconductor, {} GitHub package(s)",
-        cran_count, bioc_count, github_count
-    );
+    let mut counts = format!("{cran_count} CRAN");
+    if custom_count > 0 {
+        counts.push_str(&format!(", {custom_count} custom"));
+    }
+    if bioc_count > 0 {
+        counts.push_str(&format!(", {bioc_count} Bioconductor"));
+    }
+    if github_count > 0 {
+        counts.push_str(&format!(", {github_count} GitHub"));
+    }
+    println!("  {counts} package(s)");
     if !custom_sources.is_empty() {
         let names: Vec<_> = custom_sources.iter().map(|s| s.url.as_str()).collect();
         println!(

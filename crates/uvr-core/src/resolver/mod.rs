@@ -62,6 +62,8 @@ impl<'a> Resolver<'a> {
         // Track which names we've pushed into the queue to avoid redundant
         // resolve calls (constraint checks for already-resolved still run).
         let mut queued: HashSet<String> = HashSet::new();
+        // Track all constraints seen per package for re-resolution on conflict.
+        let mut seen_constraints: HashMap<String, Vec<String>> = HashMap::new();
 
         // Seed from manifest direct dependencies.
         let mut pending: VecDeque<(String, Option<String>)> = manifest
@@ -69,8 +71,16 @@ impl<'a> Resolver<'a> {
             .iter()
             .map(|(name, spec)| (name.clone(), spec.version_req().map(str::to_string)))
             .collect();
-        for (name, _) in &pending {
+        for (name, constraint) in &pending {
             queued.insert(name.clone());
+            if let Some(c) = constraint {
+                if !c.is_empty() && c != "*" {
+                    seen_constraints
+                        .entry(name.clone())
+                        .or_default()
+                        .push(c.clone());
+                }
+            }
         }
 
         while let Some((name, constraint)) = pending.pop_front() {
@@ -78,13 +88,70 @@ impl<'a> Resolver<'a> {
                 continue;
             }
 
-            // If already resolved, just validate the new constraint against the
+            // Record the constraint for future re-resolution checks.
+            if let Some(c) = &constraint {
+                if !c.is_empty() && c != "*" {
+                    let constraints = seen_constraints.entry(name.clone()).or_default();
+                    if !constraints.contains(c) {
+                        constraints.push(c.clone());
+                    }
+                }
+            }
+
+            // If already resolved, validate the new constraint against the
             // existing version — this is the diamond-dependency case.
             if let Some(existing) = resolution.get(&name) {
                 if let Some(c) = &constraint {
                     if !c.is_empty() && c != "*" {
                         let req = parse_version_req(c)?;
                         if !version_matches_req(&existing.version, &req) {
+                            // Try re-resolving with the stricter constraint.
+                            if let Ok(new_info) =
+                                self.registry.resolve_package(&name, Some(c.as_str()))
+                            {
+                                // Verify the new version satisfies ALL prior constraints.
+                                let all_ok = seen_constraints
+                                    .get(&name)
+                                    .map(|cs| {
+                                        cs.iter().all(|prev| {
+                                            parse_version_req(prev)
+                                                .map(|r| version_matches_req(&new_info.version, &r))
+                                                .unwrap_or(false)
+                                        })
+                                    })
+                                    .unwrap_or(true);
+                                if all_ok {
+                                    // Re-resolve succeeded: update the resolution in place.
+                                    resolution.insert(
+                                        name.clone(),
+                                        ResolvedPackage {
+                                            name: name.clone(),
+                                            version: new_info.version,
+                                            source: new_info.source,
+                                            checksum: new_info.checksum,
+                                            requires: new_info
+                                                .requires
+                                                .iter()
+                                                .map(|d| d.name.clone())
+                                                .collect(),
+                                            raw_version: new_info.raw_version,
+                                            url: new_info.url,
+                                            system_requirements: new_info.system_requirements,
+                                        },
+                                    );
+                                    // Queue the new package's deps for resolution.
+                                    for dep in &new_info.requires {
+                                        if !is_base_package(&dep.name) {
+                                            pending.push_back((
+                                                dep.name.clone(),
+                                                dep.constraint.clone(),
+                                            ));
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                            // Re-resolution failed or new version doesn't satisfy all constraints.
                             return Err(UvrError::VersionConflict {
                                 package: name.clone(),
                                 required: c.clone(),
@@ -218,16 +285,18 @@ pub fn parse_version_req(s: &str) -> Result<VersionReq> {
     if s == "*" || s.is_empty() {
         return Ok(VersionReq::STAR);
     }
-    let normalized = s.replace('-', ".");
-    // Pad each comparator's version to 3 components (semver requires major.minor.patch).
-    let padded = pad_version_in_req(&normalized);
+    // Normalize and pad each comparator's version to 3 components.
+    // The `-` → `.` substitution is applied only to the version component,
+    // not the full string, to avoid mangling operator tokens.
+    let padded = normalize_version_in_req(s);
     VersionReq::parse(&padded).map_err(UvrError::Semver)
 }
 
-/// Pad version numbers in a requirement string to 3 components.
-/// E.g. `"> 2.4"` → `"> 2.4.0"`, `">= 3"` → `">= 3.0.0"`, `">= 1.0.0"` unchanged.
-fn pad_version_in_req(s: &str) -> String {
-    // Split on comma for compound requirements like ">= 1.0, < 2.0"
+/// Normalize and pad version numbers in a requirement string.
+/// - Replaces `-` with `.` in the version component only (R treats them equivalently)
+/// - Pads to 3 components so semver parses correctly
+/// E.g. `"> 2.4"` → `"> 2.4.0"`, `">= 1.1-3"` → `">= 1.1.3"`, `">= 1.0.0"` unchanged.
+fn normalize_version_in_req(s: &str) -> String {
     s.split(',')
         .map(|part| {
             let part = part.trim();
@@ -236,11 +305,13 @@ fn pad_version_in_req(s: &str) -> String {
                 .find(|c: char| c.is_ascii_digit())
                 .unwrap_or(part.len());
             let (prefix, ver) = part.split_at(ver_start);
+            // Apply R's `-` → `.` equivalence only to the version part
+            let ver = ver.replace('-', ".");
             let dot_count = ver.chars().filter(|&c| c == '.').count();
             match dot_count {
                 0 if !ver.is_empty() => format!("{prefix}{ver}.0.0"),
                 1 => format!("{prefix}{ver}.0"),
-                _ => part.to_string(),
+                _ => format!("{prefix}{ver}"),
             }
         })
         .collect::<Vec<_>>()
@@ -473,6 +544,98 @@ mod tests {
 
         let result = resolver.resolve(&manifest, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn diamond_dep_re_resolves_with_stricter_constraint() {
+        // A requires dep >= 1.0.0 (resolves to 1.5.0)
+        // B requires dep >= 2.0.0 (1.5.0 doesn't satisfy, but 2.1.0 exists and satisfies both)
+        // The resolver should re-resolve dep to 2.1.0 instead of erroring.
+        struct MultiVersionRegistry;
+        impl PackageRegistry for MultiVersionRegistry {
+            fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+                match name {
+                    "pkgA" => Ok(PackageInfo {
+                        name: "pkgA".into(),
+                        version: Version::parse("1.0.0").unwrap(),
+                        source: PackageSource::Cran,
+                        checksum: None,
+                        requires: vec![Dep {
+                            name: "shared".into(),
+                            constraint: Some(">=1.0.0".into()),
+                        }],
+                        url: "https://example.com/pkgA.tar.gz".into(),
+                        raw_version: None,
+                        system_requirements: None,
+                    }),
+                    "pkgB" => Ok(PackageInfo {
+                        name: "pkgB".into(),
+                        version: Version::parse("1.0.0").unwrap(),
+                        source: PackageSource::Cran,
+                        checksum: None,
+                        requires: vec![Dep {
+                            name: "shared".into(),
+                            constraint: Some(">=2.0.0".into()),
+                        }],
+                        url: "https://example.com/pkgB.tar.gz".into(),
+                        raw_version: None,
+                        system_requirements: None,
+                    }),
+                    "shared" => {
+                        // Return the best version that satisfies the constraint
+                        let versions =
+                            vec![("2.1.0", ">=2.0.0"), ("2.1.0", ">=1.0.0"), ("1.5.0", "*")];
+                        if let Some(c) = constraint {
+                            if !c.is_empty() && c != "*" {
+                                let req = parse_version_req(c).unwrap();
+                                for (ver, _) in &versions {
+                                    let v = Version::parse(ver).unwrap();
+                                    if version_matches_req(&v, &req) {
+                                        return Ok(PackageInfo {
+                                            name: "shared".into(),
+                                            version: v,
+                                            source: PackageSource::Cran,
+                                            checksum: None,
+                                            requires: vec![],
+                                            url: format!("https://example.com/shared_{ver}.tar.gz"),
+                                            raw_version: None,
+                                            system_requirements: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        // No constraint or wildcard: return lowest
+                        Ok(PackageInfo {
+                            name: "shared".into(),
+                            version: Version::parse("1.5.0").unwrap(),
+                            source: PackageSource::Cran,
+                            checksum: None,
+                            requires: vec![],
+                            url: "https://example.com/shared_1.5.0.tar.gz".into(),
+                            raw_version: None,
+                            system_requirements: None,
+                        })
+                    }
+                    _ => Err(UvrError::PackageNotFound(name.to_string())),
+                }
+            }
+        }
+
+        let registry = MultiVersionRegistry;
+        let resolver = Resolver::new(&registry);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("pkgA".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("pkgB".into(), DependencySpec::Version("*".into()), false);
+
+        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        // shared should be resolved to 2.1.0, not 1.5.0
+        let shared = lockfile
+            .packages
+            .iter()
+            .find(|p| p.name == "shared")
+            .unwrap();
+        assert_eq!(shared.version, "2.1.0");
     }
 
     #[test]
