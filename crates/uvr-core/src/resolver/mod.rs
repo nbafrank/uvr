@@ -295,6 +295,7 @@ pub fn parse_version_req(s: &str) -> Result<VersionReq> {
 /// Normalize and pad version numbers in a requirement string.
 /// - Replaces `-` with `.` in the version component only (R treats them equivalently)
 /// - Pads to 3 components so semver parses correctly
+///
 /// E.g. `"> 2.4"` → `"> 2.4.0"`, `">= 1.1-3"` → `">= 1.1.3"`, `">= 1.0.0"` unchanged.
 fn normalize_version_in_req(s: &str) -> String {
     s.split(',')
