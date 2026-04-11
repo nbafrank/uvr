@@ -172,19 +172,19 @@ impl<'a> Resolver<'a> {
 const BASE_PACKAGES: &[&str] = &[
     "R",
     "base",
-    "stats",
-    "utils",
-    "methods",
-    "graphics",
-    "grDevices",
-    "datasets",
-    "tools",
     "compiler",
+    "datasets",
+    "grDevices",
+    "graphics",
     "grid",
+    "methods",
     "parallel",
     "splines",
+    "stats",
+    "stats4",
     "tcltk",
-    "translations",
+    "tools",
+    "utils",
 ];
 
 pub fn is_base_package(name: &str) -> bool {
