@@ -106,9 +106,8 @@ pub async fn install_from_lockfile(
                 if library.exists() {
                     std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
                 }
-                project
-                    .ensure_library_dir()
-                    .context("Failed to recreate .uvr/library/")?;
+                std::fs::create_dir_all(&library)
+                    .context("Failed to recreate library directory")?;
             }
         }
     }
@@ -419,23 +418,23 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
             let _ = std::fs::remove_file(&tarball);
             return;
         }
+    }
 
-        // Verify SHA-256 checksum
-        if let Ok(bytes) = std::fs::read(&tarball) {
-            use sha2::{Digest, Sha256};
-            let hash = hex::encode(Sha256::digest(&bytes));
-            if hash != COMPANION_HASH {
-                tracing::warn!(
-                    "Companion package checksum mismatch (expected {}, got {}), skipping install",
-                    &COMPANION_HASH[..12],
-                    &hash[..12]
-                );
-                let _ = std::fs::remove_file(&tarball);
-                return;
-            }
-        } else {
+    // Verify SHA-256 checksum on every run (cache could be corrupted or tampered with)
+    if let Ok(bytes) = std::fs::read(&tarball) {
+        use sha2::{Digest, Sha256};
+        let hash = hex::encode(Sha256::digest(&bytes));
+        if hash != COMPANION_HASH {
+            tracing::warn!(
+                "Companion package checksum mismatch (expected {}, got {}), skipping install",
+                &COMPANION_HASH[..12],
+                &hash[..12]
+            );
+            let _ = std::fs::remove_file(&tarball);
             return;
         }
+    } else {
+        return;
     }
 
     let result = std::process::Command::new(r_binary)
@@ -506,8 +505,11 @@ fn lockfiles_equivalent(
     if a.packages.len() != b.packages.len() {
         return false;
     }
-    // Both are sorted alphabetically by the resolver, so zip is safe.
-    a.packages.iter().zip(b.packages.iter()).all(|(ap, bp)| {
+    let mut a_pkgs: Vec<_> = a.packages.iter().collect();
+    let mut b_pkgs: Vec<_> = b.packages.iter().collect();
+    a_pkgs.sort_by(|x, y| x.name.cmp(&y.name));
+    b_pkgs.sort_by(|x, y| x.name.cmp(&y.name));
+    a_pkgs.iter().zip(b_pkgs.iter()).all(|(ap, bp)| {
         ap.name == bp.name
             && ap.version == bp.version
             && ap.source == bp.source

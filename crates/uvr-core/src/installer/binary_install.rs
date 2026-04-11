@@ -55,12 +55,13 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
         UvrError::Other(format!("Failed to open zip for '{}': {}", package_name, e))
     })?;
 
-    // Guard against zip-slip: verify every entry stays within library.
     let canonical_lib = library
         .canonicalize()
         .unwrap_or_else(|_| library.to_path_buf());
+
+    // Single-pass: validate path traversal and extract each entry atomically.
     for i in 0..archive.len() {
-        let entry = archive.by_index(i).map_err(|e| {
+        let mut entry = archive.by_index(i).map_err(|e| {
             UvrError::Other(format!(
                 "Failed to read zip entry for '{}': {}",
                 package_name, e
@@ -74,19 +75,36 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
                 entry.name()
             )));
         }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath).map_err(|e| {
+                UvrError::Other(format!(
+                    "Failed to create directory for '{}': {}",
+                    package_name, e
+                ))
+            })?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    UvrError::Other(format!(
+                        "Failed to create parent directory for '{}': {}",
+                        package_name, e
+                    ))
+                })?;
+            }
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
+                UvrError::Other(format!(
+                    "Failed to create file for '{}': {}",
+                    package_name, e
+                ))
+            })?;
+            std::io::copy(&mut entry, &mut outfile).map_err(|e| {
+                UvrError::Other(format!(
+                    "Failed to write zip entry for '{}': {}",
+                    package_name, e
+                ))
+            })?;
+        }
     }
-
-    // Re-open archive (iteration consumed it) and extract.
-    let file = std::fs::File::open(zip_path)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
-        UvrError::Other(format!("Failed to open zip for '{}': {}", package_name, e))
-    })?;
-    archive.extract(library).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to extract zip for '{}': {}",
-            package_name, e
-        ))
-    })?;
     Ok(())
 }
 
