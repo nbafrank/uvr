@@ -139,9 +139,20 @@ impl<'a> Resolver<'a> {
                                             system_requirements: new_info.system_requirements,
                                         },
                                     );
-                                    // Queue the new package's deps for resolution.
+                                    // Rebuild graph edges for the re-resolved package.
+                                    graph.add_node(&name);
                                     for dep in &new_info.requires {
-                                        if !is_base_package(&dep.name) {
+                                        if is_base_package(&dep.name) {
+                                            continue;
+                                        }
+                                        graph.add_edge(&name, &dep.name);
+                                        if !queued.contains(&dep.name) {
+                                            queued.insert(dep.name.clone());
+                                            pending.push_back((
+                                                dep.name.clone(),
+                                                dep.constraint.clone(),
+                                            ));
+                                        } else if dep.constraint.is_some() {
                                             pending.push_back((
                                                 dep.name.clone(),
                                                 dep.constraint.clone(),

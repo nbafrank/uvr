@@ -510,10 +510,11 @@ fn lockfiles_equivalent(
     a_pkgs.sort_by(|x, y| x.name.cmp(&y.name));
     b_pkgs.sort_by(|x, y| x.name.cmp(&y.name));
     a_pkgs.iter().zip(b_pkgs.iter()).all(|(ap, bp)| {
-        ap.name == bp.name
-            && ap.version == bp.version
-            && ap.source == bp.source
-            && ap.requires == bp.requires
+        let mut a_reqs = ap.requires.clone();
+        let mut b_reqs = bp.requires.clone();
+        a_reqs.sort();
+        b_reqs.sort();
+        ap.name == bp.name && ap.version == bp.version && ap.source == bp.source && a_reqs == b_reqs
     })
 }
 

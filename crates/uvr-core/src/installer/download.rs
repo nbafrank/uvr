@@ -204,8 +204,11 @@ async fn download_one(
     // Compute checksums on-the-fly during the stream.
     let mut resp = client.get(url).send().await?.error_for_status()?;
 
-    let tmp_path = dest.with_extension("tmp");
-    let mut file = std::fs::File::create(&tmp_path)?;
+    let cache_dir = dest.parent().unwrap_or(std::path::Path::new("."));
+    let tmp_file = tempfile::Builder::new()
+        .prefix(".uvr-dl-")
+        .tempfile_in(cache_dir)?;
+    let mut file = tmp_file.reopen()?;
     let mut sha256_hasher = Sha256::new();
     let mut md5_hasher = md5::Md5::new();
 
@@ -222,7 +225,7 @@ async fn download_one(
         if expected.starts_with("sha256:") {
             let actual = format!("sha256:{}", hex::encode(sha256_hasher.finalize()));
             if actual != expected {
-                let _ = std::fs::remove_file(&tmp_path);
+                // tmp_file dropped here → auto-deleted
                 return Err(UvrError::ChecksumMismatch {
                     package: name.to_string(),
                     expected: expected.to_string(),
@@ -232,7 +235,6 @@ async fn download_one(
         } else if expected.starts_with("md5:") {
             let actual = format!("md5:{}", hex::encode(md5_hasher.finalize()));
             if actual != expected {
-                let _ = std::fs::remove_file(&tmp_path);
                 return Err(UvrError::ChecksumMismatch {
                     package: name.to_string(),
                     expected: expected.to_string(),
@@ -247,8 +249,14 @@ async fn download_one(
         }
     }
 
-    // Atomic move: temp → final destination
-    std::fs::rename(&tmp_path, &dest)?;
+    // Atomic move: persist NamedTempFile → final destination
+    tmp_file.persist(&dest).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to persist download to {}: {}",
+            dest.display(),
+            e
+        ))
+    })?;
 
     pb.finish_with_message(format!("Downloaded {name} {version}"));
     Ok(dest)
