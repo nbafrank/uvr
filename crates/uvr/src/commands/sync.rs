@@ -144,17 +144,10 @@ pub async fn install_from_lockfile(
         use uvr_core::sysreqs;
 
         if let Some(distro) = sysreqs::detect_linux_distro() {
-            let sysreqs_packages: Vec<(String, String)> = to_install
-                .iter()
-                .filter_map(|p| {
-                    p.system_requirements
-                        .as_ref()
-                        .map(|sr| (p.name.clone(), sr.clone()))
-                })
-                .collect();
+            let pkg_names: Vec<String> = to_install.iter().map(|p| p.name.clone()).collect();
 
-            if !sysreqs_packages.is_empty() {
-                let missing = sysreqs::check_system_deps(&client, &sysreqs_packages, &distro).await;
+            if !pkg_names.is_empty() {
+                let missing = sysreqs::check_system_deps(&client, &pkg_names, &distro).await;
                 if !missing.is_empty() {
                     let all_pkgs: Vec<&str> = missing
                         .values()
