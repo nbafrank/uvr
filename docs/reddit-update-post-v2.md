@@ -12,10 +12,12 @@ uvr now has a proper landing page: **https://nbafrank.github.io/uvr/**
 
 It has interactive benchmarks, feature comparison table, and install instructions all in one place. For the lazy:
 
-| Scenario | uvr | pak | renv | install.packages |
+| Scenario | uvr | renv | pak | install.packages |
 |-----------|------|------|------|-----------------|
-| ggplot2 (17 pkgs) | **0.6s** | 5.3s | 5.1s | 26.7s |
-| tidyverse (99 pkgs) | **2.1s** | 8.5s | 20.2s | 18.2s |
+| ggplot2 (17 pkgs) | **0.6s** | 3.8s | 4.6s | 24.0s |
+| tidyverse (99 pkgs) | **1.6s** | 12.1s | 12.1s | 14.3s |
+
+_All tools use P3M as CRAN mirror. Median of 3 cold installs, caches cleared between scenarios._
 
 ### renv.lock import got smarter
 

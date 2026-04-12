@@ -2,8 +2,9 @@
 #
 # uvr benchmark suite
 #
-# Measures cold-install time for uvr vs install.packages() vs pak::pkg_install().
-# Each tool installs from a clean library. Median of N runs is reported.
+# Measures cold-install wall time for uvr vs install.packages() vs pak::pkg_install().
+# Each tool installs from a clean library. Download caches are cleared between
+# scenarios to prevent cross-scenario bleed.
 #
 # Usage:
 #   bash benchmarks/bench.sh              # default: 3 runs per tool
@@ -43,6 +44,22 @@ time_cmd() {
 # Return the median of a space-separated list of numbers.
 median() {
     echo "$@" | tr ' ' '\n' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
+}
+
+# Clear download caches for all tools to prevent cross-scenario bleed.
+clear_all_caches() {
+    # uvr download cache
+    rm -rf ~/.uvr/cache/
+    # pak / pkgcache
+    rm -rf ~/.cache/R/pkgcache/
+    rm -rf ~/Library/Caches/org.R-project.R/R/pkgcache/
+    # renv global cache (sandbox contains read-only symlinks — chmod first)
+    chmod -R u+w ~/.cache/R/renv/ 2>/dev/null || true
+    rm -rf ~/.cache/R/renv/
+    chmod -R u+w ~/Library/Caches/org.R-project.R/R/renv/ 2>/dev/null || true
+    rm -rf ~/Library/Caches/org.R-project.R/R/renv/
+    # R default download cache
+    rm -rf /tmp/Rtmp*/downloaded_packages 2>/dev/null || true
 }
 
 # ─── detect tools ───────────────────────────────────────────────────────────
@@ -98,6 +115,9 @@ SCENARIOS="ggplot2 tidyverse"
 for scenario in $SCENARIOS; do
     MANIFEST="$SCRIPT_DIR/uvr-${scenario}.toml"
     echo "--- scenario: $scenario ---"
+
+    # Clear all download caches before each scenario to prevent bleed
+    clear_all_caches
 
     # ── uvr sync ────────────────────────────────────────────────────────────
 
@@ -249,4 +269,4 @@ done
 
 echo ""
 R_VER=$("$UVR" run -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
-echo "_Measured on $(uname -m), ${R_VER}, P3M binaries. Median of ${RUNS} cold installs._"
+echo "_Measured on $(uname -m), ${R_VER}, P3M binaries (all tools use P3M as CRAN mirror). Median of ${RUNS} cold installs._"

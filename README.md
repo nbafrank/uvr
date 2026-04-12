@@ -82,14 +82,14 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 
 ## Benchmarks
 
-Cold-install wall time (empty library -> all packages installed). P3M binaries, median of 3 runs on Apple Silicon.
+Cold-install wall time (empty library -> all packages installed). All tools use P3M as CRAN mirror. Median of 3 runs on Apple Silicon, caches cleared between scenarios.
 
-| Scenario  | Packages | uvr sync  | pak       | renv     | install.packages |
-|-----------|----------|-----------|-----------|----------|------------------|
-| ggplot2   | 17       | **0.6s**  | 2.8s      | 3.6s     | 13.9s            |
-| tidyverse | 99       | **1.6s**  | 5.6s      | 6.4s     | 7.0s             |
+| Scenario  | Packages | uvr sync  | renv     | pak       | install.packages |
+|-----------|----------|-----------|----------|-----------|------------------|
+| ggplot2   | 17       | **0.6s**  | 3.8s     | 4.6s      | 24.0s            |
+| tidyverse | 99       | **1.6s**  | 12.1s    | 12.1s     | 14.3s            |
 
-uvr is consistently the fastest — ~5x faster than pak on ggplot2, ~3.5x on tidyverse. The speed comes from parallel downloads, direct binary extraction (no R overhead), and aggressive caching.
+uvr is consistently the fastest — 6x faster than renv/pak, 9–40x faster than install.packages. The speed comes from parallel downloads, native binary extraction (no R process overhead), and aggressive caching.
 
 > Run `bash benchmarks/bench.sh` to reproduce. Requires pak and renv for full comparison. Results vary by machine and network.
 

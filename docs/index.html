@@ -935,8 +935,8 @@
         <div class="section-label">Performance</div>
         <h2 class="section-title">Blazing fast package installs</h2>
         <p class="section-desc">
-          uvr leverages pre-built P3M binaries and parallel downloads.
-          Cold-cache benchmarks on macOS, averaged over 5 runs.
+          uvr leverages parallel downloads and native extraction &mdash; no R process overhead.
+          Cold-cache benchmarks on macOS, median of 3 runs. All tools use P3M as CRAN mirror.
         </p>
       </div>
       <div class="bench-grid">
@@ -948,24 +948,24 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 4.3%;">
+              <div class="bench-bar bench-bar-uvr" style="width: 2.5%;">
                 <span class="bench-bar-time">0.6s</span>
-              </div>
-            </div>
-          </div>
-          <div class="bench-row">
-            <div class="bench-label">pak</div>
-            <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 20.1%;">
-                <span class="bench-bar-time">2.8s</span>
               </div>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 25.9%;">
-                <span class="bench-bar-time">3.6s</span>
+              <div class="bench-bar bench-bar-other" style="width: 15.8%;">
+                <span class="bench-bar-time">3.8s</span>
+              </div>
+            </div>
+          </div>
+          <div class="bench-row">
+            <div class="bench-label">pak</div>
+            <div class="bench-bar-track">
+              <div class="bench-bar bench-bar-other" style="width: 19.2%;">
+                <span class="bench-bar-time">4.6s</span>
               </div>
             </div>
           </div>
@@ -973,12 +973,12 @@
             <div class="bench-label">install.packages</div>
             <div class="bench-bar-track">
               <div class="bench-bar bench-bar-other" style="width: 100%;">
-                <span class="bench-bar-time">13.9s</span>
+                <span class="bench-bar-time">24.0s</span>
               </div>
             </div>
           </div>
 
-          <div class="bench-speedup">23x faster than install.packages</div>
+          <div class="bench-speedup">40x faster than install.packages</div>
         </div>
 
         <!-- tidyverse -->
@@ -989,7 +989,7 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 22.9%;">
+              <div class="bench-bar bench-bar-uvr" style="width: 11.2%;">
                 <span class="bench-bar-time">1.6s</span>
               </div>
             </div>
@@ -997,16 +997,16 @@
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 80%;">
-                <span class="bench-bar-time">5.6s</span>
+              <div class="bench-bar bench-bar-other" style="width: 84.6%;">
+                <span class="bench-bar-time">12.1s</span>
               </div>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 91.4%;">
-                <span class="bench-bar-time">6.4s</span>
+              <div class="bench-bar bench-bar-other" style="width: 84.6%;">
+                <span class="bench-bar-time">12.1s</span>
               </div>
             </div>
           </div>
@@ -1014,12 +1014,12 @@
             <div class="bench-label">install.packages</div>
             <div class="bench-bar-track">
               <div class="bench-bar bench-bar-other" style="width: 100%;">
-                <span class="bench-bar-time">7.0s</span>
+                <span class="bench-bar-time">14.3s</span>
               </div>
             </div>
           </div>
 
-          <div class="bench-speedup">4.4x faster than install.packages</div>
+          <div class="bench-speedup">9x faster than install.packages</div>
         </div>
       </div>
     </div>
@@ -1040,7 +1040,7 @@
         <div class="feature-card">
           <div class="feature-icon">&#9889;</div>
           <h3>Blazing fast</h3>
-          <p>Pre-built P3M binaries, parallel downloads, and zero R startup overhead. 10&ndash;20x faster than traditional tools.</p>
+          <p>Parallel downloads, native extraction, and zero R startup overhead. 9&ndash;40x faster than traditional tools.</p>
         </div>
 
         <div class="feature-card">
@@ -1239,7 +1239,7 @@
               <td><span class="cross">&mdash;</span></td>
             </tr>
             <tr>
-              <td>Pre-built binaries (P3M)</td>
+              <td>P3M binaries by default</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
