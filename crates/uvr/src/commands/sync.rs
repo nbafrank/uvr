@@ -119,10 +119,15 @@ pub async fn install_from_lockfile(
         .filter(|p| !is_installed(p, &library))
         .collect();
 
-    // Install the uvr R companion package if not already present
+    // Install the uvr R companion package if not already present.
+    // Skip the (expensive) R version check when all packages are up to date
+    // and the companion is already installed.
     let r_constraint = project.manifest.project.r_version.as_deref();
-    if let Ok(r_bin) = find_r_binary(r_constraint) {
-        ensure_companion_package(&library, &r_bin);
+    let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
+    if !companion_installed || !to_install.is_empty() {
+        if let Ok(r_bin) = find_r_binary(r_constraint) {
+            ensure_companion_package(&library, &r_bin);
+        }
     }
 
     if to_install.is_empty() {
@@ -487,8 +492,10 @@ fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
     let fields = uvr_core::dcf::parse_dcf_fields(&content);
     match fields.get("Version") {
         Some(v) => {
-            v.trim() == pkg.version
-                || Some(v.trim().to_string()) == pkg.raw_version.as_deref().map(String::from)
+            let installed = v.trim();
+            installed == pkg.version
+                || uvr_core::resolver::normalize_version(installed) == pkg.version
+                || pkg.raw_version.as_deref() == Some(installed)
         }
         None => false,
     }
@@ -851,5 +858,37 @@ mod tests {
         )
         .unwrap();
         assert!(!is_installed(&pkg, dir.path()));
+
+        // Dash version in DESCRIPTION matches normalized lockfile version
+        let dash_pkg = LockedPackage {
+            name: "scales".into(),
+            version: "1.1.3".into(), // normalized
+            raw_version: Some("1.1-3".into()),
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        std::fs::create_dir_all(dir.path().join("scales")).unwrap();
+        std::fs::write(
+            dir.path().join("scales").join("DESCRIPTION"),
+            "Package: scales\nVersion: 1.1-3\n",
+        )
+        .unwrap();
+        assert!(is_installed(&dash_pkg, dir.path()));
+
+        // Dash version without raw_version still matches via normalization
+        let dash_pkg_no_raw = LockedPackage {
+            name: "scales".into(),
+            version: "1.1.3".into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+        };
+        assert!(is_installed(&dash_pkg_no_raw, dir.path()));
     }
 }

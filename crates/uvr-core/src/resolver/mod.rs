@@ -45,7 +45,6 @@ impl<'a> Resolver<'a> {
     /// Handles diamond dependencies: when a package is encountered again with a
     /// new constraint, we check that the already-resolved version satisfies it
     /// rather than treating it as a conflict.
-    /// Resolve all manifest dependencies into a `Lockfile`.
     ///
     /// `actual_r_version` should be the version string of the currently-active R
     /// binary (e.g. `"4.4.2"`). When provided it is recorded verbatim in the

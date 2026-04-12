@@ -6,6 +6,39 @@ use tracing::debug;
 
 use crate::error::{Result, UvrError};
 
+/// Move `src` to `dst`, falling back to recursive copy + delete when
+/// `rename` fails with a cross-device error (EXDEV).  This handles
+/// Docker volumes, NFS mounts, and bind-mounted library paths.
+fn rename_or_copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.raw_os_error() == Some(18 /* EXDEV */)
+                || e.to_string().contains("cross-device") =>
+        {
+            copy_dir_recursive(src, dst)?;
+            std::fs::remove_dir_all(src)?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract a pre-built R binary package into `library`.
 ///
 /// On macOS: `.tgz` (gzip-compressed tarball) extracted with `tar`.
@@ -115,18 +148,22 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
         }
     }
 
-    // Atomic rename: staging/<package_name> → library/<package_name>
+    // Move staged package to final destination (with cross-device fallback).
     let final_dest = library.join(package_name);
     let staged_pkg = staging_path.join(package_name);
-    if staged_pkg.exists() {
-        let _ = std::fs::remove_dir_all(&final_dest);
-        std::fs::rename(&staged_pkg, &final_dest).map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to move staged package '{}': {}",
-                package_name, e
-            ))
-        })?;
+    if !staged_pkg.exists() {
+        return Err(UvrError::Other(format!(
+            "Expected directory '{}' not found in archive for '{}'",
+            package_name, package_name
+        )));
     }
+    let _ = std::fs::remove_dir_all(&final_dest);
+    rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to move staged package '{}': {}",
+            package_name, e
+        ))
+    })?;
     // staging TempDir dropped here → auto-cleanup of any leftover files
 
     Ok(())
@@ -206,18 +243,22 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
         })?;
     }
 
-    // Atomic rename: staging/<package_name> → library/<package_name>
+    // Move staged package to final destination (with cross-device fallback).
     let final_dest = library.join(package_name);
     let staged_pkg = staging_path.join(package_name);
-    if staged_pkg.exists() {
-        let _ = std::fs::remove_dir_all(&final_dest);
-        std::fs::rename(&staged_pkg, &final_dest).map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to move staged package '{}': {}",
-                package_name, e
-            ))
-        })?;
+    if !staged_pkg.exists() {
+        return Err(UvrError::Other(format!(
+            "Expected directory '{}' not found in archive for '{}'",
+            package_name, package_name
+        )));
     }
+    let _ = std::fs::remove_dir_all(&final_dest);
+    rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to move staged package '{}': {}",
+            package_name, e
+        ))
+    })?;
 
     debug!(
         "Extracted tgz for {package_name} into {}",
