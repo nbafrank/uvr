@@ -76,14 +76,12 @@ impl<'de> Deserialize<'de> for PackageSource {
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
+        Ok(match s.to_lowercase().as_str() {
             "cran" => PackageSource::Cran,
             "bioconductor" => PackageSource::Bioconductor,
             "github" => PackageSource::GitHub,
             "local" => PackageSource::Local,
-            other => PackageSource::Custom {
-                name: other.to_string(),
-            },
+            _ => PackageSource::Custom { name: s },
         })
     }
 }

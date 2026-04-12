@@ -405,16 +405,14 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
     // If the hash changes (new companion release), the filename changes too.
     if !tarball.exists() {
         let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
-        let download_ok = std::process::Command::new("curl")
-            .args(["-fsSL", &url, "-o"])
-            .arg(&tarball)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let download_ok = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let resp = ureq::get(&url).header("User-Agent", "uvr").call()?;
+            let bytes = resp.into_body().read_to_vec()?;
+            std::fs::write(&tarball, &bytes)?;
+            Ok(())
+        })();
 
-        if !download_ok {
+        if download_ok.is_err() {
             let _ = std::fs::remove_file(&tarball);
             return;
         }
@@ -489,7 +487,18 @@ fn companion_needs_rebuild(desc_path: &std::path::Path, r_binary: &std::path::Pa
 }
 
 fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
-    library.join(&pkg.name).join("DESCRIPTION").exists()
+    let desc_path = library.join(&pkg.name).join("DESCRIPTION");
+    let Ok(content) = std::fs::read_to_string(&desc_path) else {
+        return false;
+    };
+    let fields = uvr_core::dcf::parse_dcf_fields(&content);
+    match fields.get("Version") {
+        Some(v) => {
+            v.trim() == pkg.version
+                || Some(v.trim().to_string()) == pkg.raw_version.as_deref().map(String::from)
+        }
+        None => false,
+    }
 }
 
 /// Compare two lockfiles for semantic equivalence, ignoring fields that can
@@ -834,8 +843,20 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("jsonlite")).unwrap();
         assert!(!is_installed(&pkg, dir.path()));
 
-        // Create DESCRIPTION → installed
-        std::fs::write(dir.path().join("jsonlite").join("DESCRIPTION"), "").unwrap();
+        // Create DESCRIPTION with matching version → installed
+        std::fs::write(
+            dir.path().join("jsonlite").join("DESCRIPTION"),
+            "Package: jsonlite\nVersion: 1.8.8\n",
+        )
+        .unwrap();
         assert!(is_installed(&pkg, dir.path()));
+
+        // Wrong version → not installed
+        std::fs::write(
+            dir.path().join("jsonlite").join("DESCRIPTION"),
+            "Package: jsonlite\nVersion: 1.7.0\n",
+        )
+        .unwrap();
+        assert!(!is_installed(&pkg, dir.path()));
     }
 }

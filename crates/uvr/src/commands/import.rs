@@ -117,9 +117,12 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
                     skipped.push(name.clone());
                     continue;
                 }
+                // Prefer RemoteSha (exact commit) over RemoteRef (branch name)
+                // to preserve the exact pin from renv.lock.
+                let rev = pkg.remote_sha.clone().or_else(|| pkg.remote_ref.clone());
                 DependencySpec::Detailed(DetailedDep {
                     git,
-                    rev: pkg.remote_ref.clone(),
+                    rev,
                     ..Default::default()
                 })
             }
@@ -239,4 +242,6 @@ struct RenvPackage {
     remote_repo: Option<String>,
     #[serde(rename = "RemoteRef")]
     remote_ref: Option<String>,
+    #[serde(rename = "RemoteSha")]
+    remote_sha: Option<String>,
 }

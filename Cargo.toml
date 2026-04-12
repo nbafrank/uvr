@@ -13,6 +13,7 @@ homepage = "https://github.com/nbafrank/uvr"
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "gzip", "json", "rustls-tls"] }
+ureq = "3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 semver = { version = "1", features = ["serde"] }

@@ -55,11 +55,20 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
         UvrError::Other(format!("Failed to open zip for '{}': {}", package_name, e))
     })?;
 
-    let canonical_lib = library
-        .canonicalize()
-        .unwrap_or_else(|_| library.to_path_buf());
+    // Extract into a staging directory, then atomically rename on success.
+    let staging = tempfile::TempDir::new_in(library).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to create staging dir for '{}': {}",
+            package_name, e
+        ))
+    })?;
+    let staging_path = staging.path();
 
-    // Single-pass: validate path traversal and extract each entry atomically.
+    let canonical_staging = staging_path
+        .canonicalize()
+        .unwrap_or_else(|_| staging_path.to_path_buf());
+
+    // Single-pass: validate path traversal and extract each entry.
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| {
             UvrError::Other(format!(
@@ -67,8 +76,8 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
                 package_name, e
             ))
         })?;
-        let outpath = canonical_lib.join(entry.mangled_name());
-        if !outpath.starts_with(&canonical_lib) {
+        let outpath = canonical_staging.join(entry.mangled_name());
+        if !outpath.starts_with(&canonical_staging) {
             return Err(UvrError::Other(format!(
                 "Zip path traversal detected in package '{}': {}",
                 package_name,
@@ -105,6 +114,21 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
             })?;
         }
     }
+
+    // Atomic rename: staging/<package_name> → library/<package_name>
+    let final_dest = library.join(package_name);
+    let staged_pkg = staging_path.join(package_name);
+    if staged_pkg.exists() {
+        let _ = std::fs::remove_dir_all(&final_dest);
+        std::fs::rename(&staged_pkg, &final_dest).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to move staged package '{}': {}",
+                package_name, e
+            ))
+        })?;
+    }
+    // staging TempDir dropped here → auto-cleanup of any leftover files
+
     Ok(())
 }
 
@@ -118,9 +142,18 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
 
-    let canonical_lib = library
+    // Extract into a staging directory, then atomically rename on success.
+    let staging = tempfile::TempDir::new_in(library).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to create staging dir for '{}': {}",
+            package_name, e
+        ))
+    })?;
+    let staging_path = staging.path();
+
+    let canonical_staging = staging_path
         .canonicalize()
-        .unwrap_or_else(|_| library.to_path_buf());
+        .unwrap_or_else(|_| staging_path.to_path_buf());
 
     for entry in archive
         .entries()
@@ -141,7 +174,7 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
             .into_owned();
 
         // Guard against path traversal: reject entries with `..` components
-        // or absolute paths that would escape the library directory.
+        // or absolute paths that would escape the staging directory.
         if path.is_absolute()
             || path
                 .components()
@@ -154,8 +187,8 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
             )));
         }
 
-        let dest = canonical_lib.join(&path);
-        if !dest.starts_with(&canonical_lib) {
+        let dest = canonical_staging.join(&path);
+        if !dest.starts_with(&canonical_staging) {
             return Err(UvrError::Other(format!(
                 "Path traversal detected in package '{}': {}",
                 package_name,
@@ -169,6 +202,19 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
                 path.display(),
                 package_name,
                 e
+            ))
+        })?;
+    }
+
+    // Atomic rename: staging/<package_name> → library/<package_name>
+    let final_dest = library.join(package_name);
+    let staged_pkg = staging_path.join(package_name);
+    if staged_pkg.exists() {
+        let _ = std::fs::remove_dir_all(&final_dest);
+        std::fs::rename(&staged_pkg, &final_dest).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to move staged package '{}': {}",
+                package_name, e
             ))
         })?;
     }
