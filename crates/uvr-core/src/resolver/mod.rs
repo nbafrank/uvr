@@ -50,7 +50,17 @@ impl<'a> Resolver<'a> {
     /// binary (e.g. `"4.4.2"`). When provided it is recorded verbatim in the
     /// lockfile so that `uvr sync` can detect R version changes and re-install.
     /// Falls back to the manifest constraint when `None`.
-    pub fn resolve(&self, manifest: &Manifest, actual_r_version: Option<&str>) -> Result<Lockfile> {
+    ///
+    /// `pre_resolved` contains packages already resolved outside the registry
+    /// chain (e.g. GitHub packages resolved via the GitHub API). These are
+    /// injected into the resolution and their transitive deps flow through the
+    /// normal registry resolution.
+    pub fn resolve(
+        &self,
+        manifest: &Manifest,
+        actual_r_version: Option<&str>,
+        pre_resolved: HashMap<String, crate::registry::PackageInfo>,
+    ) -> Result<Lockfile> {
         let r_version = actual_r_version
             .map(str::to_string)
             .or_else(|| manifest.project.r_version.clone())
@@ -185,9 +195,14 @@ impl<'a> Resolver<'a> {
                 continue;
             }
 
-            let info = self
-                .registry
-                .resolve_package(&name, constraint.as_deref())?;
+            // Use pre-resolved info (e.g. GitHub packages) if available,
+            // otherwise fall back to the registry chain.
+            let info = if let Some(pi) = pre_resolved.get(&name) {
+                pi.clone()
+            } else {
+                self.registry
+                    .resolve_package(&name, constraint.as_deref())?
+            };
 
             graph.add_node(&name);
             for dep in &info.requires {
@@ -545,7 +560,7 @@ mod tests {
         let mut manifest = Manifest::new("test", None);
         manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
 
-        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        let lockfile = resolver.resolve(&manifest, None, HashMap::new()).unwrap();
         assert_eq!(lockfile.packages.len(), 4);
         assert!(lockfile.get_package("rlang").is_some());
         // URL is stored
@@ -569,7 +584,7 @@ mod tests {
         manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
         manifest.add_dep("tidyr".into(), DependencySpec::Version("*".into()), false);
 
-        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        let lockfile = resolver.resolve(&manifest, None, HashMap::new()).unwrap();
         assert_eq!(lockfile.packages.len(), 3);
         assert_eq!(lockfile.get_package("rlang").unwrap().version, "1.1.4");
     }
@@ -613,7 +628,7 @@ mod tests {
         let mut manifest = Manifest::new("test", None);
         manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
 
-        let result = resolver.resolve(&manifest, None);
+        let result = resolver.resolve(&manifest, None, HashMap::new());
         assert!(result.is_err());
     }
 
@@ -699,7 +714,7 @@ mod tests {
         manifest.add_dep("pkgA".into(), DependencySpec::Version("*".into()), false);
         manifest.add_dep("pkgB".into(), DependencySpec::Version("*".into()), false);
 
-        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        let lockfile = resolver.resolve(&manifest, None, HashMap::new()).unwrap();
         // shared should be resolved to 2.1.0, not 1.5.0
         let shared = lockfile
             .packages
@@ -801,7 +816,7 @@ mod tests {
         manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
         manifest.add_dep("testthat".into(), DependencySpec::Version("*".into()), true); // dev dep
 
-        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        let lockfile = resolver.resolve(&manifest, None, HashMap::new()).unwrap();
         assert_eq!(lockfile.packages.len(), 4);
 
         // ggplot2 and rlang are production deps
@@ -830,7 +845,7 @@ mod tests {
         manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
         manifest.add_dep("testthat".into(), DependencySpec::Version("*".into()), true);
 
-        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        let lockfile = resolver.resolve(&manifest, None, HashMap::new()).unwrap();
         assert_eq!(lockfile.packages.len(), 3);
 
         assert!(!lockfile.get_package("rlang").unwrap().dev);

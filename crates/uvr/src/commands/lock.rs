@@ -1,12 +1,16 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use console::style;
 
 use uvr_core::lockfile::Lockfile;
+use uvr_core::manifest::DependencySpec;
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
-use uvr_core::registry::RegistryChain;
+use uvr_core::registry::github::{parse_github_spec, resolve_github_package};
+use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
 
 pub async fn run(upgrade: bool) -> Result<()> {
@@ -109,6 +113,9 @@ async fn resolve_lockfile(
         None
     };
 
+    // Pre-resolve GitHub dependencies via the GitHub API (async).
+    let pre_resolved = resolve_github_deps(client, &project.manifest).await?;
+
     // Build the registry chain: CRAN → custom sources → Bioconductor
     let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
         let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
@@ -121,11 +128,11 @@ async fn resolve_lockfile(
         }
         let registry = RegistryChain::new(chain);
         Resolver::new(&registry)
-            .resolve(&project.manifest, actual_r_version.as_deref())
+            .resolve(&project.manifest, actual_r_version.as_deref(), pre_resolved)
             .context("Dependency resolution failed")?
     } else {
         Resolver::new(&cran)
-            .resolve(&project.manifest, actual_r_version.as_deref())
+            .resolve(&project.manifest, actual_r_version.as_deref(), pre_resolved)
             .context("Dependency resolution failed")?
     };
 
@@ -149,6 +156,46 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
             None
         }
     }
+}
+
+/// Collect all GitHub dependencies from the manifest and resolve them via the
+/// GitHub API. Returns a map from package name → PackageInfo that the resolver
+/// can inject without going through the registry chain.
+async fn resolve_github_deps(
+    client: &reqwest::Client,
+    manifest: &uvr_core::manifest::Manifest,
+) -> Result<HashMap<String, PackageInfo>> {
+    let mut github_specs: Vec<(String, String)> = Vec::new(); // (name, git_spec)
+
+    let all_deps = manifest
+        .dependencies
+        .iter()
+        .chain(manifest.dev_dependencies.iter());
+
+    for (name, spec) in all_deps {
+        if let DependencySpec::Detailed(d) = spec {
+            if let Some(ref git) = d.git {
+                let full_spec = if let Some(ref rev) = d.rev {
+                    format!("{git}@{rev}")
+                } else {
+                    git.clone()
+                };
+                github_specs.push((name.clone(), full_spec));
+            }
+        }
+    }
+
+    let mut pre_resolved = HashMap::new();
+    for (_name, spec) in &github_specs {
+        if let Some((user, repo, git_ref)) = parse_github_spec(spec) {
+            let info = resolve_github_package(client, &user, &repo, &git_ref)
+                .await
+                .with_context(|| format!("Failed to resolve GitHub package {spec}"))?;
+            pre_resolved.insert(info.name.clone(), info);
+        }
+    }
+
+    Ok(pre_resolved)
 }
 
 // Re-export from util for backward compatibility within this module
