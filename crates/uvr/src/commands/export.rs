@@ -226,6 +226,7 @@ mod tests {
                     requires: vec![],
                     url: None,
                     system_requirements: None,
+                    dev: false,
                 },
                 LockedPackage {
                     name: "DESeq2".to_string(),
@@ -236,6 +237,7 @@ mod tests {
                     requires: vec!["BiocGenerics".to_string()],
                     url: None,
                     system_requirements: None,
+                    dev: false,
                 },
             ],
         };
@@ -269,6 +271,7 @@ mod tests {
                 requires: vec![],
                 url: Some("https://api.github.com/repos/user/mypkg/tarball/main".to_string()),
                 system_requirements: None,
+                dev: false,
             }],
         };
 
@@ -298,6 +301,7 @@ mod tests {
                 requires: vec![],
                 url: None,
                 system_requirements: None,
+                dev: false,
             }],
         };
 

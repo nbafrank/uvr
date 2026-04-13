@@ -64,12 +64,24 @@ impl<'a> Resolver<'a> {
         // Track all constraints seen per package for re-resolution on conflict.
         let mut seen_constraints: HashMap<String, Vec<String>> = HashMap::new();
 
-        // Seed from manifest direct dependencies.
+        // Track which root packages come from dev-dependencies only.
+        let mut dev_roots: HashSet<String> = HashSet::new();
+
+        // Seed from manifest direct dependencies + dev-dependencies.
         let mut pending: VecDeque<(String, Option<String>)> = manifest
             .dependencies
             .iter()
             .map(|(name, spec)| (name.clone(), spec.version_req().map(str::to_string)))
             .collect();
+        // Add dev-dependencies to the queue.
+        for (name, spec) in &manifest.dev_dependencies {
+            let constraint = spec.version_req().map(str::to_string);
+            pending.push_back((name.clone(), constraint));
+            // Only mark as dev root if not also in regular dependencies.
+            if !manifest.dependencies.contains_key(name) {
+                dev_roots.insert(name.clone());
+            }
+        }
         for (name, constraint) in &pending {
             queued.insert(name.clone());
             if let Some(c) = constraint {
@@ -220,18 +232,31 @@ impl<'a> Resolver<'a> {
         // Validate the graph has no cycles (topo sort will error on cycles).
         graph.topological_sort()?;
 
+        // Determine which packages are dev-only: reachable exclusively from
+        // dev_roots, not from any regular dependency root.
+        let non_dev_roots: HashSet<&str> =
+            manifest.dependencies.keys().map(String::as_str).collect();
+        let dev_only_pkgs: HashSet<String> = find_dev_only_packages(&resolution, &non_dev_roots)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
         // Build packages sorted alphabetically for the lockfile (diffs).
         let mut packages: Vec<LockedPackage> = resolution
             .into_values()
-            .map(|r| LockedPackage {
-                name: r.name,
-                version: r.version.to_string(),
-                source: r.source,
-                raw_version: r.raw_version,
-                url: Some(r.url),
-                checksum: r.checksum,
-                requires: r.requires,
-                system_requirements: r.system_requirements,
+            .map(|r| {
+                let is_dev = dev_only_pkgs.contains(&r.name);
+                LockedPackage {
+                    name: r.name,
+                    version: r.version.to_string(),
+                    source: r.source,
+                    raw_version: r.raw_version,
+                    url: Some(r.url),
+                    checksum: r.checksum,
+                    requires: r.requires,
+                    system_requirements: r.system_requirements,
+                    dev: is_dev,
+                }
             })
             .collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
@@ -244,6 +269,41 @@ impl<'a> Resolver<'a> {
             packages,
         })
     }
+}
+
+/// Walk the resolved dependency graph from non-dev roots using BFS.
+/// Any package NOT reached is dev-only.
+fn find_dev_only_packages<'a>(
+    resolution: &'a Resolution,
+    non_dev_roots: &HashSet<&str>,
+) -> HashSet<&'a str> {
+    // BFS from non-dev roots to find all packages reachable from production deps.
+    let mut reachable: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = non_dev_roots
+        .iter()
+        .filter(|name| resolution.contains_key(**name))
+        .copied()
+        .collect();
+
+    while let Some(name) = queue.pop_front() {
+        if !reachable.insert(name) {
+            continue;
+        }
+        if let Some(pkg) = resolution.get(name) {
+            for req in &pkg.requires {
+                if !reachable.contains(req.as_str()) && resolution.contains_key(req.as_str()) {
+                    queue.push_back(req);
+                }
+            }
+        }
+    }
+
+    // Any resolved package not reachable from non-dev roots is dev-only.
+    resolution
+        .keys()
+        .filter(|name| !reachable.contains(name.as_str()))
+        .map(String::as_str)
+        .collect()
 }
 
 const BASE_PACKAGES: &[&str] = &[
@@ -662,6 +722,7 @@ mod tests {
                 checksum: None,
                 requires: vec!["dplyr".into(), "rlang".into()],
                 system_requirements: None,
+                dev: false,
             },
             LockedPackage {
                 name: "dplyr".into(),
@@ -672,6 +733,7 @@ mod tests {
                 checksum: None,
                 requires: vec!["rlang".into()],
                 system_requirements: None,
+                dev: false,
             },
             LockedPackage {
                 name: "rlang".into(),
@@ -682,6 +744,7 @@ mod tests {
                 checksum: None,
                 requires: vec![],
                 system_requirements: None,
+                dev: false,
             },
         ];
 
@@ -718,5 +781,59 @@ mod tests {
         let v = Version::parse(&normalized).unwrap();
         let req = parse_version_req(">=1.13.0").unwrap();
         assert!(version_matches_req(&v, &req));
+    }
+
+    #[test]
+    fn dev_dependencies_resolved_and_tagged() {
+        // ggplot2 is a regular dep, testthat is dev-only.
+        // Both should be resolved, but testthat and its exclusive deps should be dev=true.
+        let mut packages = HashMap::new();
+        packages.extend([
+            make_pkg("ggplot2", "3.4.4", vec![("rlang", None)]),
+            make_pkg("rlang", "1.1.4", vec![]),
+            make_pkg("testthat", "3.2.0", vec![("praise", None)]),
+            make_pkg("praise", "1.0.0", vec![]),
+        ]);
+        let registry = MockRegistry { packages };
+        let resolver = Resolver::new(&registry);
+
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("testthat".into(), DependencySpec::Version("*".into()), true); // dev dep
+
+        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        assert_eq!(lockfile.packages.len(), 4);
+
+        // ggplot2 and rlang are production deps
+        assert!(!lockfile.get_package("ggplot2").unwrap().dev);
+        assert!(!lockfile.get_package("rlang").unwrap().dev);
+
+        // testthat and praise are dev-only
+        assert!(lockfile.get_package("testthat").unwrap().dev);
+        assert!(lockfile.get_package("praise").unwrap().dev);
+    }
+
+    #[test]
+    fn shared_dep_between_dev_and_prod_is_not_dev() {
+        // Both ggplot2 (prod) and testthat (dev) depend on rlang.
+        // rlang should NOT be marked as dev since it's reachable from prod.
+        let mut packages = HashMap::new();
+        packages.extend([
+            make_pkg("ggplot2", "3.4.4", vec![("rlang", None)]),
+            make_pkg("testthat", "3.2.0", vec![("rlang", None)]),
+            make_pkg("rlang", "1.1.4", vec![]),
+        ]);
+        let registry = MockRegistry { packages };
+        let resolver = Resolver::new(&registry);
+
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("testthat".into(), DependencySpec::Version("*".into()), true);
+
+        let lockfile = resolver.resolve(&manifest, None).unwrap();
+        assert_eq!(lockfile.packages.len(), 3);
+
+        assert!(!lockfile.get_package("rlang").unwrap().dev);
+        assert!(lockfile.get_package("testthat").unwrap().dev);
     }
 }

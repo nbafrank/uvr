@@ -112,7 +112,7 @@ pub struct AddArgs {
     pub source: Option<String>,
 
     /// Number of parallel download jobs
-    #[arg(short, long, default_value = "4", value_name = "N")]
+    #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
 }
 
@@ -137,8 +137,12 @@ pub struct SyncArgs {
     #[arg(long)]
     pub frozen: bool,
 
+    /// Skip dev-only packages (production deploy)
+    #[arg(long)]
+    pub no_dev: bool,
+
     /// Number of parallel download jobs
-    #[arg(short, long, default_value = "4", value_name = "N")]
+    #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
 
     /// Install packages to a custom library path instead of .uvr/library/
@@ -194,7 +198,7 @@ pub struct UpdateArgs {
     pub dry_run: bool,
 
     /// Number of parallel download jobs
-    #[arg(short, long, default_value = "4", value_name = "N")]
+    #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
 }
 
@@ -238,7 +242,7 @@ pub struct ImportArgs {
     pub lock: bool,
 
     /// Number of parallel download jobs
-    #[arg(short, long, default_value = "4", value_name = "N")]
+    #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
 }
 

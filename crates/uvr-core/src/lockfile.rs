@@ -48,6 +48,15 @@ pub struct LockedPackage {
     /// Raw `SystemRequirements` string from DESCRIPTION, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_requirements: Option<String>,
+
+    /// `true` if this package is only needed for development (reachable
+    /// exclusively from `[dev-dependencies]`). Omitted when `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dev: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 #[derive(Debug, Clone, PartialEq)]

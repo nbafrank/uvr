@@ -15,9 +15,9 @@ use uvr_core::resolver::topological_install_order;
 
 use crate::commands::util::make_spinner;
 
-pub async fn run(frozen: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
+pub async fn run(frozen: bool, no_dev: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
-    run_inner(&project, frozen, jobs, library.as_deref()).await
+    run_inner(&project, frozen, no_dev, jobs, library.as_deref()).await
 }
 
 /// Install all packages from the existing lockfile.
@@ -31,6 +31,7 @@ pub async fn run(frozen: bool, jobs: usize, library: Option<PathBuf>) -> Result<
 pub async fn run_inner(
     project: &Project,
     frozen: bool,
+    no_dev: bool,
     jobs: usize,
     library_override: Option<&std::path::Path>,
 ) -> Result<()> {
@@ -66,6 +67,23 @@ pub async fn run_inner(
             );
         }
     }
+
+    // When --no-dev is set, filter out dev-only packages before installing.
+    let lockfile = if no_dev {
+        let mut filtered = lockfile.clone();
+        let before = filtered.packages.len();
+        filtered.packages.retain(|p| !p.dev);
+        let skipped = before - filtered.packages.len();
+        if skipped > 0 {
+            println!(
+                "{} Skipping {skipped} dev-only package(s)",
+                console::style("→").blue().bold()
+            );
+        }
+        filtered
+    } else {
+        lockfile
+    };
 
     install_from_lockfile(project, &lockfile, jobs, library_override).await
 }
@@ -626,6 +644,7 @@ mod tests {
                 requires: vec!["methods".into()],
                 url: Some("https://cran.r-project.org/test".into()),
                 system_requirements: None,
+                dev: false,
             }],
         };
         assert!(lockfiles_equivalent(&lf, &lf));
@@ -647,6 +666,7 @@ mod tests {
                 requires: vec![],
                 url: Some("https://example.com/old".into()),
                 system_requirements: None,
+                dev: false,
             }],
         };
         let lf2 = Lockfile {
@@ -663,6 +683,7 @@ mod tests {
                 requires: vec![],
                 url: Some("https://example.com/new".into()),
                 system_requirements: None,
+                dev: false,
             }],
         };
         assert!(lockfiles_equivalent(&lf1, &lf2));
@@ -684,6 +705,7 @@ mod tests {
                 requires: vec![],
                 url: None,
                 system_requirements: None,
+                dev: false,
             }],
         };
         assert!(!lockfiles_equivalent(&make("1.8.7"), &make("1.8.8")));
@@ -730,6 +752,7 @@ mod tests {
                 requires,
                 url: None,
                 system_requirements: None,
+                dev: false,
             }],
         };
         assert!(!lockfiles_equivalent(
@@ -749,6 +772,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         let url = source_url(&pkg, None);
         assert_eq!(
@@ -768,6 +792,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         let url = source_url(&pkg, None);
         assert!(url.contains("scales_1.1-3.tar.gz"));
@@ -784,6 +809,7 @@ mod tests {
             requires: vec![],
             url: Some("https://custom-mirror.org/jsonlite.tar.gz".into()),
             system_requirements: None,
+            dev: false,
         };
         let url = source_url(&pkg, None);
         assert_eq!(url, "https://custom-mirror.org/jsonlite.tar.gz");
@@ -800,6 +826,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         let url = source_url(&pkg, Some("3.20"));
         assert!(url.contains("bioconductor.org"));
@@ -818,6 +845,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         assert!(source_url(&pkg, None).is_empty());
     }
@@ -834,6 +862,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
 
         // Not installed
@@ -869,6 +898,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         std::fs::create_dir_all(dir.path().join("scales")).unwrap();
         std::fs::write(
@@ -888,6 +918,7 @@ mod tests {
             requires: vec![],
             url: None,
             system_requirements: None,
+            dev: false,
         };
         assert!(is_installed(&dash_pkg_no_raw, dir.path()));
     }

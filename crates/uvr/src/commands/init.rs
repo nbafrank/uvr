@@ -54,6 +54,11 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     // Write .gitignore
     write_gitignore(&cwd).context("Failed to write .gitignore")?;
 
+    // Add uvr files to .Rbuildignore for R package projects
+    if description_path.exists() {
+        write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+    }
+
     // Write .Rprofile so RStudio sees the uvr library
     ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
 
@@ -92,7 +97,10 @@ const RPROFILE_MARKER: &str = "# >>> uvr >>>";
 const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- file.path(getwd(), ".uvr", "library")
-  if (dir.exists(lib)) .libPaths(c(lib, .libPaths()))
+  if (dir.exists(lib)) {
+    .libPaths(lib)
+    message("uvr: linking library at ", lib)
+  }
 })
 # <<< uvr <<<
 "#;
@@ -171,6 +179,26 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
     let content = serde_json::json!({ key: r_binary_str });
     let pretty = serde_json::to_string_pretty(&content).unwrap();
     std::fs::write(&settings_path, pretty + "\n")
+}
+
+fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
+    let path = dir.join(".Rbuildignore");
+    let entries = "^uvr\\.toml$\n^uvr\\.lock$\n^\\.uvr$\n";
+
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path)?;
+        if existing.contains("uvr\\.toml") {
+            return Ok(());
+        }
+        let mut content = existing;
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(entries);
+        std::fs::write(&path, content)
+    } else {
+        std::fs::write(&path, entries)
+    }
 }
 
 fn write_gitignore(dir: &Path) -> std::io::Result<()> {

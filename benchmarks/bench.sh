@@ -116,9 +116,6 @@ for scenario in $SCENARIOS; do
     MANIFEST="$SCRIPT_DIR/uvr-${scenario}.toml"
     echo "--- scenario: $scenario ---"
 
-    # Clear all download caches before each scenario to prevent bleed
-    clear_all_caches
-
     # ── uvr sync ────────────────────────────────────────────────────────────
 
     echo -n "  uvr sync:            "
@@ -139,6 +136,8 @@ for scenario in $SCENARIOS; do
     COMPANION_DIR="$BENCHDIR/.uvr/library/uvr"
 
     for i in $(seq 1 "$RUNS"); do
+        # Clear all caches before every run for true cold-cache measurement
+        clear_all_caches
         # Wipe library but preserve companion package to avoid re-install overhead
         COMPANION_BAK=""
         if [ -d "$COMPANION_DIR" ]; then
@@ -165,6 +164,7 @@ for scenario in $SCENARIOS; do
     echo -n "  install.packages:    "
     IP_TIMES=""
     for i in $(seq 1 "$RUNS"); do
+        clear_all_caches
         BENCHDIR="$(mktemp -d)"
         cp "$MANIFEST" "$BENCHDIR/uvr.toml"
         mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/iplib"
@@ -191,6 +191,7 @@ REOF
         echo -n "  pak::pkg_install:    "
         PAK_TIMES=""
         for i in $(seq 1 "$RUNS"); do
+            clear_all_caches
             BENCHDIR="$(mktemp -d)"
             cp "$MANIFEST" "$BENCHDIR/uvr.toml"
             mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/paklib"
@@ -216,6 +217,7 @@ REOF
         echo -n "  renv::restore:       "
         RENV_TIMES=""
         for i in $(seq 1 "$RUNS"); do
+            clear_all_caches
             BENCHDIR="$(mktemp -d)"
             cp "$MANIFEST" "$BENCHDIR/uvr.toml"
             mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/renvlib"
