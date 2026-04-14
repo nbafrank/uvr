@@ -391,8 +391,18 @@ pub async fn install_from_lockfile(
             install_binary_package(&result.path, &library, &plan.pkg.name, libr_path.as_deref())
                 .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
         } else {
+            let prefix = format!(
+                "{} Compiling {} {}",
+                style(&progress).dim(),
+                plan.pkg.name,
+                plan.pkg.version
+            );
             installer
-                .install(&result.path, &library, &plan.pkg.name)
+                .install_streaming(&result.path, &library, &plan.pkg.name, |line| {
+                    // Show the last meaningful compiler line next to the spinner
+                    let short = if line.len() > 60 { &line[..60] } else { line };
+                    pb.set_message(format!("{prefix} ({short})"));
+                })
                 .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
         }
 

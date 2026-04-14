@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -17,16 +18,87 @@ impl RCmdInstall {
     /// Run `R CMD INSTALL --library=<lib_path> --no-test-load <tarball>`.
     /// On failure, the captured stderr is included in the error message.
     pub fn install(&self, tarball: &Path, library: &Path, package_name: &str) -> Result<()> {
+        let mut cmd = self.build_cmd(tarball, library);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let log = if stderr.is_empty() { stdout } else { stderr };
+            return Err(UvrError::Other(format!(
+                "R CMD INSTALL failed for '{package_name}' (exit {code}):\n{log}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Like `install`, but streams stderr line-by-line to a callback so the
+    /// caller can update a progress spinner with compilation output.
+    pub fn install_streaming<F>(
+        &self,
+        tarball: &Path,
+        library: &Path,
+        package_name: &str,
+        on_line: F,
+    ) -> Result<()>
+    where
+        F: Fn(&str),
+    {
+        let mut cmd = self.build_cmd(tarball, library);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+
+        // Collect all output for error reporting
+        let mut all_stderr = String::new();
+
+        // Read stderr line-by-line to update progress
+        if let Some(stderr) = child.stderr.take() {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(|l| l.ok()) {
+                all_stderr.push_str(&line);
+                all_stderr.push('\n');
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    on_line(trimmed);
+                }
+            }
+        }
+
+        let status = child.wait()?;
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            // Also grab stdout if stderr was empty
+            let log = if all_stderr.trim().is_empty() {
+                if let Some(mut stdout) = child.stdout.take() {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut stdout, &mut s).unwrap_or(0);
+                    s
+                } else {
+                    all_stderr
+                }
+            } else {
+                all_stderr
+            };
+            return Err(UvrError::Other(format!(
+                "R CMD INSTALL failed for '{package_name}' (exit {code}):\n{log}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn build_cmd(&self, tarball: &Path, library: &Path) -> Command {
         let lib_str = library.to_string_lossy();
         let tarball_str = tarball.to_string_lossy();
 
-        // Derive R_HOME from the binary path (<r_home>/bin/R).
-        // Set DYLD_LIBRARY_PATH (macOS) / LD_LIBRARY_PATH (Linux) so the dynamic
-        // linker can find libR.dylib even when its embedded install-name still points
-        // to the original build location (e.g. /Library/Frameworks/R.framework/…).
         let r_lib_dir = std::path::Path::new(&self.r_binary)
-            .parent() // …/bin/
-            .and_then(|p| p.parent()) // …/r-versions/4.4.2/
+            .parent()
+            .and_then(|p| p.parent())
             .map(|p| p.join("lib"))
             .unwrap_or_default();
         let r_lib_str = r_lib_dir.to_string_lossy();
@@ -39,14 +111,9 @@ impl RCmdInstall {
             "--no-test-load",
             "--no-staged-install",
             &tarball_str,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        ]);
 
         if cfg!(target_os = "windows") {
-            // On Windows, add Rtools to PATH if detected.
-            // Check RTOOLS*_HOME env vars first (set by Rtools installers),
-            // then fall back to common filesystem locations.
             let mut path_ext = String::new();
             let rtools_candidates: Vec<String> = [
                 std::env::var("RTOOLS45_HOME").ok(),
@@ -83,7 +150,6 @@ impl RCmdInstall {
                 cmd.env("PATH", format!("{path_ext}{existing_path}"));
             }
         } else {
-            // On macOS/Linux, set library paths and Homebrew paths.
             cmd.env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
                 .env("LD_LIBRARY_PATH", r_lib_str.as_ref());
 
@@ -107,19 +173,6 @@ impl RCmdInstall {
             }
         }
 
-        let output = cmd.output()?;
-
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Combine both streams — R uses both for diagnostics
-            let log = if stderr.is_empty() { stdout } else { stderr };
-            return Err(UvrError::Other(format!(
-                "R CMD INSTALL failed for '{package_name}' (exit {code}):\n{log}"
-            )));
-        }
-
-        Ok(())
+        cmd
     }
 }
