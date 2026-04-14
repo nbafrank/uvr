@@ -68,20 +68,8 @@ async fn resolve_lockfile(
         .and_then(|r| query_r_version(&r));
 
     let spinner = make_spinner("Resolving dependencies...");
-    let cran = CranRegistry::fetch(client, upgrade)
-        .await
-        .context("Failed to fetch CRAN index")?;
 
-    // Fetch custom repository indices from manifest [[sources]].
-    let mut custom_registries: Vec<CranRegistry> = Vec::new();
-    for source in &project.manifest.sources {
-        let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade)
-            .await
-            .with_context(|| format!("Failed to fetch index for repository '{}'", source.name))?;
-        custom_registries.push(reg);
-    }
-
-    // Fetch Bioconductor index only when the manifest has bioc deps.
+    // Determine which Bioconductor release to fetch (if any).
     let has_bioc = project.manifest.dependencies.values().any(|s| s.is_bioc())
         || project
             .manifest
@@ -89,32 +77,70 @@ async fn resolve_lockfile(
             .values()
             .any(|s| s.is_bioc());
 
-    let bioc_opt: Option<BiocRegistry> = if has_bioc {
-        let bioc = if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
-            // Explicit bioc_version in manifest — always use it.
-            BiocRegistry::fetch_release(client, bioc_ver)
-                .await
-                .context("Failed to fetch Bioconductor index")?
+    let bioc_release: Option<String> = if has_bioc {
+        if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
+            Some(bioc_ver.clone())
         } else if let Some(locked_bioc) = existing.and_then(|lf| lf.r.bioc_version.as_deref()) {
-            // Reuse the Bioconductor version from the existing lockfile to prevent
-            // silent drift between resolves. Use `uvr lock --upgrade` to update.
-            BiocRegistry::fetch_release(client, locked_bioc)
-                .await
-                .context("Failed to fetch Bioconductor index")?
+            Some(locked_bioc.to_string())
         } else {
-            // First resolve or no existing lockfile — auto-detect from R version.
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-            BiocRegistry::fetch(client, r_ver)
-                .await
-                .context("Failed to fetch Bioconductor index")?
-        };
-        Some(bioc)
+            let parts: Vec<&str> = r_ver.split('.').collect();
+            let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
+            let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
+            Some(
+                match (major, minor) {
+                    (4, 5) => "3.21",
+                    (4, 4) => "3.20",
+                    (4, 3) => "3.18",
+                    (4, 2) => "3.16",
+                    (4, 1) => "3.14",
+                    (4, 0) => "3.12",
+                    _ => "3.21",
+                }
+                .to_string(),
+            )
+        }
     } else {
         None
     };
 
-    // Pre-resolve GitHub dependencies via the GitHub API (async).
-    let pre_resolved = resolve_github_deps(client, &project.manifest).await?;
+    // Fetch all indices in parallel: CRAN + Bioc + custom repos + GitHub deps.
+    let cran_fut = CranRegistry::fetch(client, upgrade);
+    let bioc_fut = async {
+        match &bioc_release {
+            Some(rel) => BiocRegistry::fetch_release(client, rel)
+                .await
+                .map(Some)
+                .context("Failed to fetch Bioconductor index"),
+            None => Ok(None),
+        }
+    };
+    let custom_fut = async {
+        let mut regs = Vec::new();
+        for source in &project.manifest.sources {
+            let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade)
+                .await
+                .with_context(|| {
+                    format!("Failed to fetch index for repository '{}'", source.name)
+                })?;
+            regs.push(reg);
+        }
+        Ok::<_, anyhow::Error>(regs)
+    };
+    let github_fut = resolve_github_deps(client, &project.manifest);
+
+    // Fetch all indices in parallel: CRAN + Bioc + custom repos + GitHub deps.
+    let (cran_result, bioc_result, github_result, custom_result) = tokio::join!(
+        cran_fut,
+        bioc_fut,
+        github_fut,
+        custom_fut,
+    );
+
+    let cran = cran_result.context("Failed to fetch CRAN index")?;
+    let bioc_opt = bioc_result?;
+    let pre_resolved = github_result?;
+    let custom_registries: Vec<CranRegistry> = custom_result?;
 
     // Build the registry chain: CRAN → custom sources → Bioconductor
     let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {

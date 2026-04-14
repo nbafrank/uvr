@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
 
-use chrono::Local;
 use flate2::read::GzDecoder;
 use tracing::{debug, info};
 
@@ -41,44 +39,134 @@ impl BiocRegistry {
 
     /// Fetch the Bioconductor package index for a specific release (e.g. `"3.18"`).
     pub async fn fetch_release(client: &reqwest::Client, bioc_release: &str) -> Result<Self> {
-        let cache_path = bioc_cache_path(bioc_release);
+        let cache_key = format!("bioc-{bioc_release}");
+        let cache_path = crate::registry::cran::cache_path_for(&cache_key);
+        let has_cache = cache_path.exists();
 
-        let (raw, from_cache) = if cache_path.exists() {
-            debug!(
-                "Loading Bioconductor index from cache: {}",
-                cache_path.display()
-            );
-            (std::fs::read_to_string(&cache_path)?, true)
-        } else {
-            let url = format!(
-                "https://bioconductor.org/packages/{bioc_release}/bioc/src/contrib/PACKAGES.gz"
-            );
-            info!("Downloading Bioconductor {bioc_release} PACKAGES.gz...");
-            let bytes = client.get(&url).send().await?.bytes().await?;
-            let mut gz = GzDecoder::new(bytes.as_ref());
-            let mut text = String::new();
-            gz.read_to_string(&mut text)?;
-            (text, false)
-        };
+        let url = format!(
+            "https://bioconductor.org/packages/{bioc_release}/bioc/src/contrib/PACKAGES.gz"
+        );
 
-        let mut packages = HashMap::new();
-        for block in raw.split("\n\n") {
-            let block = block.trim();
-            if block.is_empty() {
-                continue;
+        // Try HTTP conditional request if we have a cached index
+        if has_cache {
+            if let Some((etag, last_modified)) =
+                crate::registry::cran::read_cache_meta(&cache_key)
+            {
+                let mut req = client.get(&url);
+                if let Some(ref e) = etag {
+                    req = req.header("If-None-Match", e.as_str());
+                }
+                if let Some(ref lm) = last_modified {
+                    req = req.header("If-Modified-Since", lm.as_str());
+                }
+                if let Ok(resp) = req.send().await {
+                    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+                        debug!("Bioconductor {bioc_release}: HTTP 304, using cache");
+                        let raw = std::fs::read_to_string(&cache_path)?;
+                        let packages = parse_bioc_text(&raw);
+                        info!(
+                            "Bioconductor {bioc_release}: {} packages (cached)",
+                            packages.len()
+                        );
+                        return Ok(BiocRegistry {
+                            packages,
+                            bioc_release: bioc_release.to_string(),
+                        });
+                    } else if resp.status().is_success() {
+                        let new_etag = resp
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        let new_lm = resp
+                            .headers()
+                            .get("last-modified")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        let bytes = resp.bytes().await?;
+                        let mut gz = GzDecoder::new(bytes.as_ref());
+                        let mut text = String::new();
+                        gz.read_to_string(&mut text)?;
+                        let packages = parse_bioc_text(&text);
+                        if let Some(parent) = cache_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&cache_path, &text);
+                        crate::registry::cran::write_cache_meta(
+                            &cache_key,
+                            new_etag.as_deref(),
+                            new_lm.as_deref(),
+                        );
+                        info!(
+                            "Bioconductor {bioc_release}: {} packages (updated)",
+                            packages.len()
+                        );
+                        return Ok(BiocRegistry {
+                            packages,
+                            bioc_release: bioc_release.to_string(),
+                        });
+                    }
+                }
+                // Conditional request failed — use stale cache
+                debug!("Bioconductor {bioc_release}: conditional request failed, using cache");
+                let raw = std::fs::read_to_string(&cache_path)?;
+                let packages = parse_bioc_text(&raw);
+                info!(
+                    "Bioconductor {bioc_release}: {} packages (cached, stale)",
+                    packages.len()
+                );
+                return Ok(BiocRegistry {
+                    packages,
+                    bioc_release: bioc_release.to_string(),
+                });
             }
-            if let Some(entry) = parse_dcf_block(block) {
-                packages.insert(entry.name.clone(), entry);
-            }
+            // No meta but cache exists — use it
+            let raw = std::fs::read_to_string(&cache_path)?;
+            let packages = parse_bioc_text(&raw);
+            info!(
+                "Bioconductor {bioc_release}: {} packages (cached)",
+                packages.len()
+            );
+            return Ok(BiocRegistry {
+                packages,
+                bioc_release: bioc_release.to_string(),
+            });
         }
 
-        // Write cache only after successful parse
-        if !from_cache {
-            if let Some(parent) = cache_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&cache_path, &raw);
+        // No cache — full download
+        info!("Downloading Bioconductor {bioc_release} PACKAGES.gz...");
+        let resp = client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(UvrError::Other(format!(
+                "Failed to fetch Bioconductor index (HTTP {})",
+                resp.status()
+            )));
         }
+        let new_etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let new_lm = resp
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.bytes().await?;
+        let mut gz = GzDecoder::new(bytes.as_ref());
+        let mut text = String::new();
+        gz.read_to_string(&mut text)?;
+        let packages = parse_bioc_text(&text);
+
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&cache_path, &text);
+        crate::registry::cran::write_cache_meta(
+            &cache_key,
+            new_etag.as_deref(),
+            new_lm.as_deref(),
+        );
 
         info!("Bioconductor {bioc_release}: {} packages", packages.len());
         Ok(BiocRegistry {
@@ -135,13 +223,18 @@ impl PackageRegistry for BiocRegistry {
     }
 }
 
-fn bioc_cache_path(bioc_release: &str) -> PathBuf {
-    let date = Local::now().format("%Y-%m-%d").to_string();
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("cache")
-        .join(format!("bioc-{bioc_release}-packages-{date}.txt"))
+fn parse_bioc_text(text: &str) -> HashMap<String, CranPackageEntry> {
+    let mut packages = HashMap::new();
+    for block in text.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        if let Some(entry) = parse_dcf_block(block) {
+            packages.insert(entry.name.clone(), entry);
+        }
+    }
+    packages
 }
 
 #[cfg(test)]

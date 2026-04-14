@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use chrono::Local;
 use flate2::read::GzDecoder;
 use semver::{Version, VersionReq};
 use tracing::{debug, info};
@@ -180,41 +179,131 @@ impl CranRegistry {
         force_refresh: bool,
     ) -> Result<Self> {
         let cache_path = cache_path_for(cache_key);
+        let has_cache = cache_path.exists();
 
-        let (raw, from_cache) = if !force_refresh && cache_path.exists() {
+        // Try HTTP conditional request if we have a cached index and aren't forcing refresh.
+        if !force_refresh && has_cache {
+            if let Some((etag, last_modified)) = read_cache_meta(cache_key) {
+                let mut req = client.get(packages_url);
+                if let Some(ref e) = etag {
+                    req = req.header("If-None-Match", e.as_str());
+                }
+                if let Some(ref lm) = last_modified {
+                    req = req.header("If-Modified-Since", lm.as_str());
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
+                        debug!("{} index: HTTP 304 Not Modified, using cache", cache_key);
+                        let raw = std::fs::read(&cache_path)?;
+                        let text = String::from_utf8_lossy(&raw);
+                        let index = parse_packages_gz(&text)?;
+                        info!("{} index: {} packages (cached)", cache_key, index.len());
+                        return Ok(CranRegistry {
+                            index,
+                            src_base: src_base.to_string(),
+                            source,
+                        });
+                    }
+                    Ok(resp) if resp.status().is_success() => {
+                        // Index changed — save new ETag/Last-Modified and body
+                        let new_etag = resp
+                            .headers()
+                            .get("etag")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        let new_lm = resp
+                            .headers()
+                            .get("last-modified")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        let bytes = resp.bytes().await?;
+                        let mut gz = GzDecoder::new(bytes.as_ref());
+                        let mut decompressed = Vec::new();
+                        gz.read_to_end(&mut decompressed)?;
+                        let text = String::from_utf8_lossy(&decompressed);
+                        let index = parse_packages_gz(&text)?;
+                        // Write cache + meta after successful parse
+                        if let Some(parent) = cache_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&cache_path, &decompressed);
+                        write_cache_meta(
+                            cache_key,
+                            new_etag.as_deref(),
+                            new_lm.as_deref(),
+                        );
+                        info!("{} index: {} packages (updated)", cache_key, index.len());
+                        return Ok(CranRegistry {
+                            index,
+                            src_base: src_base.to_string(),
+                            source,
+                        });
+                    }
+                    Ok(_) | Err(_) => {
+                        // Conditional request failed — fall back to cached data
+                        debug!("{} index: conditional request failed, using cache", cache_key);
+                        let raw = std::fs::read(&cache_path)?;
+                        let text = String::from_utf8_lossy(&raw);
+                        let index = parse_packages_gz(&text)?;
+                        info!("{} index: {} packages (cached, stale)", cache_key, index.len());
+                        return Ok(CranRegistry {
+                            index,
+                            src_base: src_base.to_string(),
+                            source,
+                        });
+                    }
+                }
+            }
+            // No meta file but cache exists — use cache and do a full fetch to get headers
             debug!(
-                "Loading {} index from cache: {}",
+                "Loading {} index from cache (no meta): {}",
                 cache_key,
                 cache_path.display()
             );
-            (std::fs::read(&cache_path)?, true)
-        } else {
-            info!("Downloading {} PACKAGES.gz...", cache_key);
-            let resp = client.get(packages_url).send().await?;
-            if !resp.status().is_success() {
-                return Err(UvrError::Other(format!(
-                    "Failed to fetch package index from {packages_url} (HTTP {})",
-                    resp.status()
-                )));
-            }
-            let bytes = resp.bytes().await?;
-            let mut gz = GzDecoder::new(bytes.as_ref());
-            let mut decompressed = Vec::new();
-            gz.read_to_end(&mut decompressed)?;
-            (decompressed, false)
-        };
+            let raw = std::fs::read(&cache_path)?;
+            let text = String::from_utf8_lossy(&raw);
+            let index = parse_packages_gz(&text)?;
+            info!("{} index: {} packages (cached)", cache_key, index.len());
+            return Ok(CranRegistry {
+                index,
+                src_base: src_base.to_string(),
+                source,
+            });
+        }
 
-        let text = String::from_utf8_lossy(&raw);
+        // No cache or force refresh — full download
+        info!("Downloading {} PACKAGES.gz...", cache_key);
+        let resp = client.get(packages_url).send().await?;
+        if !resp.status().is_success() {
+            return Err(UvrError::Other(format!(
+                "Failed to fetch package index from {packages_url} (HTTP {})",
+                resp.status()
+            )));
+        }
+        let new_etag = resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let new_lm = resp
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.bytes().await?;
+        let mut gz = GzDecoder::new(bytes.as_ref());
+        let mut decompressed = Vec::new();
+        gz.read_to_end(&mut decompressed)?;
+
+        let text = String::from_utf8_lossy(&decompressed);
         let index = parse_packages_gz(&text)?;
 
-        // Write cache only AFTER successful parse — avoids poisoning the
-        // daily cache with corrupt or truncated network responses.
-        if !from_cache {
-            if let Some(parent) = cache_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&cache_path, &raw);
+        // Write cache + meta after successful parse
+        if let Some(parent) = cache_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        let _ = std::fs::write(&cache_path, &decompressed);
+        write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
 
         info!("{} index: {} packages", cache_key, index.len());
         Ok(CranRegistry {
@@ -253,13 +342,48 @@ impl PackageRegistry for CranRegistry {
     }
 }
 
-fn cache_path_for(key: &str) -> PathBuf {
-    let date = Local::now().format("%Y-%m-%d").to_string();
+fn cache_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".uvr")
         .join("cache")
-        .join(format!("{key}-packages-{date}.txt"))
+}
+
+pub(crate) fn cache_path_for(key: &str) -> PathBuf {
+    cache_dir().join(format!("{key}-packages.txt"))
+}
+
+fn cache_meta_path_for(key: &str) -> PathBuf {
+    cache_dir().join(format!("{key}-packages.meta"))
+}
+
+/// Read cached ETag and Last-Modified from the sidecar `.meta` file.
+pub(crate) fn read_cache_meta(key: &str) -> Option<(Option<String>, Option<String>)> {
+    let meta_path = cache_meta_path_for(key);
+    let content = std::fs::read_to_string(&meta_path).ok()?;
+    let mut etag = None;
+    let mut last_modified = None;
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("etag: ") {
+            etag = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("last-modified: ") {
+            last_modified = Some(v.to_string());
+        }
+    }
+    Some((etag, last_modified))
+}
+
+/// Write ETag and Last-Modified to the sidecar `.meta` file.
+pub(crate) fn write_cache_meta(key: &str, etag: Option<&str>, last_modified: Option<&str>) {
+    let meta_path = cache_meta_path_for(key);
+    let mut content = String::new();
+    if let Some(e) = etag {
+        content.push_str(&format!("etag: {e}\n"));
+    }
+    if let Some(lm) = last_modified {
+        content.push_str(&format!("last-modified: {lm}\n"));
+    }
+    let _ = std::fs::write(&meta_path, content);
 }
 
 /// Parse DCF-format PACKAGES text into a `CranIndex`.
