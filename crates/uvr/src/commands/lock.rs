@@ -130,12 +130,8 @@ async fn resolve_lockfile(
     let github_fut = resolve_github_deps(client, &project.manifest);
 
     // Fetch all indices in parallel: CRAN + Bioc + custom repos + GitHub deps.
-    let (cran_result, bioc_result, github_result, custom_result) = tokio::join!(
-        cran_fut,
-        bioc_fut,
-        github_fut,
-        custom_fut,
-    );
+    let (cran_result, bioc_result, github_result, custom_result) =
+        tokio::join!(cran_fut, bioc_fut, github_fut, custom_fut,);
 
     let cran = cran_result.context("Failed to fetch CRAN index")?;
     let bioc_opt = bioc_result?;

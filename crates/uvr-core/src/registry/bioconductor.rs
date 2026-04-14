@@ -49,8 +49,7 @@ impl BiocRegistry {
 
         // Try HTTP conditional request if we have a cached index
         if has_cache {
-            if let Some((etag, last_modified)) =
-                crate::registry::cran::read_cache_meta(&cache_key)
+            if let Some((etag, last_modified)) = crate::registry::cran::read_cache_meta(&cache_key)
             {
                 let mut req = client.get(&url);
                 if let Some(ref e) = etag {
@@ -162,11 +161,7 @@ impl BiocRegistry {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&cache_path, &text);
-        crate::registry::cran::write_cache_meta(
-            &cache_key,
-            new_etag.as_deref(),
-            new_lm.as_deref(),
-        );
+        crate::registry::cran::write_cache_meta(&cache_key, new_etag.as_deref(), new_lm.as_deref());
 
         info!("Bioconductor {bioc_release}: {} packages", packages.len());
         Ok(BiocRegistry {

@@ -90,7 +90,10 @@ pub async fn resolve_system_deps(
     };
 
     if !resp.status().is_success() {
-        debug!("Posit sysreqs API returned {} for {package_name}", resp.status());
+        debug!(
+            "Posit sysreqs API returned {} for {package_name}",
+            resp.status()
+        );
         return Ok(vec![]);
     }
 

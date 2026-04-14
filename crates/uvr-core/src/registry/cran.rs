@@ -227,11 +227,7 @@ impl CranRegistry {
                             let _ = std::fs::create_dir_all(parent);
                         }
                         let _ = std::fs::write(&cache_path, &decompressed);
-                        write_cache_meta(
-                            cache_key,
-                            new_etag.as_deref(),
-                            new_lm.as_deref(),
-                        );
+                        write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
                         info!("{} index: {} packages (updated)", cache_key, index.len());
                         return Ok(CranRegistry {
                             index,
@@ -241,11 +237,18 @@ impl CranRegistry {
                     }
                     Ok(_) | Err(_) => {
                         // Conditional request failed — fall back to cached data
-                        debug!("{} index: conditional request failed, using cache", cache_key);
+                        debug!(
+                            "{} index: conditional request failed, using cache",
+                            cache_key
+                        );
                         let raw = std::fs::read(&cache_path)?;
                         let text = String::from_utf8_lossy(&raw);
                         let index = parse_packages_gz(&text)?;
-                        info!("{} index: {} packages (cached, stale)", cache_key, index.len());
+                        info!(
+                            "{} index: {} packages (cached, stale)",
+                            cache_key,
+                            index.len()
+                        );
                         return Ok(CranRegistry {
                             index,
                             src_base: src_base.to_string(),
