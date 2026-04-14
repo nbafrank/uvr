@@ -173,6 +173,8 @@ for scenario in $SCENARIOS; do
         cat > "$BENCHDIR/bench_ip.R" <<REOF
 lib <- file.path(getwd(), "iplib")
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+# Restrict .libPaths so R can't see packages in the system library
+.libPaths(lib)
 options(repos = c(CRAN = "${P3M_REPO}"))
 install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = TRUE)
 REOF
@@ -199,6 +201,7 @@ REOF
             cat > "$BENCHDIR/bench_pak.R" <<REOF
 lib <- file.path(getwd(), "paklib")
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib)
 pak::pkg_install("${scenario}", lib = lib, ask = FALSE)
 REOF
             t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_pak.R")

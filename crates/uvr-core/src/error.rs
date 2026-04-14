@@ -11,7 +11,7 @@ pub enum UvrError {
     #[error("Lockfile parse error: {0}")]
     LockfileParse(String),
 
-    #[error("Package not found: {0}")]
+    #[error("Package not found: {0}. If this package was recently archived from CRAN, try installing from the CRAN GitHub mirror: uvr add cran/{0}@master")]
     PackageNotFound(String),
 
     #[error("Version conflict for package '{package}': required {required}, but {conflicting} is already selected")]

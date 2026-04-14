@@ -146,6 +146,7 @@ pub struct SyncArgs {
     pub jobs: usize,
 
     /// Install packages to a custom library path instead of .uvr/library/
+    /// (also reads UVR_LIBRARY env var)
     #[arg(long, value_name = "PATH")]
     pub library: Option<PathBuf>,
 }

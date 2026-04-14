@@ -17,6 +17,8 @@ use crate::commands::util::make_spinner;
 
 pub async fn run(frozen: bool, no_dev: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
+    // CLI --library takes precedence, then UVR_LIBRARY env var.
+    let library = library.or_else(|| std::env::var("UVR_LIBRARY").ok().map(PathBuf::from));
     run_inner(&project, frozen, no_dev, jobs, library.as_deref()).await
 }
 
@@ -153,11 +155,31 @@ pub async fn install_from_lockfile(
         return Ok(());
     }
 
-    println!(
-        "{} Installing {} package(s)...",
-        style("→").blue().bold(),
-        to_install.len()
-    );
+    // Show what's changing: new installs vs upgrades.
+    let mut new_count = 0usize;
+    let mut upgrade_count = 0usize;
+    for pkg in &to_install {
+        let old_ver = installed_version(&pkg.name, &library);
+        if let Some(old) = &old_ver {
+            println!(
+                "  {} {} {} → {}",
+                style("↑").cyan(),
+                style(&pkg.name).cyan(),
+                style(old).dim(),
+                style(&pkg.version).green()
+            );
+            upgrade_count += 1;
+        } else {
+            new_count += 1;
+        }
+    }
+
+    let summary = match (new_count, upgrade_count) {
+        (n, 0) => format!("Installing {n} package(s)..."),
+        (0, u) => format!("Upgrading {u} package(s)..."),
+        (n, u) => format!("Installing {n} new, upgrading {u} package(s)..."),
+    };
+    println!("{} {}", style("→").blue().bold(), summary);
 
     let client = crate::commands::util::build_client()?;
 
@@ -349,10 +371,20 @@ pub async fn install_from_lockfile(
 
     let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
-    for (plan, result) in plans.iter().zip(results.iter()) {
+    let total = plans.len();
+    for (i, (plan, result)) in plans.iter().zip(results.iter()).enumerate() {
+        let progress = format!("[{}/{}]", i + 1, total);
+        let action = if result.used_binary {
+            "Installing"
+        } else {
+            "Compiling"
+        };
         let pb = make_spinner(&format!(
-            "Installing {} {}...",
-            plan.pkg.name, plan.pkg.version
+            "{} {} {} {}...",
+            style(&progress).dim(),
+            action,
+            plan.pkg.name,
+            plan.pkg.version
         ));
 
         if result.used_binary {
@@ -364,17 +396,7 @@ pub async fn install_from_lockfile(
                 .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
         }
 
-        pb.finish_with_message(format!(
-            "{} {} {}{}",
-            style("✓").green(),
-            plan.pkg.name,
-            style(&plan.pkg.version).dim(),
-            if result.used_binary {
-                ""
-            } else {
-                " (compiled)"
-            },
-        ));
+        pb.finish_and_clear();
     }
 
     println!(
@@ -517,6 +539,14 @@ fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
         }
         None => false,
     }
+}
+
+/// Read the installed version of a package from its DESCRIPTION, or None if not installed.
+fn installed_version(name: &str, library: &std::path::Path) -> Option<String> {
+    let desc_path = library.join(name).join("DESCRIPTION");
+    let content = std::fs::read_to_string(&desc_path).ok()?;
+    let fields = uvr_core::dcf::parse_dcf_fields(&content);
+    fields.get("Version").map(|v| v.trim().to_string())
 }
 
 /// Compare two lockfiles for semantic equivalence, ignoring fields that can

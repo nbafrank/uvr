@@ -3,6 +3,7 @@ use console::style;
 
 use uvr_core::manifest::{DependencySpec, DetailedDep};
 use uvr_core::project::Project;
+use uvr_core::resolver::is_base_package;
 
 /// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
@@ -117,6 +118,16 @@ pub async fn run(
         .iter()
         .map(|p| parse_add_spec(p, bioc))
         .collect::<Result<Vec<_>>>()?;
+
+    // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
+    for (name, _) in &parsed {
+        if is_base_package(name) {
+            anyhow::bail!(
+                "'{}' is a base R package (ships with R itself) and cannot be installed separately.",
+                name
+            );
+        }
+    }
 
     for (name, spec) in &parsed {
         let is_new = project.manifest.add_dep(name.clone(), spec.clone(), dev);
