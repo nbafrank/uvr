@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-An extremely fast R package and project manager, written in Rust.
+A fast R package and project manager, written in Rust.
 
 ---
 
@@ -82,14 +82,14 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 
 ## Benchmarks
 
-Cold-install wall time (empty library -> all packages installed). All tools use P3M as CRAN mirror. Median of 3 runs on Apple Silicon, caches cleared between scenarios.
+Cold-install wall time (empty library, all caches cleared). All tools use P3M as CRAN mirror. Median of 3 runs on Apple Silicon (arm64), R 4.5.
 
-| Scenario  | Packages | uvr sync  | renv     | pak       | install.packages |
-|-----------|----------|-----------|----------|-----------|------------------|
-| ggplot2   | 17       | **0.6s**  | 3.8s     | 4.6s      | 24.0s            |
-| tidyverse | 99       | **1.6s**  | 12.1s    | 12.1s     | 14.3s            |
+| Scenario  | Packages | uvr sync   | renv     | pak       | install.packages |
+|-----------|----------|------------|----------|-----------|------------------|
+| ggplot2   | 17       | **4.0s**   | 6.9s     | 20.4s     | 27.6s            |
+| tidyverse | 99       | **11.7s**  | 16.1s    | 42.8s     | 15.2s            |
 
-uvr is consistently the fastest — 6x faster than renv/pak, 9–40x faster than install.packages. The speed comes from parallel downloads, native binary extraction (no R process overhead), and aggressive caching.
+uvr is fastest across both scenarios. The speed comes from parallel downloads, native binary extraction (no R process), and HTTP-conditional index caching.
 
 > Run `bash benchmarks/bench.sh` to reproduce. Requires pak and renv for full comparison. Results vary by machine and network.
 
@@ -97,7 +97,7 @@ uvr is consistently the fastest — 6x faster than renv/pak, 9–40x faster than
 
 ## Highlights
 
-- **Blazing fast** — installs from pre-built P3M binaries; compiles from source only when needed
+- **Fast** — parallel downloads, native binary extraction, no R process overhead
 - **Reproducible** — `uvr.lock` is the source of truth; `uvr sync` is always idempotent
 - **Project-isolated** — every project gets its own `.uvr/library/`, never touching system R
 - **Full R version management** — `uvr r install 4.4.2`, `uvr r use >=4.3`, `uvr r pin 4.4.2`
