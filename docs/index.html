@@ -3,24 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>uvr — An extremely fast R package manager, written in Rust</title>
-  <meta name="description" content="uvr is an extremely fast R package manager written in Rust. Manage R packages, lockfiles, and R versions with a single tool. Supports CRAN, Bioconductor, and GitHub packages.">
+  <title>uvr — uvr — A fast R package manager, written in Rust</title>
+  <meta name="description" content="uvr is a fast R package manager written in Rust. Manage R packages, lockfiles, and R versions with a single tool. Supports CRAN, Bioconductor, and GitHub packages.">
   <meta name="keywords" content="R, package manager, Rust, CRAN, Bioconductor, GitHub, renv, pak, uvr, R version management, reproducible research">
   <meta name="author" content="nbafrank">
   <link rel="canonical" href="https://nbafrank.github.io/uvr/">
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="uvr — An extremely fast R package manager, written in Rust">
-  <meta property="og:description" content="Manage R packages, lockfiles, and R versions with a single blazing-fast tool. Supports CRAN, Bioconductor, and GitHub.">
+  <meta property="og:title" content="uvr — uvr — A fast R package manager, written in Rust">
+  <meta property="og:description" content="Manage R packages, lockfiles, and R versions with a single tool. Supports CRAN, Bioconductor, and GitHub.">
   <meta property="og:url" content="https://nbafrank.github.io/uvr/">
   <meta property="og:image" content="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.jpg">
   <meta property="og:site_name" content="uvr">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="uvr — An extremely fast R package manager, written in Rust">
-  <meta name="twitter:description" content="Manage R packages, lockfiles, and R versions with a single blazing-fast tool.">
+  <meta name="twitter:title" content="uvr — uvr — A fast R package manager, written in Rust">
+  <meta name="twitter:description" content="Manage R packages, lockfiles, and R versions with a single tool.">
   <meta name="twitter:image" content="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.jpg">
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -350,21 +350,22 @@
     }
 
     .bench-row {
-      display: flex;
+      display: grid;
+      grid-template-columns: 72px 1fr;
       align-items: center;
-      gap: var(--sp-4);
-      margin-bottom: var(--sp-4);
+      gap: var(--sp-3);
+      height: 32px;
+      margin-bottom: var(--sp-3);
     }
 
     .bench-row:last-child { margin-bottom: 0; }
 
     .bench-label {
-      width: 110px;
-      flex-shrink: 0;
       font-size: var(--text-sm);
       font-weight: 500;
       color: var(--text-secondary);
       text-align: right;
+      white-space: nowrap;
     }
 
     .bench-label-uvr {
@@ -373,26 +374,20 @@
     }
 
     .bench-bar-track {
-      flex: 1;
-      height: 28px;
+      position: relative;
+      height: 100%;
       background: var(--bg-primary);
       border-radius: var(--radius-sm);
-      overflow: hidden;
-      position: relative;
+      display: flex;
+      align-items: center;
+      gap: var(--sp-2);
     }
 
     .bench-bar {
       height: 100%;
       border-radius: var(--radius-sm);
-      display: flex;
-      align-items: center;
-      padding-left: var(--sp-3);
-      font-size: var(--text-xs);
-      font-weight: 600;
-      font-family: var(--font-mono);
-      color: var(--bg-primary);
+      flex-shrink: 0;
       transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
-      min-width: 48px;
     }
 
     .bench-bar-uvr {
@@ -401,11 +396,15 @@
 
     .bench-bar-other {
       background: var(--text-tertiary);
-      color: var(--text-primary);
     }
 
     .bench-bar-time {
+      font-size: var(--text-xs);
+      font-weight: 600;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
       white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .bench-speedup {
@@ -876,7 +875,7 @@
         margin-top: var(--sp-2);
       }
 
-      .bench-label { width: 90px; }
+      .bench-row { grid-template-columns: 60px 1fr; }
     }
 
     @media (max-width: 480px) {
@@ -915,10 +914,10 @@
         width="120"
         height="120"
       >
-      <h1>An extremely fast R package manager,<br><span>written in Rust.</span></h1>
+      <h1>A fast R package manager,<br><span>written in Rust.</span></h1>
       <p class="hero-tagline">
-        A single tool to manage R packages, lockfiles, and R versions.
-        Supports CRAN, Bioconductor, and GitHub.
+        Manage R packages, lockfiles, and R versions with one tool.
+        Works with CRAN, Bioconductor, and GitHub.
       </p>
       <div class="hero-install" role="button" tabindex="0" title="Click to copy" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh')">
         <span class="hero-install-prompt">$</span>
@@ -933,10 +932,10 @@
     <div class="container">
       <div class="section-header-center">
         <div class="section-label">Performance</div>
-        <h2 class="section-title">Blazing fast package installs</h2>
+        <h2 class="section-title">Cold-cache install benchmarks</h2>
         <p class="section-desc">
-          uvr leverages parallel downloads and native extraction &mdash; no R process overhead.
-          Cold-cache benchmarks on macOS, median of 3 runs. All tools use P3M as CRAN mirror.
+          Parallel downloads + native tar extraction, no R process for binary installs.
+          macOS arm64, R&nbsp;4.5, P3M binaries. Median of 3 runs, caches cleared between each.
         </p>
       </div>
       <div class="bench-grid">
@@ -948,37 +947,33 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 2.5%;">
-                <span class="bench-bar-time">0.6s</span>
-              </div>
+              <div class="bench-bar bench-bar-uvr" style="width: 2.3%;"></div>
+              <span class="bench-bar-time">0.6s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 15.8%;">
-                <span class="bench-bar-time">3.8s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 14.9%;"></div>
+              <span class="bench-bar-time">3.8s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 19.2%;">
-                <span class="bench-bar-time">4.6s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 18.0%;"></div>
+              <span class="bench-bar-time">4.6s</span>
             </div>
           </div>
           <div class="bench-row">
-            <div class="bench-label">install.packages</div>
+            <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 100%;">
-                <span class="bench-bar-time">24.0s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 90%;"></div>
+              <span class="bench-bar-time">24.0s</span>
             </div>
           </div>
 
-          <div class="bench-speedup">40x faster than install.packages</div>
+          <div class="bench-speedup">40x faster than install.packages()</div>
         </div>
 
         <!-- tidyverse -->
@@ -989,37 +984,33 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 11.2%;">
-                <span class="bench-bar-time">1.6s</span>
-              </div>
+              <div class="bench-bar bench-bar-uvr" style="width: 10.1%;"></div>
+              <span class="bench-bar-time">1.6s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 84.6%;">
-                <span class="bench-bar-time">12.1s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 76.2%;"></div>
+              <span class="bench-bar-time">12.1s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 84.6%;">
-                <span class="bench-bar-time">12.1s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 76.2%;"></div>
+              <span class="bench-bar-time">12.1s</span>
             </div>
           </div>
           <div class="bench-row">
-            <div class="bench-label">install.packages</div>
+            <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 100%;">
-                <span class="bench-bar-time">14.3s</span>
-              </div>
+              <div class="bench-bar bench-bar-other" style="width: 90%;"></div>
+              <span class="bench-bar-time">14.3s</span>
             </div>
           </div>
 
-          <div class="bench-speedup">9x faster than install.packages</div>
+          <div class="bench-speedup">9x faster than install.packages()</div>
         </div>
       </div>
     </div>
@@ -1030,29 +1021,29 @@
     <div class="container">
       <div class="section-header-center">
         <div class="section-label">Features</div>
-        <h2 class="section-title">Everything you need to manage R</h2>
+        <h2 class="section-title">What it does</h2>
         <p class="section-desc">
-          A complete, modern workflow for R projects &mdash; from package resolution to R version management.
+          Package resolution, lockfiles, R version management, and isolated project libraries.
         </p>
       </div>
       <div class="features-grid">
 
         <div class="feature-card">
           <div class="feature-icon">&#9889;</div>
-          <h3>Blazing fast</h3>
-          <p>Parallel downloads, native extraction, and zero R startup overhead. 9&ndash;40x faster than traditional tools.</p>
+          <h3>Fast installs</h3>
+          <p>Parallel downloads, native tar extraction, no R process for binary packages.</p>
         </div>
 
         <div class="feature-card">
           <div class="feature-icon feature-icon-green">&#128274;</div>
           <h3>Reproducible</h3>
-          <p>Deterministic <code>uvr.lock</code> captures exact versions and checksums. What works today works tomorrow.</p>
+          <p><code>uvr.lock</code> pins exact versions and checksums. Commit it, and everyone gets the same environment.</p>
         </div>
 
         <div class="feature-card">
           <div class="feature-icon">&#128230;</div>
           <h3>Project-isolated</h3>
-          <p>Each project gets its own library in <code>.uvr/library/</code>. No more version conflicts across projects.</p>
+          <p>Each project gets its own library in <code>.uvr/library/</code>. No cross-project version conflicts.</p>
         </div>
 
         <div class="feature-card">
@@ -1156,9 +1147,9 @@
     <div class="container">
       <div class="section-header-center">
         <div class="section-label">Comparison</div>
-        <h2 class="section-title">How uvr stacks up</h2>
+        <h2 class="section-title">Feature comparison</h2>
         <p class="section-desc">
-          A complete R project manager in a single binary &mdash; no other tool covers this much ground.
+          How uvr compares to renv, pak, rv, rig, and pixi.
         </p>
       </div>
       <div class="table-wrapper">
@@ -1304,9 +1295,9 @@
     <div class="container">
       <div class="section-header-center">
         <div class="section-label">Installation</div>
-        <h2 class="section-title">Get started in one command</h2>
+        <h2 class="section-title">Install</h2>
         <p class="section-desc">
-          Multiple installation methods to fit your workflow.
+          Single binary, no dependencies. Pick your method.
         </p>
       </div>
       <div class="install-grid">
