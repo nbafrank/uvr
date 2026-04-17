@@ -7,6 +7,23 @@ use tracing::debug;
 use crate::error::{Result, UvrError};
 use crate::installer::package_cache::copy_dir_recursive;
 
+/// Remove a directory with retry on Windows, where antivirus or indexing
+/// services can hold file handles briefly after extraction.
+fn remove_dir_with_retry(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    for attempt in 0..4 {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(_) if attempt < 3 => {
+                std::thread::sleep(std::time::Duration::from_millis(50 * (1 << attempt)));
+            }
+            Err(_) => return, // give up silently, rename_or_copy_dir will fail with a clear error
+        }
+    }
+}
+
 /// Move `src` to `dst`, falling back to recursive copy + delete when
 /// `rename` fails with a cross-device error (EXDEV).  This handles
 /// Docker volumes, NFS mounts, and bind-mounted library paths.
@@ -143,7 +160,7 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
             package_name, package_name
         )));
     }
-    let _ = std::fs::remove_dir_all(&final_dest);
+    remove_dir_with_retry(&final_dest);
     rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
         UvrError::Other(format!(
             "Failed to move staged package '{}': {}",
@@ -238,7 +255,7 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
             package_name, package_name
         )));
     }
-    let _ = std::fs::remove_dir_all(&final_dest);
+    remove_dir_with_retry(&final_dest);
     rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
         UvrError::Other(format!(
             "Failed to move staged package '{}': {}",

@@ -162,10 +162,15 @@ pub async fn download_and_install_r(
     info!("Downloading R {version} from {url}");
 
     let response = client.get(&url).send().await?;
-    let bytes = if response.status() == reqwest::StatusCode::NOT_FOUND {
-        // Older R versions live at a different URL on some mirrors.
+    let bytes = if response.status().is_client_error() {
+        // Older R versions live at a different URL on some mirrors
+        // (e.g. Windows: /base/old/<ver>/).  Try fallback on any 4xx error,
+        // not just 404, because some mirrors redirect to an error page.
         if let Some(fallback) = platform.download_url_fallback(version) {
-            info!("Not found at primary URL, trying {fallback}");
+            info!(
+                "Primary URL returned {}, trying {fallback}",
+                response.status()
+            );
             client
                 .get(&fallback)
                 .send()
@@ -175,7 +180,8 @@ pub async fn download_and_install_r(
                 .await?
         } else {
             return Err(UvrError::Other(format!(
-                "R {version} not found at {url} (HTTP 404). Check available versions with `uvr r list --all`."
+                "R {version} not found at {url} (HTTP {}). Check available versions with `uvr r list --all`.",
+                response.status()
             )));
         }
     } else {

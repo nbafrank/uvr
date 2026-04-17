@@ -222,10 +222,14 @@ pub async fn install_from_lockfile(
                             names.join(", ")
                         );
                     }
-                    println!(
-                        "\n  Install with: {}\n",
-                        style(format!("sudo apt-get install -y {}", all_pkgs.join(" "))).bold()
-                    );
+                    let install_cmd = if which::which("apk").is_ok() {
+                        format!("apk add {}", all_pkgs.join(" "))
+                    } else if which::which("dnf").is_ok() {
+                        format!("sudo dnf install -y {}", all_pkgs.join(" "))
+                    } else {
+                        format!("sudo apt-get install -y {}", all_pkgs.join(" "))
+                    };
+                    println!("\n  Install with: {}\n", style(install_cmd).bold());
                     println!("  Continuing installation (some packages may fail to compile)...\n");
                 }
             }

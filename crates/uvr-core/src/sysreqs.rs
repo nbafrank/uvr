@@ -126,8 +126,10 @@ pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
         ("dpkg", &["-s"])
     } else if which::which("rpm").is_ok() {
         ("rpm", &["-q"])
+    } else if which::which("apk").is_ok() {
+        ("apk", &["info", "-e"])
     } else {
-        debug!("No supported package manager (dpkg/rpm) found, skipping sysreqs check");
+        debug!("No supported package manager (dpkg/rpm/apk) found, skipping sysreqs check");
         return vec![];
     };
 
