@@ -87,9 +87,9 @@ Install wall time (empty library, index caches warm). All tools use P3M as CRAN 
 
 | Scenario | Packages | uvr sync | renv | install.packages | pak |
 |----------|----------|----------|------|------------------|-----|
-| jsonlite  | 1        | 0.62s      | **0.54s** | 3.57s              | 2.61s |
-| ggplot2   | 17       | 0.62s      | **0.54s** | 4.2s               | 5.89s |
-| tidyverse | 99       | **0.69s**  | 0.84s  | 12.16s             | 7.5s  |
+| jsonlite  | 1        | **0.53s**  | 0.53s  | 2.18s              | 2.41s |
+| ggplot2   | 17       | **0.54s**  | 0.54s  | 4.18s              | 5.59s |
+| tidyverse | 99       | **0.29s**  | 0.75s  | 11.89s             | 8.97s |
 <!-- BENCH:END -->
 
 > uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks). Run `bash benchmarks/bench.sh` to reproduce.
