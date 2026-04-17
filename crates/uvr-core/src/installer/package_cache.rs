@@ -233,7 +233,7 @@ fn clone_dir_macos(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Recursively copy a directory tree. Symlinks are reproduced as symlinks
 /// (not traversed) to match `clonefile()` behavior and prevent traversal
 /// outside the source tree.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

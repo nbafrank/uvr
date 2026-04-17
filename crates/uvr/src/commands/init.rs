@@ -68,7 +68,7 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     // Install the uvr R companion package if R is available
     if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
         if let Some(r_ver) = uvr_core::r_version::detector::query_r_version(&r_binary) {
-            crate::commands::sync::ensure_companion_package(&library_path, &r_binary, &r_ver);
+            crate::commands::sync::ensure_companion_package(&library_path, &r_ver);
         }
     }
 

@@ -153,8 +153,8 @@ pub async fn install_from_lockfile(
     // and the companion is already installed.
     let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
     if !companion_installed || !to_install.is_empty() {
-        if let Some((ref r_bin, ref current_r)) = r_info {
-            ensure_companion_package(&library, r_bin, current_r);
+        if let Some((_, ref current_r)) = r_info {
+            ensure_companion_package(&library, current_r);
         }
     }
 
@@ -297,21 +297,45 @@ pub async fn install_from_lockfile(
     }
 
     let r_minor_str = r_minor(&r_version_str);
-
-    // Fetch P3M binary index (gracefully returns empty if unavailable).
-    let p3m = match Platform::detect() {
-        Ok(platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64 | Platform::WindowsX86_64)) => {
-            P3MBinaryIndex::fetch(&client, &r_minor_str, platform).await
-        }
-        _ => P3MBinaryIndex::empty(),
-    };
-
     let bioc_release = lockfile.r.bioc_version.as_deref();
 
-    // Decide URL and install method for each package.
-    // Prefer P3M binary if available for the exact version; fall back to source.
-    // Each binary package also carries a source fallback URL in case the P3M
-    // server returns an error (e.g. HTTP 500).
+    // ── Phase 1: check global package cache ──────────────────────────────
+    // Packages found in the cache are cloned into the library instantly
+    // (CoW on APFS, recursive copy elsewhere) — no download or extraction.
+    // This runs BEFORE the P3M index fetch so a fully-cached sync skips
+    // the ~1s network round-trip entirely.
+    let mut cache_misses: Vec<&LockedPackage> = Vec::new();
+    let mut cache_hit_count = 0usize;
+
+    for pkg in &to_install {
+        if let Some(cached_dir) = package_cache::lookup_any(
+            &pkg.name,
+            &pkg.version,
+            pkg.checksum.as_deref(),
+            &r_minor_str,
+            true, // probe binary key first
+            libr_path.as_deref(),
+        ) {
+            match package_cache::clone_to_library(&cached_dir, &library, &pkg.name) {
+                Ok(()) => {
+                    cache_hit_count += 1;
+                    tracing::debug!("Cache hit: {} {}", pkg.name, pkg.version);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Package cache clone failed for {}: {e}, will download",
+                        pkg.name
+                    );
+                    cache_misses.push(pkg);
+                }
+            }
+        } else {
+            cache_misses.push(pkg);
+        }
+    }
+
+    // ── Phase 2: download + install remaining packages ────────────────
+    // Only fetch P3M binary index if there are packages to download.
     struct PkgPlan<'a> {
         pkg: &'a LockedPackage,
         url: String,
@@ -319,67 +343,40 @@ pub async fn install_from_lockfile(
         is_binary: bool,
     }
 
-    let plans: Vec<PkgPlan> = to_install
-        .iter()
-        .map(|p| {
-            if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
-                PkgPlan {
-                    pkg: p,
-                    url: bin_url.to_string(),
-                    fallback_url: Some(source_url(p, bioc_release)),
-                    is_binary: true,
-                }
-            } else {
-                PkgPlan {
-                    pkg: p,
-                    url: source_url(p, bioc_release),
-                    fallback_url: None,
-                    is_binary: false,
-                }
-            }
-        })
-        .collect();
+    let plans: Vec<PkgPlan> = if !cache_misses.is_empty() {
+        let p3m = match Platform::detect() {
+            Ok(
+                platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64 | Platform::WindowsX86_64),
+            ) => P3MBinaryIndex::fetch(&client, &r_minor_str, platform).await,
+            _ => P3MBinaryIndex::empty(),
+        };
 
-    // ── Phase 1: check global package cache ──────────────────────────────
-    // Packages found in the cache are cloned into the library instantly
-    // (CoW on APFS, recursive copy elsewhere) — no download or extraction.
-    let mut cache_hit_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut cache_hit_count = 0usize;
-
-    for (i, plan) in plans.iter().enumerate() {
-        if let Some(cached_dir) = package_cache::lookup_any(
-            &plan.pkg.name,
-            &plan.pkg.version,
-            plan.pkg.checksum.as_deref(),
-            &r_minor_str,
-            plan.is_binary,
-            libr_path.as_deref(),
-        ) {
-            match package_cache::clone_to_library(&cached_dir, &library, &plan.pkg.name) {
-                Ok(()) => {
-                    cache_hit_indices.insert(i);
-                    cache_hit_count += 1;
-                    tracing::debug!("Cache hit: {} {}", plan.pkg.name, plan.pkg.version);
+        cache_misses
+            .iter()
+            .map(|p| {
+                if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
+                    PkgPlan {
+                        pkg: p,
+                        url: bin_url.to_string(),
+                        fallback_url: Some(source_url(p, bioc_release)),
+                        is_binary: true,
+                    }
+                } else {
+                    PkgPlan {
+                        pkg: p,
+                        url: source_url(p, bioc_release),
+                        fallback_url: None,
+                        is_binary: false,
+                    }
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        "Package cache clone failed for {}: {e}, will download",
-                        plan.pkg.name
-                    );
-                }
-            }
-        }
-    }
-
-    // ── Phase 2: download + install remaining packages ────────────────
-    let need_download: Vec<(usize, &PkgPlan)> = plans
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !cache_hit_indices.contains(i))
-        .collect();
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Guard against packages with no download URL.
-    for (_, plan) in &need_download {
+    for plan in &plans {
         if plan.url.is_empty() {
             anyhow::bail!(
                 "Package '{}' has no download URL. Re-run `uvr lock` to regenerate the lockfile.",
@@ -388,8 +385,8 @@ pub async fn install_from_lockfile(
         }
     }
 
-    let binary_count = need_download.iter().filter(|(_, p)| p.is_binary).count();
-    let source_count = need_download.len() - binary_count;
+    let binary_count = plans.iter().filter(|p| p.is_binary).count();
+    let source_count = plans.len() - binary_count;
     if cache_hit_count > 0 || binary_count > 0 || source_count > 0 {
         let mut parts = Vec::new();
         if cache_hit_count > 0 {
@@ -404,10 +401,10 @@ pub async fn install_from_lockfile(
         println!("  {}", parts.join(", "));
     }
 
-    if !need_download.is_empty() {
-        let specs: Vec<DownloadSpec> = need_download
+    if !plans.is_empty() {
+        let specs: Vec<DownloadSpec> = plans
             .iter()
-            .map(|(_, p)| DownloadSpec {
+            .map(|p| DownloadSpec {
                 pkg: p.pkg,
                 url: &p.url,
                 fallback_url: p.fallback_url.as_deref(),
@@ -423,9 +420,8 @@ pub async fn install_from_lockfile(
 
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
-        let total = need_download.len();
-        for (idx, ((_orig_i, plan), result)) in need_download.iter().zip(results.iter()).enumerate()
-        {
+        let total = plans.len();
+        for (idx, (plan, result)) in plans.iter().zip(results.iter()).enumerate() {
             let progress = format!("[{}/{}]", idx + 1, total);
             let action = if result.used_binary {
                 "Installing"
@@ -502,11 +498,7 @@ const COMPANION_HASH: &str = "5942b23cfcafe6b83b3c500f4820434944051ab30b21e91e49
 /// Security: the download is pinned to an immutable commit SHA and verified
 /// against a hardcoded SHA-256 hash, preventing supply-chain attacks via the
 /// companion repo.
-pub fn ensure_companion_package(
-    library: &std::path::Path,
-    r_binary: &std::path::Path,
-    current_r_version: &str,
-) {
+pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &str) {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
         // Check if the companion was built with a different R major.minor.
@@ -559,18 +551,36 @@ pub fn ensure_companion_package(
         return;
     }
 
-    let result = std::process::Command::new(r_binary)
-        .args(["CMD", "INSTALL", "--no-test-load", "-l"])
-        .arg(library)
-        .arg(&tarball)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Extract directly instead of spawning R CMD INSTALL (~400ms savings).
+    // The GitHub tarball contains `owner-repo-sha/` at the top level with the
+    // R package source inside. We extract it, find the package dir, and copy
+    // the R/, DESCRIPTION, NAMESPACE files into library/uvr/.
+    let install_ok = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let file = std::fs::File::open(&tarball)?;
+        let gz = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(gz);
 
-    if let Ok(status) = result {
-        if status.success() {
-            println!("  {} uvr R companion package installed", style("✓").green(),);
+        let tmp_dir = tempfile::tempdir()?;
+        archive.unpack(tmp_dir.path())?;
+
+        // Find the package dir: top-level-dir/ contains R/, DESCRIPTION, NAMESPACE
+        let pkg_src = std::fs::read_dir(tmp_dir.path())?
+            .flatten()
+            .find(|e| e.path().join("DESCRIPTION").exists())
+            .map(|e| e.path())
+            .ok_or("companion package dir not found in tarball")?;
+
+        let dest = library.join("uvr");
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest)?;
         }
+        package_cache::copy_dir_recursive(&pkg_src, &dest)?;
+
+        Ok(())
+    })();
+
+    if install_ok.is_ok() {
+        println!("  {} uvr R companion package installed", style("✓").green(),);
     }
 }
 
