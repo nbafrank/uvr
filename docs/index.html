@@ -934,7 +934,7 @@
         <div class="section-label">Performance</div>
         <h2 class="section-title">Install benchmarks</h2>
         <p class="section-desc">
-          Parallel downloads + native tar extraction, no R process for binary installs.
+          Parallel downloads, global package cache with CoW cloning, no R process for binary installs.
           macOS arm64, R&nbsp;4.5, P3M binaries. Median of 5 runs, index caches warm.
           uvr pre-resolves deps into a lockfile; other tools resolve inline.
           renv uses its default global cache (symlinks).
@@ -949,33 +949,33 @@
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 4.1%;"></div>
-              <span class="bench-bar-time">0.5s</span>
+              <div class="bench-bar bench-bar-other" style="width: 4%;"></div>
+              <span class="bench-bar-time">0.54s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 6.2%;"></div>
-              <span class="bench-bar-time">0.8s</span>
+              <div class="bench-bar bench-bar-uvr" style="width: 4.6%;"></div>
+              <span class="bench-bar-time">0.62s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 41%;"></div>
-              <span class="bench-bar-time">5.3s</span>
+              <div class="bench-bar bench-bar-other" style="width: 31.1%;"></div>
+              <span class="bench-bar-time">4.2s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 44.1%;"></div>
-              <span class="bench-bar-time">5.6s</span>
+              <div class="bench-bar bench-bar-other" style="width: 43.6%;"></div>
+              <span class="bench-bar-time">5.9s</span>
             </div>
           </div>
 
-          <div class="bench-speedup">6x faster than install.packages()</div>
+          <div class="bench-speedup">7x faster than install.packages()</div>
         </div>
 
         <!-- tidyverse -->
@@ -984,35 +984,35 @@
           <div class="bench-card-subtitle">99 packages</div>
 
           <div class="bench-row">
-            <div class="bench-label">renv</div>
+            <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 6.4%;"></div>
-              <span class="bench-bar-time">0.8s</span>
+              <div class="bench-bar bench-bar-uvr" style="width: 5.1%;"></div>
+              <span class="bench-bar-time">0.69s</span>
             </div>
           </div>
           <div class="bench-row">
-            <div class="bench-label bench-label-uvr">uvr</div>
+            <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 14%;"></div>
-              <span class="bench-bar-time">1.8s</span>
+              <div class="bench-bar bench-bar-other" style="width: 6.2%;"></div>
+              <span class="bench-bar-time">0.84s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 69.5%;"></div>
-              <span class="bench-bar-time">8.9s</span>
+              <div class="bench-bar bench-bar-other" style="width: 55.5%;"></div>
+              <span class="bench-bar-time">7.5s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
               <div class="bench-bar bench-bar-other" style="width: 90%;"></div>
-              <span class="bench-bar-time">11.5s</span>
+              <span class="bench-bar-time">12.2s</span>
             </div>
           </div>
 
-          <div class="bench-speedup">6x faster than install.packages()</div>
+          <div class="bench-speedup">18x faster than install.packages()</div>
         </div>
       </div>
     </div>

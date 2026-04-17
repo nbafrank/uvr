@@ -529,3 +529,9 @@ JEOF
 
 echo ""
 echo "JSON results written to $JSON_OUT"
+
+# Auto-update README.md if the update script exists
+UPDATE_SCRIPT="$SCRIPT_DIR/update-readme.sh"
+if [ -x "$UPDATE_SCRIPT" ]; then
+    bash "$UPDATE_SCRIPT"
+fi

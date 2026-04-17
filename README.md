@@ -82,15 +82,15 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 
 ## Benchmarks
 
+<!-- BENCH:START - auto-updated by benchmarks/update-readme.sh -->
 Install wall time (empty library, index caches warm). All tools use P3M as CRAN mirror. Median of 5 runs on Apple Silicon (arm64), R 4.5.
 
-| Scenario  | Packages | uvr sync | renv     | install.packages | pak    |
-|-----------|----------|----------|----------|------------------|--------|
-| jsonlite  | 1        | 0.7s     | **0.5s** | 2.2s             | 2.9s   |
-| ggplot2   | 17       | 0.8s     | **0.5s** | 5.3s             | 5.6s   |
-| tidyverse | 99       | 1.8s     | **0.8s** | 11.5s            | 8.9s   |
-
-renv's global package cache makes warm installs near-instant via symlinks. uvr is the second-fastest for warm installs and the only tool here that also manages R versions, lockfiles, and project isolation in a single binary. The speed comes from parallel downloads, native binary extraction (no R process), and a pre-resolved lockfile.
+| Scenario | Packages | uvr sync | renv | install.packages | pak |
+|----------|----------|----------|------|------------------|-----|
+| jsonlite  | 1        | 0.62s      | **0.54s** | 3.57s              | 2.61s |
+| ggplot2   | 17       | 0.62s      | **0.54s** | 4.2s               | 5.89s |
+| tidyverse | 99       | **0.69s**  | 0.84s  | 12.16s             | 7.5s  |
+<!-- BENCH:END -->
 
 > uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks). Run `bash benchmarks/bench.sh` to reproduce.
 
