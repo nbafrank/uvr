@@ -40,7 +40,11 @@ pub fn cache_key(
     hasher.update(b"|");
     hasher.update(r_minor.as_bytes());
     hasher.update(b"|");
-    hasher.update(if is_binary { b"binary" as &[u8] } else { b"source" });
+    hasher.update(if is_binary {
+        b"binary" as &[u8]
+    } else {
+        b"source"
+    });
     hasher.update(b"|");
     hasher.update(std::env::consts::ARCH.as_bytes());
     hasher.update(b"-");
@@ -206,16 +210,16 @@ fn clone_dir_macos(src: &Path, dst: &Path) -> std::io::Result<()> {
         fn clonefile(src: *const c_char, dst: *const c_char, flags: u32) -> c_int;
     }
 
-    let src_c = CString::new(
-        src.to_str()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?,
-    )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let dst_c = CString::new(
-        dst.to_str()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?,
-    )
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let src_c =
+        CString::new(src.to_str().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path")
+        })?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let dst_c =
+        CString::new(dst.to_str().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path")
+        })?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     // CLONE_NOFOLLOW = 1
     let ret = unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), 1u32) };

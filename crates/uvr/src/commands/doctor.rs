@@ -319,15 +319,10 @@ fn check_cache() {
             human_size(size)
         );
     } else {
-        println!(
-            "  {} Downloads: {}",
-            style("•").dim(),
-            style("empty").dim()
-        );
+        println!("  {} Downloads: {}", style("•").dim(), style("empty").dim());
     }
 
-    let (pkg_count, pkg_bytes) =
-        uvr_core::installer::package_cache::cache_stats();
+    let (pkg_count, pkg_bytes) = uvr_core::installer::package_cache::cache_stats();
     if pkg_count > 0 {
         println!(
             "  {} Packages: {} entries, {}",
@@ -336,11 +331,7 @@ fn check_cache() {
             human_size(pkg_bytes)
         );
     } else {
-        println!(
-            "  {} Packages: {}",
-            style("•").dim(),
-            style("empty").dim()
-        );
+        println!("  {} Packages: {}", style("•").dim(), style("empty").dim());
     }
 }
 

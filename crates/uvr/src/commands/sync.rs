@@ -422,8 +422,7 @@ pub async fn install_from_lockfile(
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
         let total = need_download.len();
-        for (idx, ((_orig_i, plan), result)) in
-            need_download.iter().zip(results.iter()).enumerate()
+        for (idx, ((_orig_i, plan), result)) in need_download.iter().zip(results.iter()).enumerate()
         {
             let progress = format!("[{}/{}]", idx + 1, total);
             let action = if result.used_binary {
