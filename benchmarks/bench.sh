@@ -38,8 +38,9 @@ fi
 UVR_SNAPSHOT="$(mktemp)"
 cp "$(command -v "$UVR_ORIG")" "$UVR_SNAPSHOT"
 chmod +x "$UVR_SNAPSHOT"
-# macOS kills unsigned binaries; re-sign the copy.
+# macOS kills unsigned binaries; re-sign the copy (strip existing first).
 if [ "$(uname -s)" = "Darwin" ]; then
+    codesign --remove-signature "$UVR_SNAPSHOT" 2>/dev/null || true
     codesign -s - "$UVR_SNAPSHOT" 2>/dev/null || true
 fi
 UVR="$UVR_SNAPSHOT"
