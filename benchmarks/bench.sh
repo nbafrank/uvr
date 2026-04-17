@@ -80,6 +80,8 @@ median() {
 clear_all_caches() {
     # uvr download + index cache
     rm -rf ~/.uvr/cache/
+    # uvr global package cache (CoW clonefile source)
+    rm -rf ~/.uvr/packages/
     # pak / pkgcache
     rm -rf ~/.cache/R/pkgcache/
     rm -rf ~/Library/Caches/org.R-project.R/R/pkgcache/
@@ -506,7 +508,7 @@ print_table "cold" "### First run (all caches cleared)"
 
 # ─── methodology ───────────────────────────────────────────────────────────
 
-R_VER=$("$UVR" run -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
+R_VER=$(R --vanilla --slave -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
 echo "_Measured on $(uname -m), ${R_VER}, P3M binaries. Median of ${RUNS} runs._"
 echo ""
 echo "Methodology:"

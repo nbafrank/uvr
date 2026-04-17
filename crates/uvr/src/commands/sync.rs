@@ -650,6 +650,9 @@ fn lockfiles_equivalent(
     if r_minor(&a.r.version) != r_minor(&b.r.version) {
         return false;
     }
+    if a.r.bioc_version != b.r.bioc_version {
+        return false;
+    }
     if a.packages.len() != b.packages.len() {
         return false;
     }

@@ -5,6 +5,7 @@ use flate2::read::GzDecoder;
 use tracing::debug;
 
 use crate::error::{Result, UvrError};
+use crate::installer::package_cache::copy_dir_recursive;
 
 /// Move `src` to `dst`, falling back to recursive copy + delete when
 /// `rename` fails with a cross-device error (EXDEV).  This handles
@@ -22,21 +23,6 @@ fn rename_or_copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
         Err(e) => Err(e),
     }
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
 }
 
 /// Extract a pre-built R binary package into `library`.
