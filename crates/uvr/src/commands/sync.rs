@@ -116,26 +116,28 @@ pub async fn install_from_lockfile(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| project.library_path());
 
-    // Detect R version mismatch: compare lockfile major.minor against current R.
+    // Resolve R binary + version once (spawning R is ~250ms, so avoid repeating).
     let r_constraint = project.manifest.project.r_version.as_deref();
-    if let Ok(r_binary) = find_r_binary(r_constraint) {
-        if let Some(current_r) = query_r_version(&r_binary) {
-            let locked_r = &lockfile.r.version;
-            let current_minor = r_minor(&current_r);
-            let locked_minor = r_minor(locked_r);
-            if looks_like_version(locked_r) && current_minor != locked_minor {
-                println!(
-                    "{} R version changed ({} → {}), wiping library and reinstalling...",
-                    style("!").yellow().bold(),
-                    style(&locked_minor).dim(),
-                    style(&current_minor).cyan(),
-                );
-                if library.exists() {
-                    std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
-                }
-                std::fs::create_dir_all(&library)
-                    .context("Failed to recreate library directory")?;
+    let r_info: Option<(PathBuf, String)> = find_r_binary(r_constraint)
+        .ok()
+        .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
+
+    // Detect R version mismatch: compare lockfile major.minor against current R.
+    if let Some((_, ref current_r)) = r_info {
+        let locked_r = &lockfile.r.version;
+        let current_minor = r_minor(current_r);
+        let locked_minor = r_minor(locked_r);
+        if looks_like_version(locked_r) && current_minor != locked_minor {
+            println!(
+                "{} R version changed ({} → {}), wiping library and reinstalling...",
+                style("!").yellow().bold(),
+                style(&locked_minor).dim(),
+                style(&current_minor).cyan(),
+            );
+            if library.exists() {
+                std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
             }
+            std::fs::create_dir_all(&library).context("Failed to recreate library directory")?;
         }
     }
 
@@ -149,11 +151,10 @@ pub async fn install_from_lockfile(
     // Install the uvr R companion package if not already present.
     // Skip the (expensive) R version check when all packages are up to date
     // and the companion is already installed.
-    let r_constraint = project.manifest.project.r_version.as_deref();
     let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
     if !companion_installed || !to_install.is_empty() {
-        if let Ok(r_bin) = find_r_binary(r_constraint) {
-            ensure_companion_package(&library, &r_bin);
+        if let Some((ref r_bin, ref current_r)) = r_info {
+            ensure_companion_package(&library, r_bin, current_r);
         }
     }
 
@@ -235,10 +236,13 @@ pub async fn install_from_lockfile(
         .join(".uvr")
         .join("cache");
 
-    // Determine R binary and version for P3M lookup.
-    let r_constraint = project.manifest.project.r_version.as_deref();
-    let r_binary = find_r_binary(r_constraint)
-        .context("R not found. Install R or use `uvr r install <version>`")?;
+    // Use the R binary resolved at the top of install_from_lockfile.
+    let (r_binary, r_version_str) = r_info
+        .as_ref()
+        .map(|(b, v)| (b.clone(), v.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("R not found. Install R or use `uvr r install <version>`")
+        })?;
 
     // For uvr-managed R installs:
     // 1. Ensure etc/Renviron.site has DYLD_LIBRARY_PATH set so that sub-R processes
@@ -292,9 +296,7 @@ pub async fn install_from_lockfile(
         }
     }
 
-    let r_minor_str = query_r_version(&r_binary)
-        .map(|v| r_minor(&v))
-        .unwrap_or_else(|| "4.4".to_string());
+    let r_minor_str = r_minor(&r_version_str);
 
     // Fetch P3M binary index (gracefully returns empty if unavailable).
     let p3m = match Platform::detect() {
@@ -500,12 +502,16 @@ const COMPANION_HASH: &str = "5942b23cfcafe6b83b3c500f4820434944051ab30b21e91e49
 /// Security: the download is pinned to an immutable commit SHA and verified
 /// against a hardcoded SHA-256 hash, preventing supply-chain attacks via the
 /// companion repo.
-pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path::Path) {
+pub fn ensure_companion_package(
+    library: &std::path::Path,
+    r_binary: &std::path::Path,
+    current_r_version: &str,
+) {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
         // Check if the companion was built with a different R major.minor.
         // If so, reinstall to avoid "built under R x.y.z" warnings.
-        if !companion_needs_rebuild(&desc_path, r_binary) {
+        if !companion_needs_rebuild(&desc_path, current_r_version) {
             return;
         }
         // Remove stale companion before reinstalling
@@ -569,7 +575,7 @@ pub fn ensure_companion_package(library: &std::path::Path, r_binary: &std::path:
 }
 
 /// Check if the installed companion package was built under a different R major.minor.
-fn companion_needs_rebuild(desc_path: &std::path::Path, r_binary: &std::path::Path) -> bool {
+fn companion_needs_rebuild(desc_path: &std::path::Path, current_r_version: &str) -> bool {
     let desc = match std::fs::read_to_string(desc_path) {
         Ok(d) => d,
         Err(_) => return true,
@@ -594,12 +600,7 @@ fn companion_needs_rebuild(desc_path: &std::path::Path, r_binary: &std::path::Pa
         None => return true, // No Built field — can't verify, rebuild to be safe
     };
 
-    // Get current R version
-    let current_r = query_r_version(r_binary);
-    let current_minor = match current_r {
-        Some(v) => r_minor(&v),
-        None => return false,
-    };
+    let current_minor = r_minor(current_r_version);
 
     built_minor != current_minor
 }
