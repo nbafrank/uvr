@@ -313,13 +313,34 @@ fn check_cache() {
     if cache_dir.exists() {
         let (count, size) = dir_stats(&cache_dir);
         println!(
-            "  {} {} file(s), {}",
+            "  {} Downloads: {} file(s), {}",
             style("•").dim(),
             count,
             human_size(size)
         );
     } else {
-        println!("  {} {}", style("•").dim(), style("empty").dim());
+        println!(
+            "  {} Downloads: {}",
+            style("•").dim(),
+            style("empty").dim()
+        );
+    }
+
+    let (pkg_count, pkg_bytes) =
+        uvr_core::installer::package_cache::cache_stats();
+    if pkg_count > 0 {
+        println!(
+            "  {} Packages: {} entries, {}",
+            style("•").dim(),
+            pkg_count,
+            human_size(pkg_bytes)
+        );
+    } else {
+        println!(
+            "  {} Packages: {}",
+            style("•").dim(),
+            style("empty").dim()
+        );
     }
 }
 

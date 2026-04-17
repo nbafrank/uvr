@@ -41,14 +41,31 @@ pub fn find_all() -> Vec<RInstallation> {
         }
     }
 
+    // R_HOME: if uvr is spawned from within an R session, R_HOME is set.
+    // Use it to locate the running R binary even if it's not on PATH.
+    if let Ok(r_home) = std::env::var("R_HOME") {
+        let r_home_bin = PathBuf::from(&r_home).join("bin").join(r_name);
+        if r_home_bin.exists() && !found.iter().any(|i| i.binary == r_home_bin) {
+            if let Some(version) = query_r_version(&r_home_bin) {
+                found.push(RInstallation {
+                    binary: r_home_bin,
+                    version,
+                    managed: false,
+                });
+            }
+        }
+    }
+
     // System R on PATH
     if let Ok(r_path) = which::which(r_name) {
-        if let Some(version) = query_r_version(&r_path) {
-            found.push(RInstallation {
-                binary: r_path,
-                version,
-                managed: false,
-            });
+        if !found.iter().any(|i| i.binary == r_path) {
+            if let Some(version) = query_r_version(&r_path) {
+                found.push(RInstallation {
+                    binary: r_path,
+                    version,
+                    managed: false,
+                });
+            }
         }
     }
 

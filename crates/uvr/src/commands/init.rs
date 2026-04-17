@@ -181,7 +181,7 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
     std::fs::write(&settings_path, pretty + "\n")
 }
 
-fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
+pub fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".Rbuildignore");
     let entries = "^uvr\\.toml$\n^uvr\\.lock$\n^\\.uvr$\n";
 

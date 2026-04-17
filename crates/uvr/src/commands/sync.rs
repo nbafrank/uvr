@@ -5,6 +5,7 @@ use console::style;
 
 use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
 use uvr_core::installer::download::{DownloadSpec, Downloader};
+use uvr_core::installer::package_cache;
 use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
 use uvr_core::project::Project;
@@ -52,6 +53,12 @@ pub async fn run_inner(
     // Write .vscode/settings.json for Positron R interpreter
     crate::commands::init::ensure_positron_settings(&project.root)
         .context("Failed to write Positron settings")?;
+
+    // Add uvr entries to .Rbuildignore for R package projects (DESCRIPTION may have
+    // been created after `uvr init`, so we check on every sync).
+    if project.root.join("DESCRIPTION").exists() {
+        let _ = crate::commands::init::write_rbuildignore(&project.root);
+    }
 
     let lockfile = project
         .load_lockfile()
@@ -331,10 +338,46 @@ pub async fn install_from_lockfile(
         })
         .collect();
 
-    // Guard against packages with no download URL (e.g. GitHub/Local without a
-    // stored URL). Fail early with a clear message instead of firing a request
-    // against an empty string.
-    for plan in &plans {
+    // ── Phase 1: check global package cache ──────────────────────────────
+    // Packages found in the cache are cloned into the library instantly
+    // (CoW on APFS, recursive copy elsewhere) — no download or extraction.
+    let mut cache_hit_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut cache_hit_count = 0usize;
+
+    for (i, plan) in plans.iter().enumerate() {
+        if let Some(cached_dir) = package_cache::lookup_any(
+            &plan.pkg.name,
+            &plan.pkg.version,
+            plan.pkg.checksum.as_deref(),
+            &r_minor_str,
+            plan.is_binary,
+            libr_path.as_deref(),
+        ) {
+            match package_cache::clone_to_library(&cached_dir, &library, &plan.pkg.name) {
+                Ok(()) => {
+                    cache_hit_indices.insert(i);
+                    cache_hit_count += 1;
+                    tracing::debug!("Cache hit: {} {}", plan.pkg.name, plan.pkg.version);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Package cache clone failed for {}: {e}, will download",
+                        plan.pkg.name
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Phase 2: download + install remaining packages ────────────────
+    let need_download: Vec<(usize, &PkgPlan)> = plans
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !cache_hit_indices.contains(i))
+        .collect();
+
+    // Guard against packages with no download URL.
+    for (_, plan) in &need_download {
         if plan.url.is_empty() {
             anyhow::bail!(
                 "Package '{}' has no download URL. Re-run `uvr lock` to regenerate the lockfile.",
@@ -343,70 +386,98 @@ pub async fn install_from_lockfile(
         }
     }
 
-    let binary_count = plans.iter().filter(|p| p.is_binary).count();
-    let source_count = plans.len() - binary_count;
-    if binary_count > 0 {
-        println!(
-            "  {} binary, {} from source",
-            style(binary_count).cyan(),
-            source_count
-        );
+    let binary_count = need_download.iter().filter(|(_, p)| p.is_binary).count();
+    let source_count = need_download.len() - binary_count;
+    if cache_hit_count > 0 || binary_count > 0 || source_count > 0 {
+        let mut parts = Vec::new();
+        if cache_hit_count > 0 {
+            parts.push(format!("{} cached", cache_hit_count));
+        }
+        if binary_count > 0 {
+            parts.push(format!("{} binary", binary_count));
+        }
+        if source_count > 0 {
+            parts.push(format!("{} from source", source_count));
+        }
+        println!("  {}", parts.join(", "));
     }
 
-    let specs: Vec<DownloadSpec> = plans
-        .iter()
-        .map(|p| DownloadSpec {
-            pkg: p.pkg,
-            url: &p.url,
-            fallback_url: p.fallback_url.as_deref(),
-            is_binary: p.is_binary,
-        })
-        .collect();
+    if !need_download.is_empty() {
+        let specs: Vec<DownloadSpec> = need_download
+            .iter()
+            .map(|(_, p)| DownloadSpec {
+                pkg: p.pkg,
+                url: &p.url,
+                fallback_url: p.fallback_url.as_deref(),
+                is_binary: p.is_binary,
+            })
+            .collect();
 
-    let downloader = Downloader::new(client, cache_dir, jobs);
-    let results = downloader
-        .download_all(&specs)
-        .await
-        .context("Download failed")?;
+        let downloader = Downloader::new(client, cache_dir, jobs);
+        let results = downloader
+            .download_all(&specs)
+            .await
+            .context("Download failed")?;
 
-    let installer = RCmdInstall::new(r_binary.to_string_lossy());
+        let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
-    let total = plans.len();
-    for (i, (plan, result)) in plans.iter().zip(results.iter()).enumerate() {
-        let progress = format!("[{}/{}]", i + 1, total);
-        let action = if result.used_binary {
-            "Installing"
-        } else {
-            "Compiling"
-        };
-        let pb = make_spinner(&format!(
-            "{} {} {} {}...",
-            style(&progress).dim(),
-            action,
-            plan.pkg.name,
-            plan.pkg.version
-        ));
-
-        if result.used_binary {
-            install_binary_package(&result.path, &library, &plan.pkg.name, libr_path.as_deref())
-                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
-        } else {
-            let prefix = format!(
-                "{} Compiling {} {}",
+        let total = need_download.len();
+        for (idx, ((_orig_i, plan), result)) in
+            need_download.iter().zip(results.iter()).enumerate()
+        {
+            let progress = format!("[{}/{}]", idx + 1, total);
+            let action = if result.used_binary {
+                "Installing"
+            } else {
+                "Compiling"
+            };
+            let pb = make_spinner(&format!(
+                "{} {} {} {}...",
                 style(&progress).dim(),
+                action,
                 plan.pkg.name,
                 plan.pkg.version
-            );
-            installer
-                .install_streaming(&result.path, &library, &plan.pkg.name, |line| {
-                    // Show the last meaningful compiler line next to the spinner
-                    let short = if line.len() > 60 { &line[..60] } else { line };
-                    pb.set_message(format!("{prefix} ({short})"));
-                })
-                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
-        }
+            ));
 
-        pb.finish_and_clear();
+            if result.used_binary {
+                install_binary_package(
+                    &result.path,
+                    &library,
+                    &plan.pkg.name,
+                    libr_path.as_deref(),
+                )
+                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+            } else {
+                let prefix = format!(
+                    "{} Compiling {} {}",
+                    style(&progress).dim(),
+                    plan.pkg.name,
+                    plan.pkg.version
+                );
+                installer
+                    .install_streaming(&result.path, &library, &plan.pkg.name, |line| {
+                        let short = if line.len() > 60 { &line[..60] } else { line };
+                        pb.set_message(format!("{prefix} ({short})"));
+                    })
+                    .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+            }
+
+            pb.finish_and_clear();
+
+            // Store the newly installed package in the global cache for future reuse.
+            let key = package_cache::cache_key(
+                &plan.pkg.name,
+                &plan.pkg.version,
+                plan.pkg.checksum.as_deref(),
+                &r_minor_str,
+                result.used_binary,
+                libr_path.as_deref(),
+            );
+            let pkg_dir = library.join(&plan.pkg.name);
+            if let Err(e) = package_cache::store(&pkg_dir, &key, &plan.pkg.name) {
+                tracing::debug!("Failed to cache {}: {e}", plan.pkg.name);
+            }
+        }
     }
 
     println!(

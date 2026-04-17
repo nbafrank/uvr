@@ -75,6 +75,26 @@ impl Platform {
             }
         }
     }
+
+    /// Fallback URL for older R versions that have been moved to an archive.
+    ///
+    /// On Windows, older R releases are moved from `/base/` to `/base/old/<version>/`.
+    /// On macOS, older releases are moved to subdirectories as well.
+    pub fn download_url_fallback(&self, version: &str) -> Option<String> {
+        match self {
+            Platform::WindowsX86_64 => Some(format!(
+                "https://cran.r-project.org/bin/windows/base/old/{version}/R-{version}-win.exe"
+            )),
+            Platform::MacOsArm64 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-{version}-arm64.pkg"
+            )),
+            Platform::MacOsX86_64 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
+            )),
+            // Linux uses Posit CDN which hosts all versions at the same path.
+            Platform::LinuxX86_64 | Platform::LinuxArm64 => None,
+        }
+    }
 }
 
 /// Detect the Posit CDN distro slug from `/etc/os-release`.
@@ -141,13 +161,26 @@ pub async fn download_and_install_r(
     let url = platform.download_url(version);
     info!("Downloading R {version} from {url}");
 
-    let bytes = client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let response = client.get(&url).send().await?;
+    let bytes = if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // Older R versions live at a different URL on some mirrors.
+        if let Some(fallback) = platform.download_url_fallback(version) {
+            info!("Not found at primary URL, trying {fallback}");
+            client
+                .get(&fallback)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?
+        } else {
+            return Err(UvrError::Other(format!(
+                "R {version} not found at {url} (HTTP 404). Check available versions with `uvr r list --all`."
+            )));
+        }
+    } else {
+        response.error_for_status()?.bytes().await?
+    };
 
     std::fs::create_dir_all(&install_dir)?;
 
@@ -731,6 +764,30 @@ pub async fn fetch_available_versions(
             }
         })
         .collect();
+
+    // On Windows, also scrape the "old" directory for archived versions.
+    if matches!(platform, Platform::WindowsX86_64) {
+        let old_url = "https://cran.r-project.org/bin/windows/base/old/";
+        if let Ok(old_html) = client
+            .get(old_url)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            if let Ok(text) = old_html.text().await {
+                // Old directory lists subdirectories like href="4.4.2/"
+                for chunk in text.split("href=\"").skip(1) {
+                    if let Some(end) = chunk.find('/') {
+                        let ver = &chunk[..end];
+                        if ver.chars().all(|c| c.is_ascii_digit() || c == '.') && ver.contains('.')
+                        {
+                            versions.push(ver.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Sort numerically by component (not lexicographically).
     versions.sort_by(|a, b| {

@@ -2,24 +2,26 @@
 #
 # uvr benchmark suite
 #
-# Measures cold-install wall time for uvr vs install.packages() vs pak::pkg_install().
-# Each tool installs from a clean library. Download caches are cleared between
-# scenarios to prevent cross-scenario bleed.
+# Measures install wall time for uvr vs install.packages() vs pak vs renv.
+# Two tiers: "warm" (index caches intact, library cleared) and "cold" (all
+# caches cleared). The warm tier reflects typical daily use; the cold tier
+# is the worst-case first-ever-run.
 #
 # Usage:
-#   bash benchmarks/bench.sh              # default: 3 runs per tool
-#   BENCH_RUNS=5 bash benchmarks/bench.sh # override run count
+#   bash benchmarks/bench.sh                # default: 5 runs per tier
+#   BENCH_RUNS=3 bash benchmarks/bench.sh   # fewer runs (faster)
 #
 # Requirements:
 #   - uvr on PATH (or CARGO_HOME/bin)
 #   - R managed by uvr (uvr r install <version>)
-#   - Optional: pak (auto-detected; skipped if missing)
+#   - Optional: pak, renv (auto-detected; skipped if missing)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNS="${BENCH_RUNS:-3}"
+RUNS="${BENCH_RUNS:-5}"
 P3M_REPO="https://p3m.dev/cran/latest"
+JSON_OUT="$SCRIPT_DIR/bench-results.json"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -32,33 +34,50 @@ if ! command -v "$UVR" &>/dev/null; then
     exit 1
 fi
 
-# Return wall-clock seconds (float) for a command.
+# Return wall-clock seconds for a command using /usr/bin/time.
+# Prints "FAIL" and returns 1 if the command exits non-zero.
 time_cmd() {
-    local start end
-    start=$(python3 -c 'import time; print(f"{time.time():.3f}")')
-    "$@" >/dev/null 2>&1 || true
-    end=$(python3 -c 'import time; print(f"{time.time():.3f}")')
-    python3 -c "print(f'{${end} - ${start}:.1f}')"
+    local timefile
+    timefile=$(mktemp)
+    # Separate /usr/bin/time's stderr (captured) from the command's stderr (discarded).
+    # The inner sh -c silences the command; /usr/bin/time writes "real X.XX" to $timefile.
+    /usr/bin/time -p sh -c '"$@" >/dev/null 2>&1' -- "$@" 2>"$timefile"
+    local exit_code=$?
+    local real
+    real=$(awk '/^real/{print $2}' "$timefile")
+    rm -f "$timefile"
+    if [ "$exit_code" -ne 0 ]; then
+        echo "FAIL"
+        return 1
+    fi
+    echo "$real"
 }
 
 # Return the median of a space-separated list of numbers.
+# Correct for both odd and even N.
 median() {
-    echo "$@" | tr ' ' '\n' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'
+    echo "$@" | tr ' ' '\n' | sort -n | awk '{
+        a[NR]=$1
+    } END {
+        if (NR%2==1) print a[(NR+1)/2]
+        else printf "%.2f\n", (a[NR/2]+a[NR/2+1])/2
+    }'
 }
 
-# Clear download caches for all tools to prevent cross-scenario bleed.
+# Clear ALL caches — used for cold-tier and warmup runs.
 clear_all_caches() {
-    # uvr download cache
+    # uvr download + index cache
     rm -rf ~/.uvr/cache/
     # pak / pkgcache
     rm -rf ~/.cache/R/pkgcache/
     rm -rf ~/Library/Caches/org.R-project.R/R/pkgcache/
-    # renv global cache (sandbox contains read-only symlinks — chmod first)
+    # renv global cache
     chmod -R u+w ~/.cache/R/renv/ 2>/dev/null || true
     rm -rf ~/.cache/R/renv/
     chmod -R u+w ~/Library/Caches/org.R-project.R/R/renv/ 2>/dev/null || true
     rm -rf ~/Library/Caches/org.R-project.R/R/renv/
-    # R default download cache
+    # R default download cache (macOS uses $TMPDIR, not /tmp)
+    rm -rf "${TMPDIR:-/tmp}"/Rtmp*/downloaded_packages 2>/dev/null || true
     rm -rf /tmp/Rtmp*/downloaded_packages 2>/dev/null || true
 }
 
@@ -66,10 +85,9 @@ clear_all_caches() {
 
 echo "=== uvr benchmark suite ==="
 echo "uvr:  $($UVR --version 2>&1 || echo 'unknown')"
-echo "runs: $RUNS per tool"
+echo "runs: $RUNS per tier"
 echo ""
 
-# Check if pak / renv are available
 HAS_PAK=false
 HAS_RENV=false
 TMPCHECK="$(mktemp -d)"
@@ -79,7 +97,7 @@ cat > "$TMPCHECK/check_tools.R" <<'REOF'
 if (requireNamespace("pak", quietly=TRUE)) cat("pak:yes\n") else cat("pak:no\n")
 if (requireNamespace("renv", quietly=TRUE)) cat("renv:yes\n") else cat("renv:no\n")
 REOF
-TOOL_CHECK=$(cd "$TMPCHECK" && "$UVR" run check_tools.R 2>/dev/null)
+TOOL_CHECK=$(cd "$TMPCHECK" && "$UVR" run check_tools.R 2>/dev/null) || true
 if echo "$TOOL_CHECK" | grep -q "pak:yes"; then HAS_PAK=true; fi
 if echo "$TOOL_CHECK" | grep -q "renv:yes"; then HAS_RENV=true; fi
 rm -rf "$TMPCHECK"
@@ -89,189 +107,425 @@ if $HAS_PAK; then echo "       pak (detected)"; else echo "       pak (not found
 if $HAS_RENV; then echo "       renv (detected)"; else echo "       renv (not found — skipping)"; fi
 echo ""
 
+# ─── JSON accumulator ──────────────────────────────────────────────────────
+
+JSON_RESULTS=""
+json_add() {
+    local scenario="$1" tier="$2" tool="$3" times="$4" med="$5" npkg="$6" note="${7:-}"
+    local times_json
+    times_json="[$(echo "$times" | sed 's/ /, /g')]"
+    local entry
+    entry=$(printf '    {"scenario": "%s", "packages": %s, "tier": "%s", "tool": "%s", "times": %s, "median": %s' \
+        "$scenario" "$npkg" "$tier" "$tool" "$times_json" "$med")
+    if [ -n "$note" ]; then
+        entry="$entry, \"note\": \"$note\"}"
+    else
+        entry="$entry}"
+    fi
+    if [ -n "$JSON_RESULTS" ]; then
+        JSON_RESULTS="$JSON_RESULTS,
+$entry"
+    else
+        JSON_RESULTS="$entry"
+    fi
+}
+
 # ─── storage (flat arrays — bash 3 compatible) ─────────────────────────────
 
-# Results stored as "scenario:value" entries in flat arrays.
-RESULT_UVR_ENTRIES=""
-RESULT_IP_ENTRIES=""
-RESULT_PAK_ENTRIES=""
-RESULT_RENV_ENTRIES=""
+RESULT_ENTRIES=""
 RESULT_NPKG_ENTRIES=""
 
-set_result() { eval "${1}=\"\${${1}} ${2}:${3}\""; }
+set_result() {
+    # Usage: set_result <tier>:<tool>:<scenario> <value>
+    RESULT_ENTRIES="$RESULT_ENTRIES $1=$2"
+}
 get_result() {
-    local entries val
-    eval "entries=\"\${${1}}\""
-    for entry in $entries; do
-        case "$entry" in "${2}:"*) val="${entry#*:}"; echo "$val"; return ;; esac
+    local key="$1"
+    for entry in $RESULT_ENTRIES; do
+        case "$entry" in "${key}="*) echo "${entry#*=}"; return ;; esac
     done
     echo "n/a"
 }
+set_npkg() { RESULT_NPKG_ENTRIES="$RESULT_NPKG_ENTRIES $1=$2"; }
+get_npkg() {
+    for entry in $RESULT_NPKG_ENTRIES; do
+        case "$entry" in "${1}="*) echo "${entry#*=}"; return ;; esac
+    done
+    echo "?"
+}
 
-# ─── scenarios ──────────────────────────────────────────────────────────────
+# ─── per-tool benchmark functions ──────────────────────────────────────────
 
-SCENARIOS="ggplot2 tidyverse"
+bench_uvr() {
+    local manifest="$1" scenario="$2" tier="$3"
+    local times="" failed=0
+
+    # Pre-resolve lockfile (resolution is separate from install in uvr's model)
+    local setupdir
+    setupdir="$(mktemp -d)"
+    cp "$manifest" "$setupdir/uvr.toml"
+    mkdir -p "$setupdir/.uvr/library"
+    (cd "$setupdir" && "$UVR" lock 2>/dev/null) || true
+
+    # Count packages
+    local npkg
+    npkg=$(grep -c '^\[\[package\]\]' "$setupdir/uvr.lock" 2>/dev/null || echo "?")
+    set_npkg "$scenario" "$npkg"
+
+    # Warmup run (populates index caches, discarded)
+    clear_all_caches
+    rm -rf "$setupdir/.uvr/library"
+    mkdir -p "$setupdir/.uvr/library"
+    (cd "$setupdir" && "$UVR" sync >/dev/null 2>&1) || true
+
+    echo -n "  uvr sync ($tier):     "
+    for i in $(seq 1 "$RUNS"); do
+        if [ "$tier" = "cold" ]; then
+            clear_all_caches
+        fi
+        # Clear library (companion reinstalled each run — no preservation)
+        rm -rf "$setupdir/.uvr/library"
+        mkdir -p "$setupdir/.uvr/library"
+
+        local t
+        t=$(time_cmd sh -c "cd '$setupdir' && '$UVR' sync") || true
+        if [ "$t" = "FAIL" ]; then
+            echo -n "FAIL "
+            failed=$((failed + 1))
+            continue
+        fi
+        times="$times $t"
+        echo -n "${t}s "
+    done
+
+    rm -rf "$setupdir"
+
+    if [ -z "$(echo "$times" | tr -d ' ')" ]; then
+        echo "→ ALL FAILED"
+        return
+    fi
+    local med
+    med=$(median $times)
+    set_result "${tier}:uvr:${scenario}" "$med"
+    local note=""
+    if [ "$failed" -gt 0 ]; then
+        note="$failed of $RUNS runs failed"
+    fi
+    json_add "$scenario" "$tier" "uvr" "$(echo "$times" | sed 's/^ //')" "$med" "$npkg" "$note"
+    if [ "$failed" -gt 0 ]; then
+        echo "→ median ${med}s ($failed failed)"
+    else
+        echo "→ median ${med}s"
+    fi
+}
+
+bench_install_packages() {
+    local manifest="$1" scenario="$2" tier="$3"
+    local times="" failed=0
+    local npkg
+    npkg=$(get_npkg "$scenario")
+
+    # Warmup run
+    clear_all_caches
+    local warmdir
+    warmdir="$(mktemp -d)"
+    cp "$manifest" "$warmdir/uvr.toml"
+    mkdir -p "$warmdir/.uvr/library" "$warmdir/iplib"
+    cat > "$warmdir/bench_ip.R" <<REOF
+lib <- file.path(getwd(), "iplib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib)
+options(repos = c(CRAN = "${P3M_REPO}"))
+install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = NA)
+REOF
+    (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_ip.R >/dev/null 2>&1) || true
+    rm -rf "$warmdir"
+
+    echo -n "  install.packages ($tier): "
+    for i in $(seq 1 "$RUNS"); do
+        if [ "$tier" = "cold" ]; then
+            clear_all_caches
+        fi
+        local benchdir
+        benchdir="$(mktemp -d)"
+        cp "$manifest" "$benchdir/uvr.toml"
+        mkdir -p "$benchdir/.uvr/library" "$benchdir/iplib"
+
+        cat > "$benchdir/bench_ip.R" <<REOF
+lib <- file.path(getwd(), "iplib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib)
+options(repos = c(CRAN = "${P3M_REPO}"))
+install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = NA)
+REOF
+        local t
+        t=$(time_cmd sh -c "cd '$benchdir' && R_LIBS= R_LIBS_USER= R_LIBS_SITE= '$UVR' run bench_ip.R") || true
+        if [ "$t" = "FAIL" ]; then
+            echo -n "FAIL "
+            failed=$((failed + 1))
+        else
+            times="$times $t"
+            echo -n "${t}s "
+        fi
+        rm -rf "$benchdir"
+    done
+
+    if [ -z "$(echo "$times" | tr -d ' ')" ]; then
+        echo "→ ALL FAILED"
+        return
+    fi
+    local med
+    med=$(median $times)
+    set_result "${tier}:ip:${scenario}" "$med"
+    local note=""
+    if [ "$failed" -gt 0 ]; then
+        note="$failed of $RUNS runs failed"
+    fi
+    json_add "$scenario" "$tier" "install.packages" "$(echo "$times" | sed 's/^ //')" "$med" "$npkg" "$note"
+    if [ "$failed" -gt 0 ]; then
+        echo "→ median ${med}s ($failed failed)"
+    else
+        echo "→ median ${med}s"
+    fi
+}
+
+bench_pak() {
+    local manifest="$1" scenario="$2" tier="$3"
+    local times="" failed=0
+    local npkg
+    npkg=$(get_npkg "$scenario")
+
+    # Warmup run
+    clear_all_caches
+    local warmdir
+    warmdir="$(mktemp -d)"
+    cp "$manifest" "$warmdir/uvr.toml"
+    mkdir -p "$warmdir/.uvr/library" "$warmdir/paklib"
+    cat > "$warmdir/bench_pak.R" <<REOF
+lib <- file.path(getwd(), "paklib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+# Load pak before isolating .libPaths (pak lives in the system library)
+library(pak)
+.libPaths(lib)
+options(repos = c(CRAN = "${P3M_REPO}"))
+pak::pkg_install("${scenario}", lib = lib, ask = FALSE, upgrade = FALSE)
+REOF
+    (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak.R >/dev/null 2>&1) || true
+    rm -rf "$warmdir"
+
+    echo -n "  pak ($tier):          "
+    for i in $(seq 1 "$RUNS"); do
+        if [ "$tier" = "cold" ]; then
+            clear_all_caches
+        fi
+        local benchdir
+        benchdir="$(mktemp -d)"
+        cp "$manifest" "$benchdir/uvr.toml"
+        mkdir -p "$benchdir/.uvr/library" "$benchdir/paklib"
+
+        cat > "$benchdir/bench_pak.R" <<REOF
+lib <- file.path(getwd(), "paklib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+library(pak)
+.libPaths(lib)
+options(repos = c(CRAN = "${P3M_REPO}"))
+pak::pkg_install("${scenario}", lib = lib, ask = FALSE, upgrade = FALSE)
+REOF
+        local t
+        t=$(time_cmd sh -c "cd '$benchdir' && R_LIBS= R_LIBS_USER= R_LIBS_SITE= '$UVR' run bench_pak.R") || true
+        if [ "$t" = "FAIL" ]; then
+            echo -n "FAIL "
+            failed=$((failed + 1))
+        else
+            times="$times $t"
+            echo -n "${t}s "
+        fi
+        rm -rf "$benchdir"
+    done
+
+    if [ -z "$(echo "$times" | tr -d ' ')" ]; then
+        echo "→ ALL FAILED"
+        return
+    fi
+    local med
+    med=$(median $times)
+    set_result "${tier}:pak:${scenario}" "$med"
+    local note=""
+    if [ "$failed" -gt 0 ]; then
+        note="$failed of $RUNS runs failed"
+    fi
+    json_add "$scenario" "$tier" "pak" "$(echo "$times" | sed 's/^ //')" "$med" "$npkg" "$note"
+    if [ "$failed" -gt 0 ]; then
+        echo "→ median ${med}s ($failed failed)"
+    else
+        echo "→ median ${med}s"
+    fi
+}
+
+bench_renv() {
+    local manifest="$1" scenario="$2" tier="$3"
+    local times="" failed=0
+    local npkg
+    npkg=$(get_npkg "$scenario")
+
+    # Warmup run
+    clear_all_caches
+    local warmdir
+    warmdir="$(mktemp -d)"
+    cp "$manifest" "$warmdir/uvr.toml"
+    mkdir -p "$warmdir/.uvr/library"
+    cat > "$warmdir/bench_renv.R" <<REOF
+library(renv)
+options(repos = c(CRAN = "${P3M_REPO}"))
+renv::init(bare = TRUE)
+renv::install("${scenario}", prompt = FALSE)
+REOF
+    (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_renv.R >/dev/null 2>&1) || true
+    rm -rf "$warmdir"
+
+    echo -n "  renv ($tier):         "
+    for i in $(seq 1 "$RUNS"); do
+        if [ "$tier" = "cold" ]; then
+            clear_all_caches
+        fi
+        local benchdir
+        benchdir="$(mktemp -d)"
+        cp "$manifest" "$benchdir/uvr.toml"
+        mkdir -p "$benchdir/.uvr/library"
+
+        cat > "$benchdir/bench_renv.R" <<REOF
+library(renv)
+options(repos = c(CRAN = "${P3M_REPO}"))
+renv::init(bare = TRUE)
+renv::install("${scenario}", prompt = FALSE)
+REOF
+        local t
+        t=$(time_cmd sh -c "cd '$benchdir' && R_LIBS= R_LIBS_USER= R_LIBS_SITE= '$UVR' run bench_renv.R") || true
+        if [ "$t" = "FAIL" ]; then
+            echo -n "FAIL "
+            failed=$((failed + 1))
+        else
+            times="$times $t"
+            echo -n "${t}s "
+        fi
+        rm -rf "$benchdir"
+    done
+
+    if [ -z "$(echo "$times" | tr -d ' ')" ]; then
+        echo "→ ALL FAILED"
+        return
+    fi
+    local med
+    med=$(median $times)
+    set_result "${tier}:renv:${scenario}" "$med"
+    local note=""
+    if [ "$failed" -gt 0 ]; then
+        note="$failed of $RUNS runs failed"
+    fi
+    json_add "$scenario" "$tier" "renv" "$(echo "$times" | sed 's/^ //')" "$med" "$npkg" "$note"
+    if [ "$failed" -gt 0 ]; then
+        echo "→ median ${med}s ($failed failed)"
+    else
+        echo "→ median ${med}s"
+    fi
+}
+
+# ─── main loop ─────────────────────────────────────────────────────────────
+
+SCENARIOS="jsonlite ggplot2 tidyverse"
 
 for scenario in $SCENARIOS; do
     MANIFEST="$SCRIPT_DIR/uvr-${scenario}.toml"
-    echo "--- scenario: $scenario ---"
-
-    # ── uvr sync ────────────────────────────────────────────────────────────
-
-    echo -n "  uvr sync:            "
-    UVR_TIMES=""
-
-    # Pre-resolve lockfile once (resolution is not part of install benchmark)
-    BENCHDIR="$(mktemp -d)"
-    cp "$MANIFEST" "$BENCHDIR/uvr.toml"
-    mkdir -p "$BENCHDIR/.uvr/library"
-    (cd "$BENCHDIR" && "$UVR" lock 2>/dev/null) || true
-
-    # Count packages in lockfile
-    NPKG=$(grep -c '^\[\[package\]\]' "$BENCHDIR/uvr.lock" 2>/dev/null || echo "?")
-    set_result RESULT_NPKG_ENTRIES "$scenario" "$NPKG"
-
-    # Run sync once to seed companion package, then preserve it across wipes
-    (cd "$BENCHDIR" && "$UVR" sync >/dev/null 2>&1) || true
-    COMPANION_DIR="$BENCHDIR/.uvr/library/uvr"
-
-    for i in $(seq 1 "$RUNS"); do
-        # Clear all caches before every run for true cold-cache measurement
-        clear_all_caches
-        # Wipe library but preserve companion package to avoid re-install overhead
-        COMPANION_BAK=""
-        if [ -d "$COMPANION_DIR" ]; then
-            COMPANION_BAK="$(mktemp -d)"
-            mv "$COMPANION_DIR" "$COMPANION_BAK/uvr"
-        fi
-        rm -rf "$BENCHDIR/.uvr/library"
-        mkdir -p "$BENCHDIR/.uvr/library"
-        if [ -n "$COMPANION_BAK" ]; then
-            mv "$COMPANION_BAK/uvr" "$COMPANION_DIR"
-            rm -rf "$COMPANION_BAK"
-        fi
-        t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' sync")
-        UVR_TIMES="$UVR_TIMES $t"
-        echo -n "${t}s "
-    done
-    rm -rf "$BENCHDIR"
-    MED=$(median $UVR_TIMES)
-    set_result RESULT_UVR_ENTRIES "$scenario" "$MED"
-    echo "→ median ${MED}s"
-
-    # ── install.packages ────────────────────────────────────────────────────
-
-    echo -n "  install.packages:    "
-    IP_TIMES=""
-    for i in $(seq 1 "$RUNS"); do
-        clear_all_caches
-        BENCHDIR="$(mktemp -d)"
-        cp "$MANIFEST" "$BENCHDIR/uvr.toml"
-        mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/iplib"
-
-        # Write the R script that does install.packages
-        cat > "$BENCHDIR/bench_ip.R" <<REOF
-lib <- file.path(getwd(), "iplib")
-dir.create(lib, recursive = TRUE, showWarnings = FALSE)
-# Restrict .libPaths so R can't see packages in the system library
-.libPaths(lib)
-options(repos = c(CRAN = "${P3M_REPO}"))
-install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = TRUE)
-REOF
-        t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_ip.R")
-        IP_TIMES="$IP_TIMES $t"
-        rm -rf "$BENCHDIR"
-        echo -n "${t}s "
-    done
-    MED=$(median $IP_TIMES)
-    set_result RESULT_IP_ENTRIES "$scenario" "$MED"
-    echo "→ median ${MED}s"
-
-    # ── pak ──────────────────────────────────────────────────────────────────
-
-    if $HAS_PAK; then
-        echo -n "  pak::pkg_install:    "
-        PAK_TIMES=""
-        for i in $(seq 1 "$RUNS"); do
-            clear_all_caches
-            BENCHDIR="$(mktemp -d)"
-            cp "$MANIFEST" "$BENCHDIR/uvr.toml"
-            mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/paklib"
-
-            cat > "$BENCHDIR/bench_pak.R" <<REOF
-lib <- file.path(getwd(), "paklib")
-dir.create(lib, recursive = TRUE, showWarnings = FALSE)
-.libPaths(lib)
-pak::pkg_install("${scenario}", lib = lib, ask = FALSE)
-REOF
-            t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_pak.R")
-            PAK_TIMES="$PAK_TIMES $t"
-            rm -rf "$BENCHDIR"
-            echo -n "${t}s "
-        done
-        MED=$(median $PAK_TIMES)
-        set_result RESULT_PAK_ENTRIES "$scenario" "$MED"
-        echo "→ median ${MED}s"
+    if [ ! -f "$MANIFEST" ]; then
+        echo "warning: $MANIFEST not found, skipping $scenario" >&2
+        continue
     fi
 
-    # ── renv ────────────────────────────────────────────────────────────────
+    for tier in warm cold; do
+        echo "--- $scenario ($tier) ---"
 
-    if $HAS_RENV; then
-        echo -n "  renv::restore:       "
-        RENV_TIMES=""
-        for i in $(seq 1 "$RUNS"); do
-            clear_all_caches
-            BENCHDIR="$(mktemp -d)"
-            cp "$MANIFEST" "$BENCHDIR/uvr.toml"
-            mkdir -p "$BENCHDIR/.uvr/library" "$BENCHDIR/renvlib"
+        # Tool order matters: each tool's warmup calls clear_all_caches, which
+        # destroys prior tools' caches. Current order is safe because each tool
+        # finishes all its timed runs before the next tool's warmup clears caches.
+        bench_uvr "$MANIFEST" "$scenario" "$tier"
+        bench_install_packages "$MANIFEST" "$scenario" "$tier"
+        if $HAS_PAK; then bench_pak "$MANIFEST" "$scenario" "$tier"; fi
+        if $HAS_RENV; then bench_renv "$MANIFEST" "$scenario" "$tier"; fi
 
-            # Generate an renv.lock from the uvr lockfile, then restore from it
-            cat > "$BENCHDIR/bench_renv.R" <<REOF
-lib <- file.path(getwd(), "renvlib")
-dir.create(lib, recursive = TRUE, showWarnings = FALSE)
-options(repos = c(CRAN = "${P3M_REPO}"))
-# Bootstrap renv in this temp project
-renv::init(bare = TRUE, settings = list(use.cache = FALSE))
-# Install the target package + deps into the renv library
-renv::install("${scenario}", prompt = FALSE)
-REOF
-            t=$(time_cmd sh -c "cd '$BENCHDIR' && '$UVR' run bench_renv.R")
-            RENV_TIMES="$RENV_TIMES $t"
-            rm -rf "$BENCHDIR"
-            echo -n "${t}s "
-        done
-        MED=$(median $RENV_TIMES)
-        set_result RESULT_RENV_ENTRIES "$scenario" "$MED"
-        echo "→ median ${MED}s"
-    fi
-
-    echo ""
+        echo ""
+    done
 done
 
-# ─── results table ──────────────────────────────────────────────────────────
+# ─── results tables ────────────────────────────────────────────────────────
+
+print_table() {
+    local tier="$1" label="$2"
+
+    echo "$label"
+    echo ""
+
+    # Build header
+    local header="| Scenario | Packages | uvr sync | install.packages"
+    local sep="|----------|----------|----------|------------------"
+    if $HAS_PAK; then header="$header | pak"; sep="$sep|-----"; fi
+    if $HAS_RENV; then header="$header | renv"; sep="$sep|------"; fi
+    echo "$header |"
+    echo "$sep|"
+
+    for scenario in $SCENARIOS; do
+        local npkg
+        npkg=$(get_npkg "$scenario")
+        local uvr_t ip_t
+        uvr_t="$(get_result "${tier}:uvr:${scenario}")s"
+        ip_t="$(get_result "${tier}:ip:${scenario}")s"
+        local row="| $scenario | $npkg | **$uvr_t** | $ip_t"
+        if $HAS_PAK; then row="$row | $(get_result "${tier}:pak:${scenario}")s"; fi
+        if $HAS_RENV; then row="$row | $(get_result "${tier}:renv:${scenario}")s"; fi
+        echo "$row |"
+    done
+    echo ""
+}
 
 echo ""
 echo "## Results"
 echo ""
+print_table "warm" "### Typical use (index caches warm, library empty)"
+print_table "cold" "### First run (all caches cleared)"
 
-# Build header dynamically
-HEADER="| Scenario | Packages | uvr sync | install.packages"
-SEPARATOR="|----------|----------|----------|------------------"
-if $HAS_PAK; then HEADER="$HEADER | pak"; SEPARATOR="$SEPARATOR|-----"; fi
-if $HAS_RENV; then HEADER="$HEADER | renv"; SEPARATOR="$SEPARATOR|------"; fi
-echo "$HEADER |"
-echo "$SEPARATOR|"
+# ─── methodology ───────────────────────────────────────────────────────────
 
-for scenario in $SCENARIOS; do
-    npkg=$(get_result RESULT_NPKG_ENTRIES "$scenario")
-    uvr_t="$(get_result RESULT_UVR_ENTRIES "$scenario")s"
-    ip_t="$(get_result RESULT_IP_ENTRIES "$scenario")s"
-    ROW="| $scenario | $npkg | **$uvr_t** | $ip_t"
-    if $HAS_PAK; then ROW="$ROW | $(get_result RESULT_PAK_ENTRIES "$scenario")s"; fi
-    if $HAS_RENV; then ROW="$ROW | $(get_result RESULT_RENV_ENTRIES "$scenario")s"; fi
-    echo "$ROW |"
-done
+R_VER=$("$UVR" run -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
+echo "_Measured on $(uname -m), ${R_VER}, P3M binaries. Median of ${RUNS} runs._"
+echo ""
+echo "Methodology:"
+echo "- \"warm\": 1 warmup run (discarded), then index caches left intact; target library cleared between runs"
+echo "- \"cold\": all caches (index, download, metadata) cleared between runs"
+echo "- uvr: lockfile pre-resolved (\`uvr lock\`); only \`uvr sync\` (install) is timed"
+echo "- install.packages/pak/renv: resolution + install timed together"
+echo "- All tools use P3M (p3m.dev/cran/latest) as CRAN mirror"
+echo "- .libPaths fully isolated for install.packages and pak (system library hidden)"
+echo "- renv uses its default global cache (matching real-world usage)"
+echo "- Companion package (uvr's R helper) reinstalled each run (not preserved)"
+echo "- Warm tier: uvr, pak, and renv benefit from persistent caches; install.packages has no persistent cache"
+
+# ─── JSON output ───────────────────────────────────────────────────────────
+
+UVR_VER=$("$UVR" --version 2>&1 | head -1 || echo "unknown")
+cat > "$JSON_OUT" <<JEOF
+{
+  "meta": {
+    "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "arch": "$(uname -m)",
+    "r_version": "$(echo "$R_VER" | sed 's/R version //')",
+    "uvr_version": "$UVR_VER",
+    "runs_per_tier": $RUNS,
+    "mirror": "$P3M_REPO"
+  },
+  "results": [
+$JSON_RESULTS
+  ]
+}
+JEOF
 
 echo ""
-R_VER=$("$UVR" run -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
-echo "_Measured on $(uname -m), ${R_VER}, P3M binaries (all tools use P3M as CRAN mirror). Median of ${RUNS} cold installs._"
+echo "JSON results written to $JSON_OUT"

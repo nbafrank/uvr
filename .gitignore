@@ -5,3 +5,4 @@
 .idea/
 *.swp
 *.swo
+benchmarks/bench-results.json

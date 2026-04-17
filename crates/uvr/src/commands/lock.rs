@@ -138,13 +138,14 @@ async fn resolve_lockfile(
     let pre_resolved = github_result?;
     let custom_registries: Vec<CranRegistry> = custom_result?;
 
-    // Build the registry chain: CRAN → custom sources → Bioconductor
+    // Build the registry chain: custom sources → CRAN → Bioconductor
+    // Custom repos come first so user-configured sources take priority.
     let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
         let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
-        chain.push(&cran);
         for reg in &custom_registries {
             chain.push(reg);
         }
+        chain.push(&cran);
         if let Some(ref bioc) = bioc_opt {
             chain.push(bioc);
         }
