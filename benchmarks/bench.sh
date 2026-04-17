@@ -25,14 +25,25 @@ JSON_OUT="$SCRIPT_DIR/bench-results.json"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
-UVR="${UVR:-uvr}"
-if ! command -v "$UVR" &>/dev/null; then
-    UVR="$HOME/.cargo/bin/uvr"
+UVR_ORIG="${UVR:-uvr}"
+if ! command -v "$UVR_ORIG" &>/dev/null; then
+    UVR_ORIG="$HOME/.cargo/bin/uvr"
 fi
-if ! command -v "$UVR" &>/dev/null; then
+if ! command -v "$UVR_ORIG" &>/dev/null; then
     echo "error: uvr not found on PATH or in ~/.cargo/bin" >&2
     exit 1
 fi
+
+# Snapshot the binary so a mid-run rebuild can't corrupt results.
+UVR_SNAPSHOT="$(mktemp)"
+cp "$(command -v "$UVR_ORIG")" "$UVR_SNAPSHOT"
+chmod +x "$UVR_SNAPSHOT"
+# macOS kills unsigned binaries; re-sign the copy.
+if [ "$(uname -s)" = "Darwin" ]; then
+    codesign -s - "$UVR_SNAPSHOT" 2>/dev/null || true
+fi
+UVR="$UVR_SNAPSHOT"
+trap 'rm -f "$UVR_SNAPSHOT"' EXIT
 
 # Return wall-clock seconds for a command using /usr/bin/time.
 # Prints "FAIL" and returns 1 if the command exits non-zero.
