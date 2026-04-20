@@ -1,9 +1,9 @@
 mod cli;
 mod commands;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;
-use console::style;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use cli::{CacheCommands, Cli, Commands, RCommands};
@@ -15,7 +15,7 @@ async fn main() {
         if let Some(script_err) = e.downcast_ref::<commands::run::ScriptExitError>() {
             std::process::exit(script_err.0);
         }
-        eprintln!("{} {e:#}", style("error:").red().bold());
+        render_error(&e);
         std::process::exit(1);
     }
 }
@@ -43,7 +43,12 @@ async fn run() -> Result<()> {
         .without_time()
         .init();
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        ui::welcome(env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    };
+
+    match command {
         Commands::Init(args) => {
             commands::init::run(args.name, args.r_version)?;
         }
@@ -84,25 +89,82 @@ async fn run() -> Result<()> {
             commands::doctor::run()?;
         }
         Commands::R(r_args) => match r_args.command {
-            RCommands::Install(args) => {
+            Some(RCommands::Install(args)) => {
                 commands::r_cmd::install::run(args.version).await?;
             }
-            RCommands::List(args) => {
+            Some(RCommands::List(args)) => {
                 commands::r_cmd::list::run(args.all).await?;
             }
-            RCommands::Use(args) => {
+            Some(RCommands::Use(args)) => {
                 commands::r_cmd::use_version::run(args.version)?;
             }
-            RCommands::Pin(args) => {
+            Some(RCommands::Pin(args)) => {
                 commands::r_cmd::pin::run(args.version)?;
+            }
+            None => {
+                ui::welcome_group(
+                    "r",
+                    "Manage R versions",
+                    &[
+                        ("uvr r install <ver>", "Download and install an R version"),
+                        ("uvr r list", "List installed R versions"),
+                        ("uvr r use <ver>", "Set the R version constraint"),
+                        ("uvr r pin <ver>", "Write an exact R version to .r-version"),
+                    ],
+                );
             }
         },
         Commands::Cache(cache_args) => match cache_args.command {
-            CacheCommands::Clean => {
+            Some(CacheCommands::Clean) => {
                 commands::cache::run_clean()?;
+            }
+            None => {
+                ui::welcome_group(
+                    "cache",
+                    "Manage the local download cache",
+                    &[("uvr cache clean", "Remove all cached package downloads")],
+                );
             }
         },
     }
 
     Ok(())
+}
+
+/// Render an error using the three-part format: headline / context / hint.
+///
+/// Pulls the top-level error message as the headline, joins the rest of the
+/// chain (via `anyhow`'s context chain) as context lines, and picks a hint
+/// based on heuristics from the message.
+fn render_error(e: &anyhow::Error) {
+    let headline = e.to_string();
+    let mut context_lines: Vec<String> = Vec::new();
+    for cause in e.chain().skip(1) {
+        context_lines.push(cause.to_string());
+    }
+    let context = if context_lines.is_empty() {
+        None
+    } else {
+        Some(context_lines.join("\n"))
+    };
+
+    let hint = hint_for(&headline);
+    ui::error_block(&headline, context.as_deref(), hint);
+}
+
+fn hint_for(msg: &str) -> Option<&'static str> {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("not inside a uvr project") {
+        Some("Run `uvr init` to create uvr.toml in this directory.")
+    } else if m.contains("no lockfile") {
+        Some("Run `uvr lock` to generate uvr.lock.")
+    } else if m.contains("lockfile is out of date") {
+        Some("Run `uvr lock` then commit uvr.lock alongside uvr.toml.")
+    } else if m.contains("r not found") || m.contains("cannot select r binary") {
+        Some("Run `uvr r install <version>` or ensure R is on PATH.")
+    } else if m.contains("base r package") {
+        Some("Remove this package from your manifest — base packages ship with R.")
+    } else {
+        None
+    }
 }

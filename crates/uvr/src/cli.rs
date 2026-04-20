@@ -22,7 +22,7 @@ pub struct Cli {
     pub quiet: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -264,7 +264,7 @@ pub struct CompletionsArgs {
 #[derive(Debug, Args)]
 pub struct RArgs {
     #[command(subcommand)]
-    pub command: RCommands,
+    pub command: Option<RCommands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -315,7 +315,7 @@ pub struct RPinArgs {
 #[derive(Debug, Args)]
 pub struct CacheArgs {
     #[command(subcommand)]
-    pub command: CacheCommands,
+    pub command: Option<CacheCommands>,
 }
 
 #[derive(Debug, Subcommand)]

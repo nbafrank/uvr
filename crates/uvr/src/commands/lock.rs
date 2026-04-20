@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::lockfile::Lockfile;
 use uvr_core::manifest::DependencySpec;
@@ -13,13 +12,18 @@ use uvr_core::registry::github::{parse_github_spec, resolve_github_package};
 use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
 
+use crate::ui;
+
 pub async fn run(upgrade: bool) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
+    let start = ui::now();
     let lockfile = resolve_and_lock(&project, upgrade).await?;
-    println!(
-        "{} Lockfile updated ({} packages)",
-        style("✓").green().bold(),
-        lockfile.packages.len()
+    ui::summary(
+        format!("Lockfile updated — {} package(s)", lockfile.packages.len()),
+        format!(
+            "resolved in {}",
+            ui::palette::format_duration(start.elapsed())
+        ),
     );
     Ok(())
 }
@@ -138,17 +142,21 @@ async fn resolve_lockfile(
     let pre_resolved = github_result?;
     let custom_registries: Vec<CranRegistry> = custom_result?;
 
-    // Build the registry chain: custom sources → CRAN → Bioconductor
+    // Build the registry chain: custom sources → Bioconductor → CRAN.
     // Custom repos come first so user-configured sources take priority.
+    // Bioc is placed BEFORE CRAN because CRAN's PACKAGES.gz occasionally
+    // contains ghost entries for Bioc-origin packages (e.g. S4Vectors for
+    // future R versions) that have no real tarball; Bioc is authoritative
+    // for its own packages.
     let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
         let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
         for reg in &custom_registries {
             chain.push(reg);
         }
-        chain.push(&cran);
         if let Some(ref bioc) = bioc_opt {
             chain.push(bioc);
         }
+        chain.push(&cran);
         let registry = RegistryChain::new(chain);
         Resolver::new(&registry)
             .resolve(&project.manifest, actual_r_version.as_deref(), pre_resolved)
@@ -164,7 +172,7 @@ async fn resolve_lockfile(
         lockfile.r.bioc_version = Some(bioc.release().to_string());
     }
 
-    spinner.finish_with_message(format!("Resolved {} packages", lockfile.packages.len()));
+    spinner.finish_and_clear();
     Ok(lockfile)
 }
 

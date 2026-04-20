@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
+
+use crate::ui;
+use crate::ui::palette;
 
 /// `uvr r pin [version]` — write an exact version to `.r-version`.
 ///
@@ -13,7 +15,6 @@ pub fn run(version: Option<String>) -> Result<()> {
     let pinned = match version {
         Some(v) => v,
         None => {
-            // Detect active R version
             let constraint = project.manifest.project.r_version.as_deref();
             let binary = find_r_binary(constraint)
                 .context("R not found. Install R or use `uvr r install <version>`")?;
@@ -26,12 +27,12 @@ pub fn run(version: Option<String>) -> Result<()> {
         .write_r_version_pin(&pinned)
         .context("Failed to write .r-version")?;
 
-    println!(
-        "{} Pinned R {} → {}",
-        style("✓").green().bold(),
-        style(&pinned).cyan(),
-        style(".r-version").dim(),
-    );
+    ui::success(format!(
+        "Pinned R {} {} {}",
+        palette::info(&pinned),
+        palette::dim(ui::glyph::arrow()),
+        palette::dim(".r-version"),
+    ));
 
     Ok(())
 }

@@ -260,6 +260,6 @@ async fn download_one(
         ))
     })?;
 
-    pb.finish_with_message(format!("Downloaded {name} {version}"));
+    pb.finish_and_clear();
     Ok(dest)
 }

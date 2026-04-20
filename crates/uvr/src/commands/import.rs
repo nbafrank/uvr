@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use console::style;
 use serde::Deserialize;
 
 use uvr_core::manifest::{DependencySpec, DetailedDep, Manifest, PackageSource};
 use uvr_core::project::{Project, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
+
+use crate::ui;
+use crate::ui::palette;
 
 pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
     // Find the renv.lock file
@@ -158,17 +160,15 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
     std::fs::create_dir_all(&library_path).context("Failed to create .uvr/library/")?;
 
     if merge_mode {
-        println!(
-            "{} Merged from {} into existing uvr.toml",
-            style("✓").green().bold(),
-            style(renv_path.display()).cyan()
-        );
+        ui::success(format!(
+            "Merged from {} into existing uvr.toml",
+            palette::pkg(renv_path.display().to_string()),
+        ));
     } else {
-        println!(
-            "{} Imported from {}",
-            style("✓").green().bold(),
-            style(renv_path.display()).cyan()
-        );
+        ui::success(format!(
+            "Imported from {}",
+            palette::pkg(renv_path.display().to_string()),
+        ));
     }
     let mut counts = format!("{cran_count} CRAN");
     if custom_count > 0 {
@@ -180,12 +180,12 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
     if github_count > 0 {
         counts.push_str(&format!(", {github_count} GitHub"));
     }
-    println!("  {counts} package(s)");
+    ui::bullet_dim(format!("{counts} package(s)"));
     if !custom_sources.is_empty() {
         let names: Vec<_> = custom_sources.iter().map(|s| s.url.as_str()).collect();
         println!(
             "  {} Added {} custom source(s): {}",
-            style("+").green().bold(),
+            palette::added(ui::glyph::add()),
             custom_sources.len(),
             names.join(", ")
         );
@@ -193,27 +193,28 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
     if !skipped.is_empty() {
         println!(
             "  {} Skipped {} package(s): {}",
-            style("!").yellow().bold(),
+            palette::warn(ui::glyph::warn()),
             skipped.len(),
             skipped.join(", ")
         );
     }
 
     if let Some(ref ver) = r_version {
-        println!("  R version: {ver}");
+        ui::bullet_dim(format!("R version: {ver}"));
     }
 
-    // Optionally resolve and lock
     if lock {
-        println!("\n{} Resolving dependencies...", style("→").blue().bold());
+        println!();
+        ui::info("Resolving dependencies");
         let project = Project::find_cwd().context("Failed to load imported project")?;
         let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
         crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None).await?;
     } else {
-        println!(
-            "\n  Run {} to resolve and install packages",
-            style("uvr lock && uvr sync").cyan()
-        );
+        println!();
+        ui::hint(format!(
+            "Run {} to resolve and install packages",
+            palette::bold("uvr lock && uvr sync"),
+        ));
     }
 
     Ok(())

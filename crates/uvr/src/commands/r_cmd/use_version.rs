@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::project::Project;
+
+use crate::ui;
+use crate::ui::palette;
 
 /// `uvr r use <version>` — sets the constraint in uvr.toml.
 ///
@@ -15,31 +17,25 @@ pub fn run(version: String) -> Result<()> {
         .save_manifest()
         .context("Failed to write uvr.toml")?;
 
-    // If the version looks exact (digits and dots/dashes only), also pin .r-version
     if is_exact_version(&version) {
         project
             .write_r_version_pin(&version)
             .context("Failed to write .r-version")?;
-        println!(
-            "{} Pinned R {} in {} and {}",
-            style("✓").green().bold(),
-            style(&version).cyan(),
-            style("uvr.toml").dim(),
-            style(".r-version").dim(),
-        );
+        ui::success(format!(
+            "Pinned R {} in {} and {}",
+            palette::info(&version),
+            palette::dim("uvr.toml"),
+            palette::dim(".r-version"),
+        ));
     } else {
         match old {
-            Some(prev) => println!(
-                "{} R version constraint updated: {} → {}",
-                style("✓").green().bold(),
-                style(&prev).dim(),
-                style(&version).cyan()
-            ),
-            None => println!(
-                "{} R version constraint set to {}",
-                style("✓").green().bold(),
-                style(&version).cyan()
-            ),
+            Some(prev) => ui::success(format!(
+                "R constraint updated: {} {} {}",
+                palette::dim(&prev),
+                palette::dim(ui::glyph::arrow()),
+                palette::info(&version),
+            )),
+            None => ui::success(format!("R constraint set to {}", palette::info(&version))),
         }
     }
 

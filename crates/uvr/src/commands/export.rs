@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use console::style;
 use serde::Serialize;
 use std::collections::HashMap;
 
 use uvr_core::lockfile::{Lockfile, PackageSource};
 use uvr_core::project::Project;
+
+use crate::ui;
+use crate::ui::palette;
 
 pub fn run(format: ExportFormat, output: Option<String>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -21,12 +23,11 @@ pub fn run(format: ExportFormat, output: Option<String>) -> Result<()> {
     match output {
         Some(path) => {
             std::fs::write(&path, &content).with_context(|| format!("Failed to write {path}"))?;
-            println!(
-                "{} Exported {} package(s) to {}",
-                style("✓").green().bold(),
+            ui::success(format!(
+                "Exported {} package(s) to {}",
                 lockfile.packages.len(),
-                style(&path).cyan()
-            );
+                palette::pkg(&path),
+            ));
         }
         None => {
             print!("{content}");

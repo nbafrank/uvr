@@ -1,28 +1,30 @@
 use anyhow::{Context, Result};
-use console::style;
 use sha2::{Digest, Sha256};
 use uvr_core::r_version::downloader::Platform;
 
+use crate::ui;
+use crate::ui::palette;
+
 pub async fn run() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
-    println!(
-        "{} Checking for updates (current: v{current})...",
-        style("→").blue().bold()
-    );
+    ui::info(format!("Checking for updates (current: v{current})"));
 
     let client = crate::commands::util::build_client()?;
     let release = fetch_latest_release(&client).await?;
 
     let latest = release.tag_name.trim_start_matches('v');
     if !is_newer(latest, current) {
-        println!(
-            "{} Already up to date (v{current})",
-            style("✓").green().bold()
-        );
+        ui::success(format!("Already up to date (v{current})"));
         return Ok(());
     }
 
-    println!("  {} v{current} → v{latest}", style("→").blue(),);
+    println!(
+        "  {} {} {} {}",
+        palette::upgraded(ui::glyph::upgrade()),
+        palette::version(format!("v{current}")),
+        palette::dim(ui::glyph::arrow()),
+        palette::upgraded(format!("v{latest}")),
+    );
 
     let target = Platform::detect()
         .map(|p| p.rust_target_triple())
@@ -62,7 +64,7 @@ pub async fn run() -> Result<()> {
             None
         };
 
-    println!("  Downloading {asset_name}...");
+    ui::bullet_dim(format!("Downloading {asset_name}"));
     let bytes = client
         .get(&asset_url)
         .send()
@@ -81,7 +83,7 @@ pub async fn run() -> Result<()> {
                 "Checksum mismatch for {asset_name}!\n  Expected: {expected}\n  Got:      {actual}"
             );
         }
-        println!("  {} SHA256 checksum verified", style("✓").green());
+        ui::bullet_dim("SHA256 checksum verified");
     }
 
     let current_exe =
@@ -133,7 +135,7 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(&backup_path);
     }
 
-    println!("{} Updated to v{latest}", style("✓").green().bold());
+    ui::success(format!("Updated to v{latest}"));
     Ok(())
 }
 

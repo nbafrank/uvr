@@ -1,13 +1,15 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::manifest::Manifest;
 use uvr_core::project::{
     DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE,
 };
 use uvr_core::r_version::detector::find_r_binary;
+
+use crate::ui;
+use crate::ui::palette;
 
 pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
@@ -72,24 +74,21 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
         }
     }
 
-    println!(
-        "{} Initialized project {}",
-        style("✓").green().bold(),
-        style(&project_name).cyan()
-    );
+    ui::success(format!(
+        "Initialized project {}",
+        palette::pkg(&project_name)
+    ));
     if description_path.exists() && imported_count > 0 {
-        println!(
-            "  {} Imported {} dependenc{} from DESCRIPTION",
-            style("→").dim(),
+        ui::bullet_dim(format!(
+            "Imported {} dependenc{} from DESCRIPTION",
             imported_count,
             if imported_count == 1 { "y" } else { "ies" }
-        );
+        ));
     }
-    println!("  {}", style(MANIFEST_FILE).dim());
+    println!("  {}", palette::dim(MANIFEST_FILE));
     println!(
-        "  {}/{}/",
-        style(DOT_UVR_DIR).dim(),
-        style(LIBRARY_DIR).dim()
+        "  {}",
+        palette::dim(format!("{DOT_UVR_DIR}/{LIBRARY_DIR}/"))
     );
 
     Ok(())

@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::lockfile::Lockfile;
 use uvr_core::project::Project;
 
 use crate::commands::lock::{resolve_and_lock, resolve_only_upgraded};
 use crate::commands::sync::install_from_lockfile;
+use crate::ui;
+use crate::ui::palette;
 
 pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -23,17 +24,16 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
         .unwrap_or_default();
 
     if packages.is_empty() {
-        println!("{} Updating all packages...", style("→").blue().bold());
+        ui::info("Updating all packages");
     } else {
-        println!(
-            "{} Updating {}...",
-            style("→").blue().bold(),
+        ui::info(format!(
+            "Updating {}",
             packages
                 .iter()
-                .map(|p| style(p).cyan().to_string())
+                .map(|p| palette::pkg(p).to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        ));
 
         // Verify requested packages are actually dependencies
         for pkg in &packages {
@@ -116,39 +116,23 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
 
     // Report changes
     if updated.is_empty() && added.is_empty() {
-        println!(
-            "{} All packages already at latest versions",
-            style("✓").green().bold()
-        );
+        ui::success("All packages already at latest versions");
     } else {
         for (name, old, new) in &updated {
-            println!(
-                "  {} {} → {}",
-                style(name).cyan(),
-                style(old).dim(),
-                style(new).green()
-            );
+            ui::row_upgrade(name, old, new);
         }
         for (name, ver) in &added {
-            println!(
-                "  {} {} {}",
-                style("+").green(),
-                style(name).cyan(),
-                style(ver).dim()
-            );
+            ui::row_added(name, ver);
         }
-        println!(
-            "{} {} package(s) updated",
-            style("✓").green().bold(),
+        ui::success(format!(
+            "{} package(s) updated",
             updated.len() + added.len()
-        );
+        ));
     }
 
     if dry_run {
-        println!(
-            "\n{} Dry run — no changes written",
-            style("!").yellow().bold()
-        );
+        println!();
+        ui::warn("Dry run — no changes written");
     } else {
         // Install updated packages
         install_from_lockfile(&project, &effective_lockfile, jobs, None).await?;

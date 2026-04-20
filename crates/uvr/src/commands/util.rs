@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 
 pub fn build_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
@@ -10,19 +10,7 @@ pub fn build_client() -> Result<reqwest::Client> {
         .context("Failed to build HTTP client")
 }
 
+/// Re-export from the ui module so existing call sites keep compiling.
 pub fn make_spinner(msg: &str) -> ProgressBar {
-    // In non-TTY environments (CI, piped output) suppress the spinner to avoid
-    // ANSI escape codes polluting logs.
-    if !console::Term::stderr().is_term() {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::with_template("{spinner:.cyan} {msg}")
-            .unwrap()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    pb.set_message(msg.to_string());
-    pb
+    crate::ui::make_spinner(msg)
 }

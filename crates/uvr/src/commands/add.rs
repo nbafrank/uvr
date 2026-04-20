@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::manifest::{DependencySpec, DetailedDep};
 use uvr_core::project::Project;
 use uvr_core::resolver::is_base_package;
+
+use crate::ui;
+use crate::ui::palette;
 
 /// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
@@ -106,10 +108,10 @@ pub async fn run(
                     url: url_trimmed.to_string(),
                 });
             println!(
-                "{} Added source '{}' ({})",
-                style("+").green().bold(),
-                style(&name).cyan(),
-                url_trimmed
+                "{} Added source {} {}",
+                palette::added(ui::glyph::add()),
+                palette::pkg(&name),
+                palette::dim(url_trimmed)
             );
         }
     }
@@ -134,16 +136,17 @@ pub async fn run(
         if is_new {
             println!(
                 "{} {} {}",
-                style("+").green().bold(),
-                style(name).cyan(),
-                format_spec(spec)
+                palette::added(ui::glyph::add()),
+                palette::pkg(name),
+                palette::version(format_spec(spec))
             );
         } else {
             println!(
-                "{} {} {} (updated)",
-                style("~").yellow().bold(),
-                style(name).cyan(),
-                format_spec(spec)
+                "{} {} {} {}",
+                palette::upgraded(ui::glyph::change()),
+                palette::pkg(name),
+                palette::version(format_spec(spec)),
+                palette::dim("(updated)"),
             );
         }
     }
@@ -162,10 +165,7 @@ pub async fn run(
         // Roll back the manifest to its original state
         if let Some(original) = original_manifest {
             let _ = std::fs::write(&manifest_path, original);
-            println!(
-                "{} Rolled back uvr.toml (resolution failed)",
-                style("!").yellow().bold()
-            );
+            ui::warn("Rolled back uvr.toml — resolution failed.");
         }
         return Err(e).context("Failed to resolve dependencies after add");
     }

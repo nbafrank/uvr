@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::installer::package_cache;
+
+use crate::ui;
 
 pub fn run_clean() -> Result<()> {
     let base = dirs::home_dir()
@@ -36,15 +37,12 @@ pub fn run_clean() -> Result<()> {
     }
 
     if count == 0 {
-        println!("{} Cache is already empty", style("✓").green().bold());
+        ui::success("Cache is already empty");
     } else {
-        let mb = bytes as f64 / 1_048_576.0;
-        println!(
-            "{} Cleared {} item(s) ({:.1} MB) from cache",
-            style("✓").green().bold(),
-            count,
-            mb,
-        );
+        ui::success(format!(
+            "Cleared {count} item(s) ({}) from cache",
+            ui::palette::format_bytes(bytes)
+        ));
     }
     Ok(())
 }

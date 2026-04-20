@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
 use uvr_core::installer::download::{DownloadSpec, Downloader};
@@ -14,7 +13,8 @@ use uvr_core::r_version::downloader::{patch_r_dylibs, patch_renviron_site, Platf
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
-use crate::commands::util::make_spinner;
+use crate::ui;
+use crate::ui::palette;
 
 pub async fn run(frozen: bool, no_dev: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -84,10 +84,7 @@ pub async fn run_inner(
         filtered.packages.retain(|p| !p.dev);
         let skipped = before - filtered.packages.len();
         if skipped > 0 {
-            println!(
-                "{} Skipping {skipped} dev-only package(s)",
-                console::style("→").blue().bold()
-            );
+            ui::bullet_dim(format!("Skipping {skipped} dev-only package(s)"));
         }
         filtered
     } else {
@@ -128,18 +125,20 @@ pub async fn install_from_lockfile(
         let current_minor = r_minor(current_r);
         let locked_minor = r_minor(locked_r);
         if looks_like_version(locked_r) && current_minor != locked_minor {
-            println!(
-                "{} R version changed ({} → {}), wiping library and reinstalling...",
-                style("!").yellow().bold(),
-                style(&locked_minor).dim(),
-                style(&current_minor).cyan(),
-            );
+            ui::warn(format!(
+                "R version changed ({} {} {}) — wiping library and reinstalling",
+                palette::dim(&locked_minor),
+                palette::dim(ui::glyph::arrow()),
+                palette::info(&current_minor),
+            ));
             if library.exists() {
                 std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
             }
             std::fs::create_dir_all(&library).context("Failed to recreate library directory")?;
         }
     }
+
+    let start = ui::now();
 
     let all_ordered = topological_install_order(&lockfile.packages)
         .context("Failed to determine install order")?;
@@ -159,7 +158,14 @@ pub async fn install_from_lockfile(
     }
 
     if to_install.is_empty() {
-        println!("{} All packages up to date", style("✓").green().bold());
+        ui::summary(
+            "Everything is up to date",
+            format!(
+                "{} package(s) in {}",
+                lockfile.packages.len(),
+                palette::format_duration(start.elapsed())
+            ),
+        );
         return Ok(());
     }
 
@@ -169,25 +175,12 @@ pub async fn install_from_lockfile(
     for pkg in &to_install {
         let old_ver = installed_version(&pkg.name, &library);
         if let Some(old) = &old_ver {
-            println!(
-                "  {} {} {} → {}",
-                style("↑").cyan(),
-                style(&pkg.name).cyan(),
-                style(old).dim(),
-                style(&pkg.version).green()
-            );
+            ui::row_upgrade(&pkg.name, old, &pkg.version);
             upgrade_count += 1;
         } else {
             new_count += 1;
         }
     }
-
-    let summary = match (new_count, upgrade_count) {
-        (n, 0) => format!("Installing {n} package(s)..."),
-        (0, u) => format!("Upgrading {u} package(s)..."),
-        (n, u) => format!("Installing {n} new, upgrading {u} package(s)..."),
-    };
-    println!("{} {}", style("→").blue().bold(), summary);
 
     let client = crate::commands::util::build_client()?;
 
@@ -209,16 +202,17 @@ pub async fn install_from_lockfile(
                         .into_iter()
                         .collect();
 
-                    println!(
-                        "\n{} Missing system dependencies for {} package(s):",
-                        style("⚠").yellow().bold(),
+                    println!();
+                    ui::warn(format!(
+                        "Missing system dependencies for {} package(s)",
                         missing.len()
-                    );
+                    ));
                     for (pkg_name, reqs) in &missing {
                         let names: Vec<&str> = reqs.iter().map(|r| r.package.as_str()).collect();
                         println!(
-                            "  {} requires: {}",
-                            style(pkg_name).cyan(),
+                            "  {} {} needs: {}",
+                            palette::dim(ui::glyph::bullet()),
+                            palette::pkg(pkg_name),
                             names.join(", ")
                         );
                     }
@@ -229,8 +223,9 @@ pub async fn install_from_lockfile(
                     } else {
                         format!("sudo apt-get install -y {}", all_pkgs.join(" "))
                     };
-                    println!("\n  Install with: {}\n", style(install_cmd).bold());
-                    println!("  Continuing installation (some packages may fail to compile)...\n");
+                    ui::hint(format!("Install with: {}", palette::bold(&install_cmd)));
+                    ui::hint("Continuing — some packages may fail to compile without these.");
+                    println!();
                 }
             }
         }
@@ -351,7 +346,7 @@ pub async fn install_from_lockfile(
         let p3m = match Platform::detect() {
             Ok(
                 platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64 | Platform::WindowsX86_64),
-            ) => P3MBinaryIndex::fetch(&client, &r_minor_str, platform).await,
+            ) => P3MBinaryIndex::fetch(&client, &r_minor_str, platform, bioc_release).await,
             _ => P3MBinaryIndex::empty(),
         };
 
@@ -391,18 +386,31 @@ pub async fn install_from_lockfile(
 
     let binary_count = plans.iter().filter(|p| p.is_binary).count();
     let source_count = plans.len() - binary_count;
+
+    // Compact plan line: "3 cached · 4 binary · 1 from source"
     if cache_hit_count > 0 || binary_count > 0 || source_count > 0 {
         let mut parts = Vec::new();
         if cache_hit_count > 0 {
-            parts.push(format!("{} cached", cache_hit_count));
+            parts.push(format!("{cache_hit_count} cached"));
         }
         if binary_count > 0 {
-            parts.push(format!("{} binary", binary_count));
+            parts.push(format!("{binary_count} binary"));
         }
         if source_count > 0 {
-            parts.push(format!("{} from source", source_count));
+            parts.push(format!("{source_count} from source"));
         }
-        println!("  {}", parts.join(", "));
+        let sep = format!(" {} ", ui::glyph::bullet());
+        let action = match (new_count, upgrade_count) {
+            (n, 0) => format!("Installing {n} package(s)"),
+            (0, u) => format!("Upgrading {u} package(s)"),
+            (n, u) => format!("Installing {n}, upgrading {u}"),
+        };
+        ui::info(format!(
+            "{} {} {}",
+            action,
+            palette::dim(ui::glyph::bullet()),
+            palette::dim(parts.join(&sep)),
+        ));
     }
 
     if !plans.is_empty() {
@@ -424,21 +432,16 @@ pub async fn install_from_lockfile(
 
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
-        let total = plans.len();
-        for (idx, (plan, result)) in plans.iter().zip(results.iter()).enumerate() {
-            let progress = format!("[{}/{}]", idx + 1, total);
-            let action = if result.used_binary {
-                "Installing"
+        // Aggregate progress bar — one line for the whole install phase.
+        let total = plans.len() as u64;
+        let pb = ui::make_aggregate_bar(total);
+        for (plan, result) in plans.iter().zip(results.iter()) {
+            let verb = if result.used_binary {
+                "installing"
             } else {
-                "Compiling"
+                "compiling"
             };
-            let pb = make_spinner(&format!(
-                "{} {} {} {}...",
-                style(&progress).dim(),
-                action,
-                plan.pkg.name,
-                plan.pkg.version
-            ));
+            pb.set_message(format!("{verb} {} {}", plan.pkg.name, plan.pkg.version));
 
             if result.used_binary {
                 install_binary_package(
@@ -449,21 +452,19 @@ pub async fn install_from_lockfile(
                 )
                 .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
             } else {
-                let prefix = format!(
-                    "{} Compiling {} {}",
-                    style(&progress).dim(),
-                    plan.pkg.name,
-                    plan.pkg.version
-                );
+                // For source compilation, surface the last build line as the bar message.
+                let name = plan.pkg.name.clone();
+                let version = plan.pkg.version.clone();
+                let pb_for_closure = pb.clone();
                 installer
                     .install_streaming(&result.path, &library, &plan.pkg.name, |line| {
-                        let short = if line.len() > 60 { &line[..60] } else { line };
-                        pb.set_message(format!("{prefix} ({short})"));
+                        let short: String = line.chars().take(50).collect();
+                        pb_for_closure.set_message(format!("compiling {name} {version} ({short})"));
                     })
                     .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
             }
 
-            pb.finish_and_clear();
+            pb.inc(1);
 
             // Store the newly installed package in the global cache for future reuse.
             let key = package_cache::cache_key(
@@ -479,13 +480,30 @@ pub async fn install_from_lockfile(
                 tracing::debug!("Failed to cache {}: {e}", plan.pkg.name);
             }
         }
+        pb.finish_and_clear();
     }
 
-    println!(
-        "{} {} package(s) installed",
-        style("✓").green().bold(),
-        to_install.len()
-    );
+    // Final summary: "✓ Ready — N packages in 1.8s" + cache hit rate subtitle.
+    let total_count = to_install.len();
+    let elapsed = palette::format_duration(start.elapsed());
+    let headline = match (new_count, upgrade_count) {
+        (n, 0) => format!("Installed {n} package(s) in {elapsed}"),
+        (0, u) => format!("Upgraded {u} package(s) in {elapsed}"),
+        (n, u) => format!("Installed {n}, upgraded {u} in {elapsed}"),
+    };
+    let mut sub_parts: Vec<String> = Vec::new();
+    if total_count > 0 {
+        let hit_pct = (cache_hit_count as f64 / total_count as f64 * 100.0).round() as u64;
+        sub_parts.push(format!("{hit_pct}% cache hit"));
+    }
+    if binary_count > 0 {
+        sub_parts.push(format!("{binary_count} binary"));
+    }
+    if source_count > 0 {
+        sub_parts.push(format!("{source_count} from source"));
+    }
+    let sep = format!(" {} ", ui::glyph::bullet());
+    ui::summary(headline, sub_parts.join(&sep));
 
     Ok(())
 }
@@ -584,7 +602,7 @@ pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &s
     })();
 
     if install_ok.is_ok() {
-        println!("  {} uvr R companion package installed", style("✓").green(),);
+        ui::bullet_dim("uvr R companion package installed");
     }
 }
 

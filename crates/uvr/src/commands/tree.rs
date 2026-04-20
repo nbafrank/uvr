@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use console::style;
 
 use uvr_core::project::Project;
+
+use crate::ui;
+use crate::ui::palette;
 
 pub fn run(depth: Option<usize>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
@@ -44,10 +46,12 @@ pub fn run(depth: Option<usize>) -> Result<()> {
     let max_depth = depth.unwrap_or(usize::MAX);
 
     println!(
-        "{} (R {})\n",
-        style(&project.manifest.project.name).bold(),
-        style(&lockfile.r.version).cyan()
+        "{} {} {}",
+        palette::bold(&project.manifest.project.name),
+        palette::dim(ui::glyph::bullet()),
+        palette::dim(format!("R {}", &lockfile.r.version)),
     );
+    println!();
 
     let mut ctx = TreeCtx {
         pkg_map: &pkg_map,
@@ -61,13 +65,18 @@ pub fn run(depth: Option<usize>) -> Result<()> {
         print_node(root, &mut ctx, "", is_last, dev, 0);
     }
 
-    // Count indirect deps
+    // Footer: direct / transitive / total.
     let indirect = lockfile.packages.len() - roots.len();
+    let sep = format!(" {} ", ui::glyph::bullet());
+    println!();
     println!(
-        "\n{} direct, {} transitive ({} total)",
-        roots.len(),
-        indirect,
-        lockfile.packages.len()
+        "{}",
+        palette::dim(format!(
+            "{} direct{sep}{} transitive{sep}{} total",
+            roots.len(),
+            indirect,
+            lockfile.packages.len(),
+        ))
     );
 
     Ok(())
@@ -90,12 +99,16 @@ fn print_node(
     is_dev: bool,
     depth: usize,
 ) {
-    let connector = if is_last { "└── " } else { "├── " };
+    let connector = if is_last {
+        ui::glyph::tree_last()
+    } else {
+        ui::glyph::tree_branch()
+    };
 
     let (version, deps) = ctx.pkg_map.get(name).copied().unwrap_or(("?", &[]));
 
     let dev_tag = if is_dev {
-        format!(" {}", style("[dev]").dim())
+        format!(" {}", palette::dim("[dev]"))
     } else {
         String::new()
     };
@@ -103,15 +116,17 @@ fn print_node(
     // A true cycle: this package is an ancestor of itself in the current path.
     let is_cycle = ctx.ancestors.contains(name);
     let cycle_tag = if is_cycle {
-        format!(" {}", style("(*)").yellow())
+        format!(" {}", palette::warn("(cycle)"))
     } else {
         String::new()
     };
 
     println!(
-        "{prefix}{connector}{} {}{dev_tag}{cycle_tag}",
-        style(name).cyan(),
-        style(format!("v{version}")).dim(),
+        "{}{}{} {}{dev_tag}{cycle_tag}",
+        palette::dim(prefix),
+        palette::dim(connector),
+        palette::pkg(name),
+        palette::version(version),
     );
 
     if is_cycle || depth >= ctx.max_depth {
@@ -120,7 +135,14 @@ fn print_node(
 
     ctx.ancestors.insert(name.to_string());
 
-    let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+    let child_prefix = format!(
+        "{prefix}{}",
+        if is_last {
+            ui::glyph::tree_space()
+        } else {
+            ui::glyph::tree_vert()
+        }
+    );
 
     let deps = deps.to_vec();
     for (j, dep) in deps.iter().enumerate() {

@@ -1,42 +1,46 @@
 use anyhow::Result;
-use console::style;
 
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_all, find_r_binary, query_r_version};
 use uvr_core::r_version::downloader::Platform;
 
+use crate::ui;
+use crate::ui::palette;
+
+/// Width for the label column in `check` rows, chosen so all labels align.
+const LABEL_W: usize = 28;
+
 pub fn run() -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
 
-    println!("{}\n", style("uvr doctor").bold().underlined());
+    println!(
+        "{} {}",
+        palette::info(ui::glyph::info()),
+        palette::bold("uvr doctor"),
+    );
 
-    // ── Platform ──
+    ui::section("Platform");
     check_platform();
 
-    // ── R installations ──
+    ui::section("R installations");
     check_r_installations(&mut issues);
 
-    // ── Build tools ──
+    ui::section("Build tools");
     check_build_tools(&mut issues);
 
-    // ── Project status ──
+    ui::section("Project");
     check_project(&mut issues);
 
-    // ── Cache ──
+    ui::section("Cache");
     check_cache();
 
-    // ── Summary ──
     println!();
     if issues.is_empty() {
-        println!("{} No issues found", style("✓").green().bold());
+        ui::success("All checks passed — you're good to go.");
     } else {
-        println!(
-            "{} Found {} issue(s):\n",
-            style("!").yellow().bold(),
-            issues.len()
-        );
+        ui::warn(format!("{} issue(s) to address", issues.len()));
         for issue in &issues {
-            println!("  {} {issue}", style("•").yellow());
+            println!("  {} {}", palette::warn(ui::glyph::bullet()), issue);
         }
     }
 
@@ -46,63 +50,72 @@ pub fn run() -> Result<()> {
 fn check_platform() {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    println!("  {} Platform: {os}/{arch}", style("•").dim());
+    ui::check(true, "OS / architecture", format!("{os}/{arch}"), LABEL_W);
 
     match Platform::detect() {
         Ok(p) => {
             let has_binaries = p.is_macos() || p.is_windows();
             if has_binaries {
-                println!(
-                    "  {} P3M binary packages: {}",
-                    style("•").dim(),
-                    style("available").green()
+                ui::check(
+                    true,
+                    "P3M binary packages",
+                    palette::success("available"),
+                    LABEL_W,
                 );
             } else {
-                println!(
-                    "  {} P3M binary packages: {} (source-only)",
-                    style("•").dim(),
-                    style("unavailable").yellow()
+                ui::check(
+                    true,
+                    "P3M binary packages",
+                    format!(
+                        "{} {}",
+                        palette::warn("unavailable"),
+                        palette::dim("(source-only)")
+                    ),
+                    LABEL_W,
                 );
             }
         }
         Err(_) => {
-            println!(
-                "  {} Platform: {}",
-                style("•").dim(),
-                style("unsupported").red()
+            ui::check(
+                false,
+                "Platform support",
+                palette::fail("unsupported"),
+                LABEL_W,
             );
         }
     }
-    println!();
 }
 
 fn check_r_installations(issues: &mut Vec<String>) {
-    println!("{}", style("R installations").bold());
-
     let installations = find_all();
     if installations.is_empty() {
-        println!(
-            "  {} {}",
-            style("✗").red(),
-            style("No R installations found").red()
+        ui::check(
+            false,
+            "R installation",
+            palette::fail("none found"),
+            LABEL_W,
         );
         issues.push("No R installation found. Install with: uvr r install <version>".into());
-        println!();
         return;
     }
 
     for inst in &installations {
         let tag = if inst.managed {
-            style("managed").cyan().to_string()
+            palette::info("managed").to_string()
         } else {
-            style("system").dim().to_string()
+            palette::dim("system").to_string()
         };
-        println!(
-            "  {} R {} at {} ({})",
-            style("✓").green(),
-            style(&inst.version).cyan(),
-            style(inst.binary.display()).dim(),
-            tag,
+        let label = format!("R {}", inst.version);
+        ui::check(
+            true,
+            &label,
+            format!(
+                "{} {} {}",
+                palette::dim(inst.binary.display().to_string()),
+                palette::dim(ui::glyph::bullet()),
+                tag
+            ),
+            LABEL_W,
         );
     }
 
@@ -114,16 +127,18 @@ fn check_r_installations(issues: &mut Vec<String>) {
         Ok(ref binary) => {
             if let Some(v) = query_r_version(binary) {
                 println!(
-                    "  {} Active R: {} ({})",
-                    style("→").blue(),
-                    style(&v).cyan().bold(),
-                    binary.display()
+                    "  {} {:<LABEL_W$} {} {}",
+                    palette::info(ui::glyph::arrow()),
+                    "active",
+                    palette::info(&v),
+                    palette::dim(binary.display().to_string()),
                 );
             } else {
-                println!(
-                    "  {} R binary found but could not query version: {}",
-                    style("✗").red(),
-                    binary.display()
+                ui::check(
+                    false,
+                    "active R",
+                    palette::fail(format!("no response at {}", binary.display())),
+                    LABEL_W,
                 );
                 issues.push(format!(
                     "R at {} is not responding — it may be corrupt",
@@ -135,29 +150,29 @@ fn check_r_installations(issues: &mut Vec<String>) {
             issues.push(format!("Cannot select R binary: {e}"));
         }
     }
-    println!();
 }
 
 fn check_build_tools(issues: &mut Vec<String>) {
-    println!("{}", style("Build tools").bold());
-
-    // cargo (for building from source / installing uvr)
     let has_cargo = which::which("cargo").is_ok();
-    print_check("cargo (Rust toolchain)", has_cargo, None);
+    ui::check(
+        has_cargo,
+        "cargo (Rust toolchain)",
+        if has_cargo {
+            palette::success("found").to_string()
+        } else {
+            palette::fail("not found").to_string()
+        },
+        LABEL_W,
+    );
     if !has_cargo {
-        // Check ~/.cargo/bin/cargo as fallback
         let home_cargo = dirs::home_dir()
             .map(|h| h.join(".cargo").join("bin").join("cargo"))
             .filter(|p| p.exists());
         if home_cargo.is_some() {
-            println!(
-                "    {} Found at ~/.cargo/bin/cargo (not on PATH)",
-                style("→").blue()
-            );
+            ui::hint("Found at ~/.cargo/bin/cargo — add it to PATH.");
         }
     }
 
-    // Platform-specific build tools
     if cfg!(target_os = "macos") {
         check_macos_tools(issues);
     } else if cfg!(target_os = "windows") {
@@ -165,29 +180,24 @@ fn check_build_tools(issues: &mut Vec<String>) {
     } else if cfg!(target_os = "linux") {
         check_linux_tools(issues);
     }
-
-    println!();
 }
 
 fn check_macos_tools(issues: &mut Vec<String>) {
-    // Xcode command line tools
     let has_xcode = std::process::Command::new("xcode-select")
         .arg("-p")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    print_check("Xcode command line tools", has_xcode, None);
+    simple_check("Xcode command line tools", has_xcode, None);
     if !has_xcode {
         issues.push("Xcode CLI tools not installed. Run: xcode-select --install".into());
     }
 
-    // Homebrew
     let has_brew = which::which("brew").is_ok();
-    print_check("Homebrew", has_brew, Some("needed for system library deps"));
+    simple_check("Homebrew", has_brew, Some("needed for system library deps"));
 }
 
 fn check_windows_tools(issues: &mut Vec<String>) {
-    // Rtools
     let rtools_found = [
         std::env::var("RTOOLS45_HOME").ok(),
         std::env::var("RTOOLS44_HOME").ok(),
@@ -200,7 +210,7 @@ fn check_windows_tools(issues: &mut Vec<String>) {
     .flatten()
     .any(|p| std::path::Path::new(&p).exists());
 
-    print_check(
+    simple_check(
         "Rtools",
         rtools_found,
         Some("needed to compile R packages from source"),
@@ -213,63 +223,64 @@ fn check_windows_tools(issues: &mut Vec<String>) {
 }
 
 fn check_linux_tools(issues: &mut Vec<String>) {
-    // gcc/make for source compilation
     let has_gcc = which::which("gcc").is_ok() || which::which("cc").is_ok();
-    print_check("C compiler (gcc/cc)", has_gcc, None);
+    simple_check("C compiler (gcc/cc)", has_gcc, None);
     if !has_gcc {
         issues
             .push("No C compiler found. Install with: sudo apt-get install build-essential".into());
     }
 
     let has_make = which::which("make").is_ok();
-    print_check("make", has_make, None);
+    simple_check("make", has_make, None);
 }
 
 fn check_project(issues: &mut Vec<String>) {
-    println!("{}", style("Project").bold());
-
     match Project::find_cwd() {
         Ok(project) => {
-            println!(
-                "  {} Manifest: {}",
-                style("✓").green(),
-                style(project.manifest_path().display()).dim()
+            ui::check(
+                true,
+                "Manifest",
+                palette::dim(project.manifest_path().display().to_string()),
+                LABEL_W,
             );
 
-            // R version constraint
             if let Some(ref rv) = project.manifest.project.r_version {
-                println!("  {} R constraint: {}", style("•").dim(), style(rv).cyan());
+                ui::check(true, "R constraint", palette::info(rv), LABEL_W);
             }
 
-            // Lockfile
             match project.load_lockfile() {
                 Ok(Some(lockfile)) => {
-                    println!(
-                        "  {} Lockfile: {} package(s), R {}",
-                        style("✓").green(),
-                        lockfile.packages.len(),
-                        style(&lockfile.r.version).cyan()
+                    ui::check(
+                        true,
+                        "Lockfile",
+                        format!(
+                            "{} package(s), R {}",
+                            lockfile.packages.len(),
+                            palette::info(&lockfile.r.version)
+                        ),
+                        LABEL_W,
                     );
                 }
                 Ok(None) => {
-                    println!(
-                        "  {} Lockfile: {}",
-                        style("!").yellow(),
-                        style("not found — run `uvr lock`").yellow()
+                    ui::check(
+                        false,
+                        "Lockfile",
+                        palette::warn("not found — run `uvr lock`"),
+                        LABEL_W,
                     );
                     issues.push("No lockfile found. Run: uvr lock".into());
                 }
                 Err(e) => {
-                    println!(
-                        "  {} Lockfile: {}",
-                        style("✗").red(),
-                        style(format!("error: {e}")).red()
+                    ui::check(
+                        false,
+                        "Lockfile",
+                        palette::fail(format!("error: {e}")),
+                        LABEL_W,
                     );
                     issues.push(format!("Lockfile is invalid: {e}"));
                 }
             }
 
-            // Library directory
             let lib = project.library_path();
             if lib.exists() {
                 let pkg_count = std::fs::read_dir(&lib)
@@ -280,77 +291,73 @@ fn check_project(issues: &mut Vec<String>) {
                             .count()
                     })
                     .unwrap_or(0);
-                println!(
-                    "  {} Library: {} package(s) installed",
-                    style("•").dim(),
-                    pkg_count
+                ui::check(
+                    true,
+                    "Library",
+                    format!("{pkg_count} package(s) installed"),
+                    LABEL_W,
                 );
             } else {
-                println!(
-                    "  {} Library: {}",
-                    style("•").dim(),
-                    style("not yet created").dim()
-                );
+                ui::check(true, "Library", palette::dim("not yet created"), LABEL_W);
             }
         }
         Err(_) => {
             println!(
                 "  {} {}",
-                style("•").dim(),
-                style("Not inside a uvr project").dim()
+                palette::dim(ui::glyph::bullet()),
+                palette::dim("Not inside a uvr project")
             );
         }
     }
-    println!();
 }
 
 fn check_cache() {
-    println!("{}", style("Cache").bold());
     let cache_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".uvr")
         .join("cache");
     if cache_dir.exists() {
         let (count, size) = dir_stats(&cache_dir);
-        println!(
-            "  {} Downloads: {} file(s), {}",
-            style("•").dim(),
-            count,
-            human_size(size)
+        ui::check(
+            true,
+            "Downloads",
+            format!("{count} file(s), {}", palette::format_bytes(size)),
+            LABEL_W,
         );
     } else {
-        println!("  {} Downloads: {}", style("•").dim(), style("empty").dim());
+        ui::check(true, "Downloads", palette::dim("empty"), LABEL_W);
     }
 
     let (pkg_count, pkg_bytes) = uvr_core::installer::package_cache::cache_stats();
     if pkg_count > 0 {
-        println!(
-            "  {} Packages: {} entries, {}",
-            style("•").dim(),
-            pkg_count,
-            human_size(pkg_bytes)
+        ui::check(
+            true,
+            "Packages",
+            format!("{pkg_count} entries, {}", palette::format_bytes(pkg_bytes)),
+            LABEL_W,
         );
     } else {
-        println!("  {} Packages: {}", style("•").dim(), style("empty").dim());
+        ui::check(true, "Packages", palette::dim("empty"), LABEL_W);
     }
 }
 
-fn print_check(name: &str, ok: bool, note: Option<&str>) {
-    let marker = if ok {
-        style("✓").green()
+/// Simple yes/no check row using the standard column width.
+fn simple_check(name: &str, ok: bool, note: Option<&str>) {
+    let status: String = if ok {
+        palette::success("found").to_string()
     } else {
-        style("✗").red()
-    };
-    let status = if ok {
-        style("found").green().to_string()
-    } else {
-        let mut s = style("not found").red().to_string();
-        if let Some(n) = note {
-            s = format!("{s} ({n})");
+        let n = note.unwrap_or_default();
+        if n.is_empty() {
+            palette::fail("not found").to_string()
+        } else {
+            format!(
+                "{} {}",
+                palette::fail("not found"),
+                palette::dim(format!("({n})"))
+            )
         }
-        s
     };
-    println!("  {marker} {name}: {status}");
+    ui::check(ok, name, status, LABEL_W);
 }
 
 fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
@@ -367,16 +374,4 @@ fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
         }
     }
     (count, size)
-}
-
-fn human_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
 }

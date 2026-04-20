@@ -27,21 +27,50 @@ impl P3MBinaryIndex {
     }
 
     /// Fetch (and cache) the P3M binary PACKAGES index for the given R minor version
-    /// and platform. Returns an empty index on any error so callers fall back to source.
-    pub async fn fetch(client: &reqwest::Client, r_minor: &str, platform: Platform) -> Self {
+    /// and platform. When `bioc_release` is provided, also fetches the matching P3M
+    /// Bioconductor binary index and merges it in — so Bioc packages like edgeR get
+    /// pre-compiled binaries instead of requiring local compilation (which needs
+    /// gfortran etc. on macOS). Returns an empty index on any error so callers fall
+    /// back to source.
+    pub async fn fetch(
+        client: &reqwest::Client,
+        r_minor: &str,
+        platform: Platform,
+        bioc_release: Option<&str>,
+    ) -> Self {
         let Some(info) = platform_info(platform) else {
             return Self::empty(); // unsupported platform (e.g. Linux — no P3M binaries)
         };
-        match fetch_inner(client, r_minor, info).await {
-            Ok(idx) => idx,
+
+        let cran_fut = fetch_repo_index(client, r_minor, &info, P3MRepo::Cran);
+        let bioc_fut = async {
+            match bioc_release {
+                Some(release) => fetch_repo_index(client, r_minor, &info, P3MRepo::Bioc(release))
+                    .await
+                    .ok(),
+                None => None,
+            }
+        };
+        let (cran_result, bioc_result) = tokio::join!(cran_fut, bioc_fut);
+
+        let mut packages: HashMap<String, (String, String)> = HashMap::new();
+        match cran_result {
+            Ok(cran) => packages.extend(cran.packages),
             Err(e) => {
                 tracing::warn!(
-                    "P3M binary index unavailable ({}), falling back to source",
+                    "P3M CRAN binary index unavailable ({}), falling back to source",
                     e
                 );
-                Self::empty()
             }
         }
+        if let Some(bioc) = bioc_result {
+            // CRAN entries take precedence on name conflicts — extend(...) would
+            // overwrite, so insert only if not already present.
+            for (name, entry) in bioc.packages {
+                packages.entry(name).or_insert(entry);
+            }
+        }
+        P3MBinaryIndex { packages }
     }
 
     /// Return the binary download URL if P3M has a binary for the exact (name, version).
@@ -53,22 +82,60 @@ impl P3MBinaryIndex {
     }
 }
 
-async fn fetch_inner(
+/// Which binary repo to query. Each has a different URL prefix.
+///
+/// CRAN binaries come from P3M (Posit Package Manager).
+/// Bioc binaries come directly from bioconductor.org — P3M does not mirror them.
+#[derive(Clone, Copy)]
+enum P3MRepo<'a> {
+    Cran,
+    Bioc(&'a str), // Bioc release (e.g. "3.21")
+}
+
+impl<'a> P3MRepo<'a> {
+    fn url_prefix(&self) -> String {
+        match self {
+            P3MRepo::Cran => "https://packagemanager.posit.co/cran/latest".to_string(),
+            P3MRepo::Bioc(release) => {
+                format!("https://bioconductor.org/packages/{release}/bioc")
+            }
+        }
+    }
+    fn cache_tag(&self) -> String {
+        match self {
+            P3MRepo::Cran => "cran".to_string(),
+            P3MRepo::Bioc(release) => format!("bioc-{release}"),
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            P3MRepo::Cran => "CRAN".to_string(),
+            P3MRepo::Bioc(release) => format!("Bioc {release}"),
+        }
+    }
+}
+
+async fn fetch_repo_index(
     client: &reqwest::Client,
     r_minor: &str,
-    platform_info: PlatformInfo,
+    platform_info: &PlatformInfo,
+    repo: P3MRepo<'_>,
 ) -> Result<P3MBinaryIndex> {
-    let cache = cache_path(r_minor, platform_info.cache_key);
+    let cache = cache_path(
+        r_minor,
+        &format!("{}-{}", platform_info.cache_key, repo.cache_tag()),
+    );
 
     // Use today's cached file if present.
     let (text, from_cache) = if let Ok(cached) = std::fs::read_to_string(&cache) {
         (cached, true)
     } else {
         let url = format!(
-            "https://packagemanager.posit.co/cran/latest/bin/{}/contrib/{r_minor}/PACKAGES.gz",
+            "{}/bin/{}/contrib/{r_minor}/PACKAGES.gz",
+            repo.url_prefix(),
             platform_info.url_segment
         );
-        info!("Fetching P3M binary index from {url}");
+        info!("Fetching P3M {} binary index from {url}", repo.label());
         let bytes = client
             .get(&url)
             .send()
@@ -82,7 +149,7 @@ async fn fetch_inner(
         (text, false)
     };
 
-    let index = parse_index(&text, r_minor, &platform_info);
+    let index = parse_index(&text, r_minor, platform_info, &repo);
 
     // Write cache only AFTER successful parse — avoids poisoning the
     // daily cache with corrupt or truncated network responses.
@@ -96,9 +163,15 @@ async fn fetch_inner(
     Ok(index)
 }
 
-fn parse_index(text: &str, r_minor: &str, info: &PlatformInfo) -> P3MBinaryIndex {
+fn parse_index(
+    text: &str,
+    r_minor: &str,
+    info: &PlatformInfo,
+    repo: &P3MRepo<'_>,
+) -> P3MBinaryIndex {
     let base = format!(
-        "https://packagemanager.posit.co/cran/latest/bin/{}/contrib/{r_minor}",
+        "{}/bin/{}/contrib/{r_minor}",
+        repo.url_prefix(),
         info.url_segment
     );
     let ext = info.pkg_ext;
@@ -124,7 +197,11 @@ fn parse_index(text: &str, r_minor: &str, info: &PlatformInfo) -> P3MBinaryIndex
             packages.insert(n, (normalize_version(&v), url));
         }
     }
-    info!("P3M binary index: {} packages", packages.len());
+    info!(
+        "P3M {} binary index: {} packages",
+        repo.label(),
+        packages.len()
+    );
     P3MBinaryIndex { packages }
 }
 
@@ -188,7 +265,7 @@ Version: 1.1.4
             cache_key: "macos-arm64",
             pkg_ext: "tgz",
         };
-        let index = parse_index(text, "4.4", &info);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         assert_eq!(index.packages.len(), 2);
 
         let url = index.binary_url("ggplot2", "3.5.1").unwrap();
@@ -208,7 +285,7 @@ Version: 1.1.4
             cache_key: "windows",
             pkg_ext: "zip",
         };
-        let index = parse_index(text, "4.4", &info);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         let url = index.binary_url("jsonlite", "1.8.8").unwrap();
         assert!(url.contains("jsonlite_1.8.8.zip"));
         assert!(url.contains("/windows/"));
@@ -221,8 +298,22 @@ Version: 1.1.4
             cache_key: "macos-arm64",
             pkg_ext: "tgz",
         };
-        let index = parse_index("", "4.4", &info);
+        let index = parse_index("", "4.4", &info, &P3MRepo::Cran);
         assert_eq!(index.packages.len(), 0);
+    }
+
+    #[test]
+    fn parse_index_bioc_uses_bioconductor_url() {
+        let text = "Package: edgeR\nVersion: 4.6.3\n\n";
+        let info = PlatformInfo {
+            url_segment: "macosx/big-sur-arm64",
+            cache_key: "macos-arm64",
+            pkg_ext: "tgz",
+        };
+        let index = parse_index(text, "4.5", &info, &P3MRepo::Bioc("3.21"));
+        let url = index.binary_url("edgeR", "4.6.3").unwrap();
+        assert!(url.contains("bioconductor.org/packages/3.21/bioc/bin"));
+        assert!(url.contains("edgeR_4.6.3.tgz"));
     }
 
     #[test]
@@ -233,7 +324,7 @@ Version: 1.1.4
             cache_key: "macos-arm64",
             pkg_ext: "tgz",
         };
-        let index = parse_index(text, "4.4", &info);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         // Wrong version → None
         assert!(index.binary_url("ggplot2", "3.4.0").is_none());
         // Wrong name → None
@@ -249,7 +340,7 @@ Version: 1.1.4
             cache_key: "macos-arm64",
             pkg_ext: "tgz",
         };
-        let index = parse_index(text, "4.4", &info);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         // The lockfile stores the normalized version
         let normalized = crate::resolver::normalize_version("14.2.2-1");
         assert!(index.binary_url("RcppArmadillo", &normalized).is_some());

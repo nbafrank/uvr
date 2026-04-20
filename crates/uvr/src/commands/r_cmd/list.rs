@@ -1,8 +1,10 @@
 use anyhow::Result;
-use console::style;
 
 use uvr_core::r_version::detector::find_all;
 use uvr_core::r_version::downloader::{fetch_available_versions, Platform};
+
+use crate::ui;
+use crate::ui::palette;
 
 pub async fn run(all: bool) -> Result<()> {
     let installations = find_all();
@@ -18,35 +20,45 @@ pub async fn run(all: bool) -> Result<()> {
         let installed: std::collections::HashSet<&str> =
             installations.iter().map(|i| i.version.as_str()).collect();
 
-        println!("{}", style("Available R versions:").bold());
+        println!("{}", palette::bold("Available R versions"));
         for ver in available.iter().rev() {
             if installed.contains(ver.as_str()) {
-                println!("  {} {}", style(ver).cyan(), style("[installed]").green());
+                println!(
+                    "  {} {} {}",
+                    palette::success(ui::glyph::success()),
+                    palette::info(ver),
+                    palette::dim("[installed]"),
+                );
             } else {
-                println!("  {}", style(ver).dim());
+                println!(
+                    "  {} {}",
+                    palette::dim(ui::glyph::bullet()),
+                    palette::dim(ver),
+                );
             }
         }
         return Ok(());
     }
 
     if installations.is_empty() {
-        println!("No R installations found.");
-        println!("Install R with:  uvr r install <version>");
+        ui::warn("No R installations found.");
+        ui::hint("Install R with: uvr r install <version>");
         return Ok(());
     }
 
-    println!("{}", style("Installed R versions:").bold());
+    println!("{}", palette::bold("Installed R versions"));
     for inst in &installations {
-        let label = if inst.managed {
-            format!("{} {}", style(&inst.version).cyan(), style("[uvr]").dim())
+        let tag = if inst.managed {
+            palette::info("[uvr-managed]").to_string()
         } else {
-            format!(
-                "{} {}",
-                style(&inst.version).cyan(),
-                style(format!("[system: {}]", inst.binary.display())).dim()
-            )
+            palette::dim(format!("[system: {}]", inst.binary.display())).to_string()
         };
-        println!("  {label}");
+        println!(
+            "  {} {} {}",
+            palette::success(ui::glyph::success()),
+            palette::info(&inst.version),
+            tag,
+        );
     }
 
     Ok(())
