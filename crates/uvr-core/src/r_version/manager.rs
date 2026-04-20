@@ -31,4 +31,32 @@ impl RManager {
             .map(|i| i.binary)
             .ok_or_else(|| UvrError::Other(format!("R {version} is not installed")))
     }
+
+    /// Remove a uvr-managed R installation at `~/.uvr/r-versions/<version>/`.
+    /// Only touches uvr-managed installs — system R installations are left alone.
+    pub fn uninstall(version: &str) -> Result<std::path::PathBuf> {
+        if version.is_empty()
+            || version.contains('/')
+            || version.contains('\\')
+            || version.contains("..")
+            || version.starts_with('.')
+        {
+            return Err(UvrError::Other(format!("Invalid R version: {version:?}")));
+        }
+        let install_dir = dirs::home_dir()
+            .ok_or_else(|| UvrError::Other("Cannot determine home directory".into()))?
+            .join(".uvr")
+            .join("r-versions")
+            .join(version);
+        if !install_dir.exists() {
+            return Err(UvrError::Other(format!(
+                "R {version} is not installed at {}",
+                install_dir.display()
+            )));
+        }
+        std::fs::remove_dir_all(&install_dir).map_err(|e| {
+            UvrError::Other(format!("Failed to remove {}: {e}", install_dir.display()))
+        })?;
+        Ok(install_dir)
+    }
 }

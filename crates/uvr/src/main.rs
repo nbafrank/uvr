@@ -92,6 +92,9 @@ async fn run() -> Result<()> {
             Some(RCommands::Install(args)) => {
                 commands::r_cmd::install::run(args.version).await?;
             }
+            Some(RCommands::Uninstall(args)) => {
+                commands::r_cmd::uninstall::run(args.version)?;
+            }
             Some(RCommands::List(args)) => {
                 commands::r_cmd::list::run(args.all).await?;
             }
@@ -107,6 +110,7 @@ async fn run() -> Result<()> {
                     "Manage R versions",
                     &[
                         ("uvr r install <ver>", "Download and install an R version"),
+                        ("uvr r uninstall <ver>", "Remove an uvr-managed R version"),
                         ("uvr r list", "List installed R versions"),
                         ("uvr r use <ver>", "Set the R version constraint"),
                         ("uvr r pin <ver>", "Write an exact R version to .r-version"),
@@ -164,6 +168,12 @@ fn hint_for(msg: &str) -> Option<&'static str> {
         Some("Run `uvr r install <version>` or ensure R is on PATH.")
     } else if m.contains("base r package") {
         Some("Remove this package from your manifest — base packages ship with R.")
+    } else if m.contains("emutls_w") || m.contains("/opt/gfortran") {
+        Some(
+            "Missing Fortran toolchain on macOS. Install the CRAN gfortran build from \
+             https://mac.r-project.org/tools/ or run `brew install gcc` — required for \
+             source packages with Fortran (e.g. edgeR, limma).",
+        )
     } else {
         None
     }

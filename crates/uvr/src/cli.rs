@@ -272,6 +272,9 @@ pub enum RCommands {
     /// Download and install a specific R version
     Install(RInstallArgs),
 
+    /// Remove a uvr-managed R installation
+    Uninstall(RUninstallArgs),
+
     /// List installed R versions
     List(RListArgs),
 
@@ -285,6 +288,12 @@ pub enum RCommands {
 #[derive(Debug, Args)]
 pub struct RInstallArgs {
     /// R version to install, e.g. "4.3.2"
+    pub version: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RUninstallArgs {
+    /// R version to remove, e.g. "4.3.2"
     pub version: String,
 }
 
