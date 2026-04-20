@@ -94,7 +94,8 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     Ok(())
 }
 
-const RPROFILE_MARKER: &str = "# >>> uvr >>>";
+const RPROFILE_START: &str = "# >>> uvr >>>";
+const RPROFILE_END: &str = "# <<< uvr <<<";
 const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- file.path(getwd(), ".uvr", "library")
@@ -109,7 +110,13 @@ local({
       if (n_locked > 0 && n_installed < n_locked) {
         message("uvr: ", n_locked - n_installed, " of ", n_locked,
                 " package(s) not installed. Run uvr::sync() to install.")
+      } else if (n_locked > 0) {
+        message("uvr: library linked (", n_installed, " packages)")
+      } else {
+        message("uvr: library active, but uvr.lock is empty. Run uvr::lock() to populate it.")
       }
+    } else {
+      message("uvr: library active, but no uvr.lock found. Run uvr::lock() to create one.")
     }
   }
 })
@@ -119,20 +126,74 @@ local({
 pub fn ensure_rprofile(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".Rprofile");
 
-    if path.exists() {
-        let existing = std::fs::read_to_string(&path)?;
-        if existing.contains(RPROFILE_MARKER) {
-            return Ok(());
+    if !path.exists() {
+        return std::fs::write(&path, RPROFILE_SNIPPET);
+    }
+
+    let existing = std::fs::read_to_string(&path)?;
+    if let Some(updated) = refresh_uvr_block(&existing, RPROFILE_SNIPPET) {
+        if updated != existing {
+            std::fs::write(&path, updated)?;
         }
-        let mut content = existing;
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
+        return Ok(());
+    }
+
+    // No uvr block yet — append one.
+    let mut content = existing;
+    if !content.ends_with('\n') {
         content.push('\n');
-        content.push_str(RPROFILE_SNIPPET);
-        std::fs::write(&path, content)
-    } else {
-        std::fs::write(&path, RPROFILE_SNIPPET)
+    }
+    content.push('\n');
+    content.push_str(RPROFILE_SNIPPET);
+    std::fs::write(&path, content)
+}
+
+/// If `existing` already contains a uvr-managed block (delimited by the start/end markers),
+/// return a new string with that block replaced by `snippet`. Returns `None` when no block
+/// is found so the caller can decide to append.
+fn refresh_uvr_block(existing: &str, snippet: &str) -> Option<String> {
+    let start = existing.find(RPROFILE_START)?;
+    let rest = &existing[start..];
+    let end_rel = rest.find(RPROFILE_END)?;
+    let end = start + end_rel + RPROFILE_END.len();
+    let mut out = String::with_capacity(existing.len() + snippet.len());
+    out.push_str(&existing[..start]);
+    out.push_str(snippet.trim_end_matches('\n'));
+    out.push_str(&existing[end..]);
+    Some(out)
+}
+
+#[cfg(test)]
+mod rprofile_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_replaces_outdated_block() {
+        let old = "# prelude\n\n# >>> uvr >>>\nlocal({ old_body })\n# <<< uvr <<<\n";
+        let new = refresh_uvr_block(old, RPROFILE_SNIPPET).expect("block should be found");
+        assert!(new.starts_with("# prelude\n\n# >>> uvr >>>\n"));
+        assert!(new.contains("library linked"));
+        assert!(!new.contains("old_body"));
+    }
+
+    #[test]
+    fn refresh_preserves_surrounding_content() {
+        let existing = "options(foo = 1)\n# >>> uvr >>>\nold\n# <<< uvr <<<\noptions(bar = 2)\n";
+        let new = refresh_uvr_block(existing, RPROFILE_SNIPPET).unwrap();
+        assert!(new.starts_with("options(foo = 1)\n"));
+        assert!(new.ends_with("options(bar = 2)\n"));
+    }
+
+    #[test]
+    fn refresh_returns_none_without_markers() {
+        assert!(refresh_uvr_block("options(foo = 1)\n", RPROFILE_SNIPPET).is_none());
+    }
+
+    #[test]
+    fn refresh_is_idempotent() {
+        let existing = RPROFILE_SNIPPET.to_string();
+        let new = refresh_uvr_block(&existing, RPROFILE_SNIPPET).unwrap();
+        assert_eq!(new, existing);
     }
 }
 
