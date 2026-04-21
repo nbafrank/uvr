@@ -152,7 +152,11 @@ fn render_error(e: &anyhow::Error) {
         Some(context_lines.join("\n"))
     };
 
-    let hint = hint_for(&headline);
+    let full = match &context {
+        Some(c) => format!("{headline}\n{c}"),
+        None => headline.clone(),
+    };
+    let hint = hint_for(&full);
     ui::error_block(&headline, context.as_deref(), hint);
 }
 
