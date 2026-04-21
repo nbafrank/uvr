@@ -135,13 +135,15 @@ impl Manifest {
     /// - `Suggests:` → `dev_dependencies`
     /// - `Depends: R (>= x.y.z)` → `project.r_version`
     /// - Non-R entries in `Depends:` are merged into `dependencies`
+    /// - `Remotes:` entries override matching `Imports:` / `Depends:` entries
+    ///   with git-source specs (github only for now).
     pub fn from_description_str(content: &str) -> Result<Self> {
         let fields = parse_dcf(content);
 
         let name = fields
             .get("Package")
             .map(|s| s.as_str())
-            .unwrap_or("unnamed")
+            .unwrap_or("")
             .to_string();
 
         let r_version = fields
@@ -166,6 +168,19 @@ impl Manifest {
         if let Some(suggests) = fields.get("Suggests") {
             for (pkg, spec) in parse_dep_field(suggests) {
                 dev_dependencies.insert(pkg, spec);
+            }
+        }
+
+        // Remotes override matching Imports/Depends/Suggests entries — they
+        // declare the *source* for a dep already listed by name above.
+        if let Some(remotes) = fields.get("Remotes") {
+            for (pkg, spec) in parse_remotes_field(remotes) {
+                let target = if dev_dependencies.contains_key(&pkg) {
+                    &mut dev_dependencies
+                } else {
+                    &mut dependencies
+                };
+                target.insert(pkg, spec);
             }
         }
 
@@ -242,6 +257,79 @@ fn parse_dep_field(field: &str) -> Vec<(String, DependencySpec)> {
         if !name.is_empty() {
             result.push((name, spec));
         }
+    }
+    result
+}
+
+/// Parse an R `Remotes:` field into `(package_name, DependencySpec)` pairs.
+///
+/// Supports devtools/remotes-style GitHub entries:
+/// - `user/repo` → `git = "user/repo"`
+/// - `user/repo@ref` → `git = "user/repo", rev = "ref"`
+/// - `github::user/repo[@ref]` → same (explicit prefix)
+/// - `pkgname=user/repo[@ref]` → explicit package name binding
+///
+/// Entries with unsupported prefixes (`gitlab::`, `bitbucket::`, `git::`,
+/// `url::`, `local::`, `bioc::`) are skipped for now — the caller keeps
+/// whatever version-based spec it already had from `Imports:`.
+fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
+    let mut result = Vec::new();
+    for entry in field.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        // Skip non-GitHub remote types we don't translate yet.
+        if let Some((prefix, _)) = entry.split_once("::") {
+            if prefix != "github" {
+                continue;
+            }
+        }
+        let body = entry.strip_prefix("github::").unwrap_or(entry);
+
+        // Optional `pkgname=` override.
+        let (explicit_name, path) = match body.split_once('=') {
+            Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
+                (Some(n.trim().to_string()), p.trim())
+            }
+            _ => (None, body),
+        };
+
+        // Split off `@ref` (branch/tag/SHA) and optional `#PR` (dropped).
+        let (repo_path, rev) = match path.split_once('@') {
+            Some((r, ref_)) => {
+                let ref_ = ref_.split('#').next().unwrap_or(ref_).trim();
+                let rev = if ref_.is_empty() {
+                    None
+                } else {
+                    Some(ref_.to_string())
+                };
+                (r.trim(), rev)
+            }
+            None => (path.split('#').next().unwrap_or(path).trim(), None),
+        };
+
+        if !repo_path.contains('/') {
+            continue;
+        }
+        let pkg_name = explicit_name.unwrap_or_else(|| {
+            repo_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(repo_path)
+                .to_string()
+        });
+        if pkg_name.is_empty() {
+            continue;
+        }
+
+        let spec = DependencySpec::Detailed(DetailedDep {
+            git: Some(repo_path.to_string()),
+            rev,
+            ..Default::default()
+        });
+        result.push((pkg_name, spec));
     }
     result
 }
@@ -374,6 +462,56 @@ Suggests:
         let m = Manifest::from_description_str(DESCRIPTION_SAMPLE).expect("parse");
         assert!(!m.dependencies.contains_key("R"));
         assert!(!m.dev_dependencies.contains_key("R"));
+    }
+
+    #[test]
+    fn description_remotes_override_imports_with_git_source() {
+        let dcf = r#"Package: AQmap
+Imports:
+    airquality,
+    dplyr,
+    handyr
+Remotes:
+    B-Nilson/airquality,
+    github::B-Nilson/handyr@dev,
+    gitlab::other/thing,
+    pkg=user/repo@v1.0
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+
+        // airquality: bare user/repo
+        let aq = m.dependencies.get("airquality").unwrap();
+        assert_eq!(aq.git(), Some("B-Nilson/airquality"));
+
+        // handyr: github:: prefix + @ref
+        let hr = m.dependencies.get("handyr").unwrap();
+        assert_eq!(hr.git(), Some("B-Nilson/handyr"));
+        if let DependencySpec::Detailed(d) = hr {
+            assert_eq!(d.rev.as_deref(), Some("dev"));
+        } else {
+            panic!("handyr should be a detailed git dep");
+        }
+
+        // dplyr: not in Remotes, stays as "*"
+        let dp = m.dependencies.get("dplyr").unwrap();
+        assert!(matches!(dp, DependencySpec::Version(v) if v == "*"));
+
+        // gitlab:: is skipped — "thing" should not appear as a dep
+        assert!(!m.dependencies.contains_key("thing"));
+
+        // pkg=user/repo → explicit pkg name with @ref
+        let pk = m.dependencies.get("pkg").unwrap();
+        assert_eq!(pk.git(), Some("user/repo"));
+        if let DependencySpec::Detailed(d) = pk {
+            assert_eq!(d.rev.as_deref(), Some("v1.0"));
+        }
+    }
+
+    #[test]
+    fn description_without_package_yields_empty_name() {
+        let dcf = "Imports:\n    dplyr\n";
+        let m = Manifest::from_description_str(dcf).expect("parse");
+        assert_eq!(m.project.name, "");
     }
 
     #[test]
