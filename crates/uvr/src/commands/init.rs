@@ -163,40 +163,6 @@ fn refresh_uvr_block(existing: &str, snippet: &str) -> Option<String> {
     Some(out)
 }
 
-#[cfg(test)]
-mod rprofile_tests {
-    use super::*;
-
-    #[test]
-    fn refresh_replaces_outdated_block() {
-        let old = "# prelude\n\n# >>> uvr >>>\nlocal({ old_body })\n# <<< uvr <<<\n";
-        let new = refresh_uvr_block(old, RPROFILE_SNIPPET).expect("block should be found");
-        assert!(new.starts_with("# prelude\n\n# >>> uvr >>>\n"));
-        assert!(new.contains("library linked"));
-        assert!(!new.contains("old_body"));
-    }
-
-    #[test]
-    fn refresh_preserves_surrounding_content() {
-        let existing = "options(foo = 1)\n# >>> uvr >>>\nold\n# <<< uvr <<<\noptions(bar = 2)\n";
-        let new = refresh_uvr_block(existing, RPROFILE_SNIPPET).unwrap();
-        assert!(new.starts_with("options(foo = 1)\n"));
-        assert!(new.ends_with("options(bar = 2)\n"));
-    }
-
-    #[test]
-    fn refresh_returns_none_without_markers() {
-        assert!(refresh_uvr_block("options(foo = 1)\n", RPROFILE_SNIPPET).is_none());
-    }
-
-    #[test]
-    fn refresh_is_idempotent() {
-        let existing = RPROFILE_SNIPPET.to_string();
-        let new = refresh_uvr_block(&existing, RPROFILE_SNIPPET).unwrap();
-        assert_eq!(new, existing);
-    }
-}
-
 /// Write `.vscode/settings.json` with Positron R interpreter path if a pinned
 /// R version is managed by uvr.
 pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
@@ -290,5 +256,39 @@ fn write_gitignore(dir: &Path) -> std::io::Result<()> {
         std::fs::write(&path, content)
     } else {
         std::fs::write(&path, uvr_entry)
+    }
+}
+
+#[cfg(test)]
+mod rprofile_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_replaces_outdated_block() {
+        let old = "# prelude\n\n# >>> uvr >>>\nlocal({ old_body })\n# <<< uvr <<<\n";
+        let new = refresh_uvr_block(old, RPROFILE_SNIPPET).expect("block should be found");
+        assert!(new.starts_with("# prelude\n\n# >>> uvr >>>\n"));
+        assert!(new.contains("library linked"));
+        assert!(!new.contains("old_body"));
+    }
+
+    #[test]
+    fn refresh_preserves_surrounding_content() {
+        let existing = "options(foo = 1)\n# >>> uvr >>>\nold\n# <<< uvr <<<\noptions(bar = 2)\n";
+        let new = refresh_uvr_block(existing, RPROFILE_SNIPPET).unwrap();
+        assert!(new.starts_with("options(foo = 1)\n"));
+        assert!(new.ends_with("options(bar = 2)\n"));
+    }
+
+    #[test]
+    fn refresh_returns_none_without_markers() {
+        assert!(refresh_uvr_block("options(foo = 1)\n", RPROFILE_SNIPPET).is_none());
+    }
+
+    #[test]
+    fn refresh_is_idempotent() {
+        let existing = RPROFILE_SNIPPET.to_string();
+        let new = refresh_uvr_block(&existing, RPROFILE_SNIPPET).unwrap();
+        assert_eq!(new, existing);
     }
 }
