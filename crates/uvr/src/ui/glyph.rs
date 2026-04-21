@@ -2,6 +2,17 @@
 //!
 //! Unicode by default, ASCII fallback when `UVR_ASCII=1` is set or when the
 //! terminal can't render unicode (e.g. piped output).
+//!
+//! # Vocabulary
+//! - `success` `✓` — positive outcome.
+//! - `fail`    `✗` — error glyph.
+//! - `warn`    `⚠` — warning glyph (distinct from `✗` and the `i` hint).
+//! - `info`    `›` — section lead, inline info.
+//! - `hint`    `→` — next-step pointer; paired with a bold "Hint:" label.
+//! - `add`     `+`, `remove` `−`, `upgrade` `↑` — change rows.
+//! - `bullet`  `·` — separator / unstyled leader under a header.
+//! - `arrow`   `→` — inline transition (version old → new).
+//! - `change`  `~` — manifest tweak.
 
 #![allow(dead_code)]
 
@@ -24,9 +35,9 @@ macro_rules! g {
 
 g!(success, "✓", "v");
 g!(fail, "✗", "x");
-g!(warn, "▲", "!");
+g!(warn, "⚠", "!");
 g!(info, "›", ">");
-g!(hint, "i", "i");
+g!(hint, "→", "->");
 
 g!(add, "+", "+");
 g!(remove, "−", "-");

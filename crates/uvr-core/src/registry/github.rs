@@ -1,5 +1,5 @@
 use semver::Version;
-use tracing::info;
+use tracing::debug;
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
@@ -62,7 +62,7 @@ pub async fn resolve_github_package(
 
     let url = format!("https://api.github.com/repos/{user}/{repo}/tarball/{commit_sha}");
 
-    info!("GitHub {user}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
+    debug!("GitHub {user}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
 
     Ok(PackageInfo {
         name: pkg_name,

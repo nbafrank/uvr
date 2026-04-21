@@ -202,20 +202,25 @@ pub async fn install_from_lockfile(
                         .into_iter()
                         .collect();
 
-                    println!();
-                    ui::warn(format!(
-                        "Missing system dependencies for {} package(s)",
-                        missing.len()
-                    ));
-                    for (pkg_name, reqs) in &missing {
-                        let names: Vec<&str> = reqs.iter().map(|r| r.package.as_str()).collect();
-                        println!(
-                            "  {} {} needs: {}",
-                            palette::dim(ui::glyph::bullet()),
-                            palette::pkg(pkg_name),
-                            names.join(", ")
-                        );
-                    }
+                    eprintln!();
+                    // Structured warning with a loud `⚠ WARN` header and one
+                    // bullet per package → missing deps. The user's fix is
+                    // delivered as a proper hint below, not an extra warn line.
+                    let body: Vec<String> = missing
+                        .iter()
+                        .map(|(pkg_name, reqs)| {
+                            let names: Vec<&str> =
+                                reqs.iter().map(|r| r.package.as_str()).collect();
+                            format!("{pkg_name} needs: {}", names.join(", "))
+                        })
+                        .collect();
+                    ui::warn_block(
+                        &format!(
+                            "Missing system dependencies for {} package(s)",
+                            missing.len()
+                        ),
+                        body,
+                    );
                     let install_cmd = if which::which("apk").is_ok() {
                         format!("apk add {}", all_pkgs.join(" "))
                     } else if which::which("dnf").is_ok() {
@@ -223,9 +228,9 @@ pub async fn install_from_lockfile(
                     } else {
                         format!("sudo apt-get install -y {}", all_pkgs.join(" "))
                     };
-                    ui::hint(format!("Install with: {}", palette::bold(&install_cmd)));
+                    ui::hint(format!("Install with: {install_cmd}"));
                     ui::hint("Continuing — some packages may fail to compile without these.");
-                    println!();
+                    eprintln!();
                 }
             }
         }

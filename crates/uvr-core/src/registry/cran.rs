@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use flate2::read::GzDecoder;
 use semver::{Version, VersionReq};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
@@ -197,7 +197,7 @@ impl CranRegistry {
                         let raw = std::fs::read(&cache_path)?;
                         let text = String::from_utf8_lossy(&raw);
                         let index = parse_packages_gz(&text)?;
-                        info!("{} index: {} packages (cached)", cache_key, index.len());
+                        debug!("{} index: {} packages (cached)", cache_key, index.len());
                         return Ok(CranRegistry {
                             index,
                             src_base: src_base.to_string(),
@@ -228,7 +228,7 @@ impl CranRegistry {
                         }
                         let _ = std::fs::write(&cache_path, &decompressed);
                         write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
-                        info!("{} index: {} packages (updated)", cache_key, index.len());
+                        debug!("{} index: {} packages (updated)", cache_key, index.len());
                         return Ok(CranRegistry {
                             index,
                             src_base: src_base.to_string(),
@@ -244,7 +244,7 @@ impl CranRegistry {
                         let raw = std::fs::read(&cache_path)?;
                         let text = String::from_utf8_lossy(&raw);
                         let index = parse_packages_gz(&text)?;
-                        info!(
+                        debug!(
                             "{} index: {} packages (cached, stale)",
                             cache_key,
                             index.len()
@@ -266,7 +266,7 @@ impl CranRegistry {
             let raw = std::fs::read(&cache_path)?;
             let text = String::from_utf8_lossy(&raw);
             let index = parse_packages_gz(&text)?;
-            info!("{} index: {} packages (cached)", cache_key, index.len());
+            debug!("{} index: {} packages (cached)", cache_key, index.len());
             return Ok(CranRegistry {
                 index,
                 src_base: src_base.to_string(),
@@ -275,7 +275,7 @@ impl CranRegistry {
         }
 
         // No cache or force refresh — full download
-        info!("Downloading {} PACKAGES.gz...", cache_key);
+        debug!("Downloading {} PACKAGES.gz...", cache_key);
         let resp = client.get(packages_url).send().await?;
         if !resp.status().is_success() {
             return Err(UvrError::Other(format!(
@@ -308,7 +308,7 @@ impl CranRegistry {
         let _ = std::fs::write(&cache_path, &decompressed);
         write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
 
-        info!("{} index: {} packages", cache_key, index.len());
+        debug!("{} index: {} packages", cache_key, index.len());
         Ok(CranRegistry {
             index,
             src_base: src_base.to_string(),

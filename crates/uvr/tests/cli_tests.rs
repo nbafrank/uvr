@@ -375,7 +375,8 @@ fn test_update_dry_run_on_empty_project() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Dry run"));
+        // `ui::warn` writes to stderr (warnings are diagnostic output).
+        .stderr(predicate::str::contains("Dry run"));
 }
 
 // ─── cache ─────────────────────────────────────────────────

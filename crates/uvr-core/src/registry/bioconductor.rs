@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use flate2::read::GzDecoder;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
@@ -82,7 +82,7 @@ impl BiocRegistry {
             }
         }
 
-        info!(
+        debug!(
             "Bioconductor {bioc_release}: {} packages (software + data + workflows)",
             packages.len()
         );
@@ -164,7 +164,7 @@ async fn fetch_subrepo(
         return Ok(parse_bioc_text(&raw));
     }
 
-    info!("Downloading Bioconductor {bioc_release}/{subrepo_path} PACKAGES.gz...");
+    debug!("Downloading Bioconductor {bioc_release}/{subrepo_path} PACKAGES.gz...");
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
         return Err(UvrError::Other(format!(

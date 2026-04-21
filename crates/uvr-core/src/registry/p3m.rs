@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use flate2::read::GzDecoder;
-use tracing::info;
+use tracing::debug;
 
 use crate::error::Result;
 use crate::r_version::downloader::Platform;
@@ -135,7 +135,7 @@ async fn fetch_repo_index(
             repo.url_prefix(),
             platform_info.url_segment
         );
-        info!("Fetching P3M {} binary index from {url}", repo.label());
+        debug!("Fetching P3M {} binary index from {url}", repo.label());
         let bytes = client
             .get(&url)
             .send()
@@ -197,7 +197,7 @@ fn parse_index(
             packages.insert(n, (normalize_version(&v), url));
         }
     }
-    info!(
+    debug!(
         "P3M {} binary index: {} packages",
         repo.label(),
         packages.len()

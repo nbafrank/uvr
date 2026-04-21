@@ -1,6 +1,9 @@
 //! High-level printing helpers.
 //!
-//! Keep call sites short: `ui::success("Ready")`, `ui::item_added("ggplot2", "3.5.1")`.
+//! Keep call sites short: `ui::success("Ready")`, `ui::warn("Stale lockfile")`.
+//!
+//! Every helper here goes through `palette` + `glyph`; nothing constructs a
+//! style inline. If you need a new output shape, add a helper here first.
 
 #![allow(dead_code)]
 
@@ -16,19 +19,59 @@ pub fn fail(text: impl std::fmt::Display) {
     println!("{} {text}", palette::fail(glyph::fail()));
 }
 
-/// `▲ <text>` — warnings.
+/// Single-line warning: `⚠ Warning: <text>`.
+///
+/// The `⚠` glyph is amber-bold, the word `Warning:` is amber-bold as well,
+/// and the message body is amber (non-bold) so the whole line reads as a
+/// single amber phrase against the default terminal text around it.
+/// Goes to **stderr** — warnings are diagnostic output, not data.
 pub fn warn(text: impl std::fmt::Display) {
-    println!("{} {text}", palette::warn(glyph::warn()));
+    eprintln!(
+        "{} {} {}",
+        palette::warn(glyph::warn()),
+        palette::warn("Warning:"),
+        palette::warn_body(text),
+    );
 }
 
-/// `› <text>` — informational headline, stands out from bullets.
+/// Multi-line warning with a loud inverse `⚠ WARN ` header band.
+///
+/// Use when the warning has structured context the user must read — e.g.
+/// "these N system packages are missing, here's the install command".
+/// `headline` is the one-liner; `body` lines appear dim-amber beneath.
+/// Goes to stderr.
+pub fn warn_block(headline: &str, body: impl IntoIterator<Item = String>) {
+    eprintln!(
+        "{} {}",
+        palette::warn_badge(format!(" {} WARN ", glyph::warn())),
+        palette::warn(headline),
+    );
+    for line in body {
+        eprintln!("  {}", palette::warn_body(line));
+    }
+}
+
+/// `› <text>` — informational headline.
 pub fn info(text: impl std::fmt::Display) {
     println!("{} {text}", palette::info(glyph::info()));
 }
 
-/// `  i <text>` in dim. Use after a message to offer a next step.
+/// Dedicated hint line — use after an error or warning to tell the user
+/// what to do next. Renders as:
+///
+/// ```text
+///   → Hint: Install the CRAN gfortran build from …
+/// ```
+///
+/// Cyan label + cyan body; visually distinct from dim error context
+/// and from amber warnings. Goes to stderr (it accompanies diagnostics).
 pub fn hint(text: impl std::fmt::Display) {
-    println!("  {} {}", palette::hint(glyph::hint()), palette::hint(text));
+    eprintln!(
+        "  {} {} {}",
+        palette::hint_label(glyph::hint()),
+        palette::hint_label("Hint:"),
+        palette::hint_body(text),
+    );
 }
 
 /// Indented bullet: `  · <text>`.
@@ -50,7 +93,7 @@ pub fn row(glyph_str: console::StyledObject<&str>, name: &str, version: &str) {
     );
 }
 
-/// Upgrade row: `↑ pkg old → new` with magenta accent.
+/// Upgrade row: `↑ pkg old → new` with magenta accent on the new version.
 pub fn row_upgrade(name: &str, from: &str, to: &str) {
     println!(
         "  {} {} {} {} {}",
@@ -191,15 +234,40 @@ pub fn welcome(version: &str) {
     println!();
 }
 
-/// Write an error to stderr in the three-part format: headline / context / hint.
+/// Three-part error block rendered to stderr:
+///
+/// ```text
+///  ERROR  Failed to install packages after add
+///    Failed to install RcppArmadillo
+///    R CMD INSTALL failed for 'RcppArmadillo' (exit 1):
+///    …
+///
+///   → Hint: Missing Fortran toolchain on macOS. Install the CRAN gfortran
+///           build from https://mac.r-project.org/tools/ or run
+///           `brew install gcc`.
+/// ```
+///
+/// - **Headline** is a red-inverse ` ERROR ` badge followed by the red-bold
+///   top-level message; impossible to miss scanning a terminal.
+/// - **Context** lines are indented and dim — they recede behind the badge.
+/// - **Hint** (if any) is separated by a blank line, cyan-accented, and
+///   prefixed with `→ Hint:` so the user's fix-path is visually distinct
+///   from the error context itself.
 pub fn error_block(headline: &str, context: Option<&str>, hint_text: Option<&str>) {
-    eprintln!("{} {headline}", palette::fail(glyph::fail()));
+    eprintln!(
+        "{} {}",
+        palette::error_badge(format!(" {} ERROR ", glyph::fail())),
+        palette::fail(headline),
+    );
     if let Some(ctx) = context {
         for line in ctx.lines() {
             eprintln!("  {}", palette::dim(line));
         }
     }
     if let Some(h) = hint_text {
-        eprintln!("  {} {}", palette::hint(glyph::hint()), palette::hint(h));
+        // Blank line separates guidance from error context — guidance is
+        // not more error noise, it's the path forward.
+        eprintln!();
+        hint(h);
     }
 }
