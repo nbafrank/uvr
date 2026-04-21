@@ -283,6 +283,9 @@ pub enum RCommands {
 
     /// Write an exact R version to .r-version (like uv python pin)
     Pin(RPinArgs),
+
+    /// Run `sudo R CMD javareconf` against the project's managed R to register the JVM
+    Javareconf,
 }
 
 #[derive(Debug, Args)]

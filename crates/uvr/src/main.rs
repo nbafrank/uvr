@@ -104,6 +104,9 @@ async fn run() -> Result<()> {
             Some(RCommands::Pin(args)) => {
                 commands::r_cmd::pin::run(args.version)?;
             }
+            Some(RCommands::Javareconf) => {
+                commands::r_cmd::javareconf::run()?;
+            }
             None => {
                 ui::welcome_group(
                     "r",
@@ -177,6 +180,15 @@ fn hint_for(msg: &str) -> Option<&'static str> {
             "Missing Fortran toolchain on macOS. Install the CRAN gfortran build from \
              https://mac.r-project.org/tools/ or run `brew install gcc` — required for \
              source packages with Fortran (e.g. edgeR, limma).",
+        )
+    } else if m.contains("unable to locate a java runtime")
+        || m.contains("java interpreter")
+        || m.contains("no java runtime present")
+    {
+        Some(
+            "Missing Java runtime. Install a JDK (e.g. `brew install --cask temurin`), \
+             then run `uvr r javareconf` to register the JVM with your project's \
+             managed R. Required for rJava and packages that depend on it (e.g. xlsx, RJDBC).",
         )
     } else {
         None
