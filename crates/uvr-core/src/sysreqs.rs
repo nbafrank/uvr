@@ -51,6 +51,28 @@ struct PpmRequirementDetail {
     packages: Vec<String>,
 }
 
+/// Outcome of a sysreqs API lookup.
+///
+/// `UnsupportedDistro` lets callers tell "no system deps needed" apart from
+/// "we couldn't check because Posit's catalog doesn't cover this distro"
+/// (e.g. Alpine — see issue #30). Silently treating the latter as the former
+/// makes uvr act like it verified sysreqs when it actually skipped them,
+/// which bites users whose packages then fail to compile from source.
+#[derive(Debug, Clone)]
+pub enum SysReqLookup {
+    Supported(Vec<SysReq>),
+    UnsupportedDistro,
+}
+
+/// Detects the Posit PPM "Unsupported system" error body.
+///
+/// Response shape: `{"code":14,"error":"Unsupported system"}`. Match on the
+/// error text rather than the status code, since we've only observed this on
+/// non-success responses but don't want to couple to a specific HTTP code.
+fn is_unsupported_system_body(body: &str) -> bool {
+    body.contains("Unsupported system")
+}
+
 /// Query the Posit Package Manager sysreqs API for system dependencies.
 ///
 /// API: `GET https://packagemanager.posit.co/__api__/repos/1/sysreqs?all=false&pkgname=<name>&distribution=<os>&release=<version>`
@@ -61,7 +83,7 @@ pub async fn resolve_system_deps(
     client: &reqwest::Client,
     package_name: &str,
     distro: &str,
-) -> Result<Vec<SysReq>> {
+) -> Result<SysReqLookup> {
     let (distribution, release) = distro.split_once('-').unwrap_or((distro, ""));
 
     let url = "https://packagemanager.posit.co/__api__/repos/1/sysreqs";
@@ -85,24 +107,27 @@ pub async fn resolve_system_deps(
         Ok(r) => r,
         Err(e) => {
             warn!("Posit sysreqs API request failed: {e}");
-            return Ok(vec![]);
+            return Ok(SysReqLookup::Supported(vec![]));
         }
     };
 
-    if !resp.status().is_success() {
-        debug!(
-            "Posit sysreqs API returned {} for {package_name}",
-            resp.status()
-        );
-        return Ok(vec![]);
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        if is_unsupported_system_body(&body) {
+            debug!("Posit sysreqs API reports {distribution} is unsupported");
+            return Ok(SysReqLookup::UnsupportedDistro);
+        }
+        debug!("Posit sysreqs API returned {status} for {package_name}");
+        return Ok(SysReqLookup::Supported(vec![]));
     }
 
-    let body = resp.text().await.unwrap_or_default();
     let response: PpmSysreqsResponse = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to parse Posit sysreqs API response: {e}");
-            return Ok(vec![]);
+            return Ok(SysReqLookup::Supported(vec![]));
         }
     };
 
@@ -115,7 +140,7 @@ pub async fn resolve_system_deps(
         }
     }
 
-    Ok(result)
+    Ok(SysReqLookup::Supported(result))
 }
 
 /// Check which packages are missing on the system.
@@ -150,22 +175,40 @@ pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
         .collect()
 }
 
+/// Aggregate result of a sysreqs check across many packages.
+#[derive(Debug, Default)]
+pub struct SysReqsCheck {
+    /// Missing system packages keyed by R package name.
+    pub missing: HashMap<String, Vec<SysReq>>,
+    /// Set when the Posit API reported the distro as unsupported.
+    /// When true, `missing` is not authoritative — the check was skipped.
+    pub unsupported_distro: bool,
+}
+
 /// Resolve and check system dependencies for a set of packages.
-/// Returns a map of package name → list of missing system deps.
+///
+/// Returns both the missing-deps map and a flag indicating whether the API
+/// rejected the distribution. On the first `UnsupportedDistro` response we
+/// stop querying — every call would fail the same way and only adds latency.
 pub async fn check_system_deps(
     client: &reqwest::Client,
     package_names: &[String],
     distro: &str,
-) -> HashMap<String, Vec<SysReq>> {
-    let mut missing_by_pkg: HashMap<String, Vec<SysReq>> = HashMap::new();
+) -> SysReqsCheck {
+    let mut out = SysReqsCheck::default();
 
     for pkg_name in package_names {
         match resolve_system_deps(client, pkg_name, distro).await {
-            Ok(resolved) => {
+            Ok(SysReqLookup::Supported(resolved)) => {
                 let missing = filter_missing(&resolved);
                 if !missing.is_empty() {
-                    missing_by_pkg.insert(pkg_name.clone(), missing.into_iter().cloned().collect());
+                    out.missing
+                        .insert(pkg_name.clone(), missing.into_iter().cloned().collect());
                 }
+            }
+            Ok(SysReqLookup::UnsupportedDistro) => {
+                out.unsupported_distro = true;
+                break;
             }
             Err(e) => {
                 warn!("Failed to resolve system deps for {pkg_name}: {e}");
@@ -173,7 +216,7 @@ pub async fn check_system_deps(
         }
     }
 
-    missing_by_pkg
+    out
 }
 
 #[cfg(test)]
@@ -202,5 +245,15 @@ mod tests {
             let missing = filter_missing(&reqs);
             assert_eq!(missing.len(), 1);
         }
+    }
+
+    #[test]
+    fn detects_ppm_unsupported_system_body() {
+        // Observed on Alpine across 3.15–3.21 (issue #30).
+        assert!(is_unsupported_system_body(
+            r#"{"code":14,"error":"Unsupported system"}"#
+        ));
+        assert!(!is_unsupported_system_body(r#"{"requirements":[]}"#));
+        assert!(!is_unsupported_system_body(""));
     }
 }

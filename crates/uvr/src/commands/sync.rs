@@ -193,8 +193,26 @@ pub async fn install_from_lockfile(
             let pkg_names: Vec<String> = to_install.iter().map(|p| p.name.clone()).collect();
 
             if !pkg_names.is_empty() {
-                let missing = sysreqs::check_system_deps(&client, &pkg_names, &distro).await;
-                if !missing.is_empty() {
+                let check = sysreqs::check_system_deps(&client, &pkg_names, &distro).await;
+
+                if check.unsupported_distro {
+                    // Posit's catalog doesn't cover this distro (Alpine is the
+                    // common case — see issue #30). Tell the user plainly that
+                    // we skipped the check; don't pretend we verified anything.
+                    eprintln!();
+                    ui::warn_block(
+                        &format!("System dependency check skipped on {distro}"),
+                        vec![
+                            "Posit's sysreqs catalog doesn't cover this distribution.".to_string(),
+                            "Packages with system-library requirements may fail to compile from source.".to_string(),
+                        ],
+                    );
+                    ui::hint(
+                        "Install build prerequisites manually (e.g. libxml2-dev, libcurl-dev, libssl-dev) if source builds fail.",
+                    );
+                    eprintln!();
+                } else if !check.missing.is_empty() {
+                    let missing = &check.missing;
                     let all_pkgs: Vec<&str> = missing
                         .values()
                         .flat_map(|reqs| reqs.iter().map(|r| r.package.as_str()))
