@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>uvr — uvr — A fast R package manager, written in Rust</title>
+  <title>uvr — A fast R package manager, written in Rust</title>
   <meta name="description" content="uvr is a fast R package manager written in Rust. Manage R packages, lockfiles, and R versions with a single tool. Supports CRAN, Bioconductor, and GitHub packages.">
   <meta name="keywords" content="R, package manager, Rust, CRAN, Bioconductor, GitHub, renv, pak, uvr, R version management, reproducible research">
   <meta name="author" content="nbafrank">
@@ -11,7 +11,7 @@
 
   <!-- Open Graph -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="uvr — uvr — A fast R package manager, written in Rust">
+  <meta property="og:title" content="uvr — A fast R package manager, written in Rust">
   <meta property="og:description" content="Manage R packages, lockfiles, and R versions with a single tool. Supports CRAN, Bioconductor, and GitHub.">
   <meta property="og:url" content="https://nbafrank.github.io/uvr/">
   <meta property="og:image" content="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.jpg">
@@ -19,7 +19,7 @@
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="uvr — uvr — A fast R package manager, written in Rust">
+  <meta name="twitter:title" content="uvr — A fast R package manager, written in Rust">
   <meta name="twitter:description" content="Manage R packages, lockfiles, and R versions with a single tool.">
   <meta name="twitter:image" content="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.jpg">
 
@@ -255,11 +255,22 @@
       position: relative;
       max-width: 100%;
       overflow-x: auto;
+      text-align: left;
     }
 
-    .hero-install:hover {
+    .hero-install:hover,
+    .hero-install:focus-visible {
       border-color: var(--accent);
       box-shadow: var(--shadow-glow);
+      outline: none;
+    }
+
+    .hero-install.copied {
+      border-color: var(--accent-2, var(--accent));
+    }
+
+    .hero-install.copied .hero-install-copy {
+      color: var(--accent-2, var(--accent));
     }
 
     .hero-install-prompt {
@@ -533,6 +544,26 @@
     .code-arg { color: var(--green); }
     .code-flag { color: var(--yellow); }
     .code-comment { color: var(--text-tertiary); }
+
+    /* CLI output palette — mirrors the shipped uvr palette (xterm-256 amber 208, cyan 39). */
+    .code-ok       { color: var(--green); font-weight: 600; }
+    .code-warn     { color: #fb923c; font-weight: 600; }
+    .code-info     { color: var(--accent); font-weight: 600; }
+    .code-hint     { color: var(--accent); }
+    .code-added    { color: var(--green); font-weight: 600; }
+    .code-upgraded { color: #c084fc; font-weight: 600; }
+    .code-pkg      { color: var(--accent); }
+    .code-ver      { color: var(--text-tertiary); }
+    .code-dim      { color: var(--text-tertiary); }
+    .code-spinner  { color: var(--accent); font-weight: 600; }
+    .code-err-badge {
+      background: var(--red);
+      color: #0b0b0f;
+      font-weight: 700;
+      padding: 0 6px;
+      border-radius: 2px;
+      letter-spacing: 0.02em;
+    }
 
     .quickstart-steps {
       display: flex;
@@ -919,11 +950,18 @@
         Manage R packages, lockfiles, and R versions with one tool.
         Works with CRAN, Bioconductor, and GitHub.
       </p>
-      <div class="hero-install" role="button" tabindex="0" title="Click to copy" onclick="navigator.clipboard.writeText('curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh')">
-        <span class="hero-install-prompt">$</span>
+      <button
+        type="button"
+        class="hero-install"
+        title="Click to copy"
+        aria-label="Copy install command to clipboard"
+        data-copy="curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh"
+        onclick="copyInstall(this)"
+      >
+        <span class="hero-install-prompt" aria-hidden="true">$</span>
         <span>curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh</span>
-        <span class="hero-install-copy">click to copy</span>
-      </div>
+        <span class="hero-install-copy" aria-hidden="true">click to copy</span>
+      </button>
     </div>
   </section>
 
@@ -1127,16 +1165,20 @@
             <span class="code-dot"></span>
           </div>
           <div class="code-body">
-            <span class="code-line"><span class="code-comment"># Create a new project</span></span>
-            <span class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">uvr</span> <span class="code-arg">init my-project</span></span>
+            <span class="code-line"><span class="code-comment"># Initialize a project</span></span>
+            <span class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">uvr</span> <span class="code-arg">init analysis</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Created <span class="code-pkg">uvr.toml</span> <span class="code-dim">and .Rprofile</span></span>
             <span class="code-line">&nbsp;</span>
-            <span class="code-line"><span class="code-comment"># Add packages</span></span>
+            <span class="code-line"><span class="code-comment"># Add packages — resolve, lock, install in one step</span></span>
             <span class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">uvr</span> <span class="code-arg">add ggplot2 dplyr</span></span>
+            <span class="code-line"><span class="code-info">›</span> Resolving dependencies</span>
+            <span class="code-line">  <span class="code-added">+</span> <span class="code-pkg">ggplot2</span> <span class="code-ver">3.5.1</span></span>
+            <span class="code-line">  <span class="code-added">+</span> <span class="code-pkg">dplyr</span> <span class="code-ver">1.1.4</span></span>
+            <span class="code-line">  <span class="code-dim">· 14 transitive deps resolved</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Locked 16 packages <span class="code-dim">in 0.8s</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Installed 16 packages <span class="code-dim">in 2.1s</span></span>
             <span class="code-line">&nbsp;</span>
-            <span class="code-line"><span class="code-comment"># Install from lockfile</span></span>
-            <span class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">uvr</span> <span class="code-arg">sync</span></span>
-            <span class="code-line">&nbsp;</span>
-            <span class="code-line"><span class="code-comment"># Run a script</span></span>
+            <span class="code-line"><span class="code-comment"># Run a script in the isolated env — no library() needed</span></span>
             <span class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">uvr</span> <span class="code-arg">run analysis.R</span></span>
           </div>
         </div>
@@ -1360,14 +1402,17 @@
           </div>
           <div class="code-body">
             <span class="code-line"><span class="code-comment"># Install the companion package</span></span>
-            <span class="code-line"><span class="code-cmd">pak</span><span class="code-cmd">::</span><span class="code-cmd">pak</span><span class="code-cmd">(</span><span class="code-arg">"nbafrank/uvr-r"</span><span class="code-cmd">)</span></span>
-            <span class="code-line">&nbsp;</span>
-            <span class="code-line"><span class="code-cmd">library</span><span class="code-cmd">(</span><span class="code-arg">uvr</span><span class="code-cmd">)</span></span>
+            <span class="code-line"><span class="code-dim">&gt; </span><span class="code-cmd">pak::pak(</span><span class="code-arg">"nbafrank/uvr-r"</span><span class="code-cmd">)</span></span>
+            <span class="code-line"><span class="code-dim">&gt; </span><span class="code-cmd">library(</span><span class="code-pkg">uvr</span><span class="code-cmd">)</span></span>
             <span class="code-line">&nbsp;</span>
             <span class="code-line"><span class="code-comment"># Manage your project from R</span></span>
-            <span class="code-line"><span class="code-cmd">init</span><span class="code-cmd">()</span></span>
-            <span class="code-line"><span class="code-cmd">add</span><span class="code-cmd">(</span><span class="code-arg">"ggplot2"</span><span class="code-cmd">)</span></span>
-            <span class="code-line"><span class="code-cmd">sync</span><span class="code-cmd">()</span></span>
+            <span class="code-line"><span class="code-dim">&gt; </span><span class="code-cmd">init()</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Created <span class="code-pkg">uvr.toml</span></span>
+            <span class="code-line"><span class="code-dim">&gt; </span><span class="code-cmd">add(</span><span class="code-arg">"ggplot2"</span><span class="code-cmd">)</span></span>
+            <span class="code-line">  <span class="code-added">+</span> <span class="code-pkg">ggplot2</span> <span class="code-ver">3.5.1</span> <span class="code-dim">(+ 8 deps)</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Installed 9 packages <span class="code-dim">in 1.4s</span></span>
+            <span class="code-line"><span class="code-dim">&gt; </span><span class="code-cmd">sync()</span></span>
+            <span class="code-line"><span class="code-ok">✓</span> Environment up to date</span>
           </div>
         </div>
       </div>
@@ -1393,6 +1438,41 @@
       </div>
     </div>
   </footer>
+
+  <script>
+    function copyInstall(btn) {
+      var cmd = btn.getAttribute('data-copy') || '';
+      var label = btn.querySelector('.hero-install-copy');
+      var done = function () {
+        btn.classList.add('copied');
+        if (label) label.textContent = 'copied ✓';
+        setTimeout(function () {
+          btn.classList.remove('copied');
+          if (label) label.textContent = 'click to copy';
+        }, 2000);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(cmd).then(done, function () {
+          fallbackCopy(cmd);
+          done();
+        });
+      } else {
+        fallbackCopy(cmd);
+        done();
+      }
+    }
+    function fallbackCopy(text) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'absolute';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  </script>
 
 </body>
 </html>
