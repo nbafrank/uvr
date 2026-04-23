@@ -1,0 +1,51 @@
+{
+  "patterns": ["\\brust\\b", "\\brustc\\b", "\\bcargo\\b"],
+  "dependencies": [
+    {
+      "pre_install": [
+        {
+          "command": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path -y"
+        }
+      ],
+      "packages": [],
+      "constraints": [
+        {
+          "os": "linux",
+          "distribution": "ubuntu"
+        },
+        {
+          "os": "linux",
+          "distribution": "debian"
+        },
+        {
+          "os": "linux",
+          "distribution": "centos"
+        },
+        {
+          "os": "linux",
+          "distribution": "redhat"
+        },
+        {
+          "os": "linux",
+          "distribution": "rockylinux"
+        },
+        {
+          "os": "linux",
+          "distribution": "fedora"
+        },
+        {
+          "os": "linux",
+          "distribution": "opensuse"
+        },
+        {
+          "os": "linux",
+          "distribution": "sle"
+        },
+        {
+          "os": "linux",
+          "distribution": "alpine"
+        }
+      ]
+    }
+  ]
+}

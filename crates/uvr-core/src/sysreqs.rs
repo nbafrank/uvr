@@ -4,6 +4,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::error::Result;
+use crate::sysreqs_rules;
 
 /// A resolved system dependency with its apt/rpm package name.
 #[derive(Debug, Clone)]
@@ -185,33 +186,80 @@ pub struct SysReqsCheck {
     pub unsupported_distro: bool,
 }
 
+/// R package to check sysreqs for.
+#[derive(Debug, Clone)]
+pub struct PackageSysReqQuery {
+    /// Canonical R package name (e.g. `"xml2"`).
+    pub name: String,
+    /// Raw `SystemRequirements` field from DESCRIPTION, if any. Used only
+    /// when the Posit API rejects the distribution and we fall back to
+    /// the vendored `r-system-requirements` rules locally.
+    pub system_requirements: Option<String>,
+}
+
 /// Resolve and check system dependencies for a set of packages.
 ///
-/// Returns both the missing-deps map and a flag indicating whether the API
-/// rejected the distribution. On the first `UnsupportedDistro` response we
-/// stop querying — every call would fail the same way and only adds latency.
+/// Flow:
+/// 1. Query Posit's sysreqs API per package.
+/// 2. If PPM reports `UnsupportedDistro` (e.g. Alpine), stop querying and
+///    fall back to the vendored `r-system-requirements` rules. The fallback
+///    matches each package's `SystemRequirements` string against the local
+///    rule table. This is the path that addresses issue #30 end-to-end.
+/// 3. Filter the resolved deps through the installed package manager
+///    (`dpkg`/`rpm`/`apk`) to surface only the ones that are actually
+///    missing.
+///
+/// Returns both the missing-deps map and a flag indicating whether PPM
+/// rejected the distribution (set true even when the local fallback fills
+/// in results, so callers can mention the provenance if they want).
 pub async fn check_system_deps(
     client: &reqwest::Client,
-    package_names: &[String],
+    packages: &[PackageSysReqQuery],
     distro: &str,
 ) -> SysReqsCheck {
     let mut out = SysReqsCheck::default();
+    let mut local_fallback = false;
+    let mut tail_start: usize = 0;
 
-    for pkg_name in package_names {
-        match resolve_system_deps(client, pkg_name, distro).await {
+    for (idx, pkg) in packages.iter().enumerate() {
+        match resolve_system_deps(client, &pkg.name, distro).await {
             Ok(SysReqLookup::Supported(resolved)) => {
                 let missing = filter_missing(&resolved);
                 if !missing.is_empty() {
                     out.missing
-                        .insert(pkg_name.clone(), missing.into_iter().cloned().collect());
+                        .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
                 }
             }
             Ok(SysReqLookup::UnsupportedDistro) => {
                 out.unsupported_distro = true;
+                local_fallback = true;
+                tail_start = idx;
                 break;
             }
             Err(e) => {
-                warn!("Failed to resolve system deps for {pkg_name}: {e}");
+                warn!("Failed to resolve system deps for {}: {e}", pkg.name);
+            }
+        }
+    }
+
+    if local_fallback {
+        let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
+        for pkg in &packages[tail_start..] {
+            let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
+                continue;
+            };
+            let resolved: Vec<SysReq> =
+                sysreqs_rules::resolve_local(sys_req_text, distribution, version)
+                    .into_iter()
+                    .map(|package| SysReq { package })
+                    .collect();
+            if resolved.is_empty() {
+                continue;
+            }
+            let missing = filter_missing(&resolved);
+            if !missing.is_empty() {
+                out.missing
+                    .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
             }
         }
     }
@@ -255,5 +303,17 @@ mod tests {
         ));
         assert!(!is_unsupported_system_body(r#"{"requirements":[]}"#));
         assert!(!is_unsupported_system_body(""));
+    }
+
+    #[test]
+    fn local_fallback_resolves_alpine_xml2_requirements() {
+        // Direct smoke test of the fallback path: given an Alpine-targeted
+        // SystemRequirements string, the vendored rules should produce the
+        // apk-compatible package name. This is the invariant issue #30 needs.
+        let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.9.0)", "alpine", "3.21");
+        assert!(
+            pkgs.iter().any(|p| p == "libxml2-dev"),
+            "expected libxml2-dev in fallback output, got {pkgs:?}"
+        );
     }
 }

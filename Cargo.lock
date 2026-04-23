@@ -2336,6 +2336,7 @@ dependencies = [
  "hex",
  "indicatif",
  "md-5",
+ "regex",
  "reqwest",
  "semver",
  "serde",

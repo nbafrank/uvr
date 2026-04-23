@@ -9,3 +9,4 @@ pub mod r_version;
 pub mod registry;
 pub mod resolver;
 pub mod sysreqs;
+pub mod sysreqs_rules;
