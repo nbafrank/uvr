@@ -3,10 +3,18 @@
 //! Sits between the tarball download cache (`~/.uvr/cache/`) and per-project
 //! libraries (`.uvr/library/`). When a package has been extracted before with
 //! the same version, checksum, R version, and platform, the cached directory
-//! tree is cloned into the project library instead of re-extracting the tarball.
+//! tree is attached to the project library instead of re-extracting the tarball.
 //!
-//! On macOS (APFS) the clone uses `clonefile()` — an instant copy-on-write
-//! operation. Elsewhere it falls back to a recursive copy.
+//! Per-platform attach strategy:
+//! - **macOS (APFS)**: `clonefile()` — an instant copy-on-write operation. The
+//!   project library sees a normal directory; actual data is shared with the
+//!   cache until one side diverges.
+//! - **Linux**: a whole-directory symlink from the project library to the cached
+//!   tree. This dedupes disk usage across projects (issue #24 follow-up) and
+//!   matches renv's behavior. R resolves library paths through symlinks
+//!   transparently.
+//! - **Windows**: recursive file copy. Symlinks on Windows need admin rights
+//!   and are fragile across users/drives; copy stays predictable.
 
 use std::path::{Path, PathBuf};
 
@@ -95,20 +103,22 @@ pub fn lookup(name: &str, key: &str) -> Option<PathBuf> {
     }
 }
 
-/// Clone a cached package directory into the project library.
+/// Attach a cached package directory to the project library.
 ///
-/// On macOS APFS this uses `clonefile()` for an instant CoW copy.
-/// Falls back to a recursive file copy elsewhere.
+/// See module docs for the per-platform strategy. On any attach-time failure
+/// (clonefile rejects a non-APFS volume, symlink creation hits a weird FS)
+/// we silently fall back to a recursive copy so sync always makes progress.
 pub fn clone_to_library(
     cached_pkg_dir: &Path,
     library: &Path,
     package_name: &str,
 ) -> std::io::Result<()> {
     let dest = library.join(package_name);
-    // Remove any existing (possibly stale) copy.
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
-    }
+    // Remove whatever's there — dir, file, or (possibly broken) symlink from
+    // a prior sync. `dest.exists()` follows symlinks and would miss broken
+    // ones, which is exactly the state we'd land in if the cache was cleaned
+    // between syncs.
+    remove_entry(&dest)?;
 
     #[cfg(target_os = "macos")]
     {
@@ -123,12 +133,48 @@ pub fn clone_to_library(
             }
             Err(e) => {
                 debug!("clonefile failed ({}), falling back to copy", e);
-                // Fall through to recursive copy
+                // Fall through
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Symlink instead of copying: cache is the source of truth, each
+        // project library holds one cheap link per package. If `uvr cache
+        // clean` later removes the target, the next `uvr sync` reseeds the
+        // cache and rewrites the link.
+        match std::os::unix::fs::symlink(cached_pkg_dir, &dest) {
+            Ok(()) => {
+                debug!(
+                    "symlinked {} → {}",
+                    dest.display(),
+                    cached_pkg_dir.display()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                debug!("symlink failed ({}), falling back to copy", e);
+                // Fall through
             }
         }
     }
 
     copy_dir_recursive(cached_pkg_dir, &dest)
+}
+
+/// Remove a filesystem entry whatever its kind — directory, regular file,
+/// or symlink (including broken symlinks). `Ok(())` when the path doesn't
+/// exist. Used by `clone_to_library` so re-syncing over any prior state
+/// (old copy, fresh symlink, stale symlink) works uniformly.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) if md.file_type().is_symlink() => std::fs::remove_file(path),
+        Ok(md) if md.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Atomically store a package directory into the global cache.
@@ -429,6 +475,114 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(global_packages_dir().join(&key));
+    }
+
+    #[test]
+    fn remove_entry_handles_missing_path() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("nope");
+        // NotFound should not error.
+        remove_entry(&missing).unwrap();
+    }
+
+    #[test]
+    fn remove_entry_handles_file() {
+        let tmp = TempDir::new().unwrap();
+        let f = tmp.path().join("thing");
+        std::fs::write(&f, "x").unwrap();
+        remove_entry(&f).unwrap();
+        assert!(!f.exists());
+    }
+
+    #[test]
+    fn remove_entry_handles_directory() {
+        let tmp = TempDir::new().unwrap();
+        let d = tmp.path().join("dir");
+        std::fs::create_dir_all(d.join("nested")).unwrap();
+        std::fs::write(d.join("inner"), "x").unwrap();
+        remove_entry(&d).unwrap();
+        assert!(!d.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_entry_handles_broken_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let link = tmp.path().join("link");
+        // Target never existed — broken symlink.
+        std::os::unix::fs::symlink("/does/not/exist/uvr", &link).unwrap();
+        assert!(link.symlink_metadata().is_ok());
+        remove_entry(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_to_library_uses_symlink_on_linux() {
+        let tmp = TempDir::new().unwrap();
+        let cache_pkg = tmp.path().join("cache").join("ggplot2");
+        std::fs::create_dir_all(&cache_pkg).unwrap();
+        std::fs::write(cache_pkg.join("DESCRIPTION"), "Package: ggplot2\n").unwrap();
+
+        let library = tmp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        clone_to_library(&cache_pkg, &library, "ggplot2").unwrap();
+
+        let dest = library.join("ggplot2");
+        let md = std::fs::symlink_metadata(&dest).unwrap();
+        assert!(
+            md.file_type().is_symlink(),
+            "expected symlink, got {:?}",
+            md.file_type()
+        );
+        // Package is readable through the link.
+        assert!(dest.join("DESCRIPTION").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_to_library_replaces_real_dir_with_symlink() {
+        // Simulates upgrading from an old uvr that recursive-copied: library
+        // already holds a real directory. clone_to_library must replace it.
+        let tmp = TempDir::new().unwrap();
+        let cache_pkg = tmp.path().join("cache").join("xml2");
+        std::fs::create_dir_all(&cache_pkg).unwrap();
+        std::fs::write(cache_pkg.join("DESCRIPTION"), "Package: xml2\n").unwrap();
+
+        let library = tmp.path().join("library");
+        let old = library.join("xml2");
+        std::fs::create_dir_all(old.join("R")).unwrap();
+        std::fs::write(old.join("DESCRIPTION"), "Package: xml2-stale\n").unwrap();
+
+        clone_to_library(&cache_pkg, &library, "xml2").unwrap();
+
+        assert!(old.symlink_metadata().unwrap().file_type().is_symlink());
+        // Now reads from the cache.
+        let desc = std::fs::read_to_string(old.join("DESCRIPTION")).unwrap();
+        assert!(desc.contains("xml2\n") && !desc.contains("stale"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_to_library_overwrites_existing_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let cache_a = tmp.path().join("cache-a").join("dplyr");
+        let cache_b = tmp.path().join("cache-b").join("dplyr");
+        for c in [&cache_a, &cache_b] {
+            std::fs::create_dir_all(c).unwrap();
+            std::fs::write(c.join("DESCRIPTION"), "Package: dplyr\n").unwrap();
+        }
+
+        let library = tmp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        clone_to_library(&cache_a, &library, "dplyr").unwrap();
+        clone_to_library(&cache_b, &library, "dplyr").unwrap();
+
+        let link = library.join("dplyr");
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(target, cache_b);
     }
 
     #[cfg(target_os = "macos")]
