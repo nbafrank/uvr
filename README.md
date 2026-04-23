@@ -1,4 +1,4 @@
-# uvr <img src="r-package/man/figures/logo.jpg" align="right" height="139" alt="uvr hex logo" />
+# uvr <img src="r-package/man/figures/logo.png" align="right" height="139" alt="uvr hex logo" />
 
 [![CI](https://github.com/nbafrank/uvr/actions/workflows/ci.yml/badge.svg)](https://github.com/nbafrank/uvr/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
