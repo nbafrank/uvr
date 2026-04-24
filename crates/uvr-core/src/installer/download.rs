@@ -312,7 +312,8 @@ mod tests {
     #[test]
     fn archive_url_handles_cran_mirror() {
         assert_eq!(
-            cran_archive_url("https://cloud.r-project.org/src/contrib/xml2_1.3.6.tar.gz").as_deref(),
+            cran_archive_url("https://cloud.r-project.org/src/contrib/xml2_1.3.6.tar.gz")
+                .as_deref(),
             Some("https://cloud.r-project.org/src/contrib/Archive/xml2/xml2_1.3.6.tar.gz")
         );
     }
