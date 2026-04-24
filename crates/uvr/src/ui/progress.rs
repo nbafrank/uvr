@@ -3,10 +3,24 @@
 //! Both respect TTY detection via `console::Term::stderr().is_term()` — in
 //! pipes/CI they become hidden `ProgressBar` instances so `set_message` and
 //! `inc` calls become no-ops, and no control sequences leak to the stream.
+//!
+//! Two escape hatches for environments where the TTY heuristic is wrong
+//! (notably Positron's SSH terminal, which reports not-a-TTY but can render
+//! ANSI sequences fine):
+//!   - `UVR_PROGRESS=always` — force spinners on regardless of detection
+//!   - `UVR_PROGRESS=never`  — force spinners off (useful for CI logs)
 
 use super::{glyph, palette};
 use console::Term;
 use indicatif::{ProgressBar, ProgressStyle};
+
+fn progress_enabled() -> bool {
+    match std::env::var("UVR_PROGRESS").ok().as_deref() {
+        Some("always") | Some("1") | Some("true") => true,
+        Some("never") | Some("0") | Some("false") => false,
+        _ => Term::stderr().is_term(),
+    }
+}
 
 /// A slim cyan spinner for single long-running operations. Use for operations
 /// whose total work is unknown up-front (dependency resolution, network round
@@ -16,7 +30,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 /// Styling: amber-bold spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) against cyan message
 /// text — the spinner is the focal point; the message is secondary.
 pub fn make_spinner(msg: &str) -> ProgressBar {
-    if !Term::stderr().is_term() {
+    if !progress_enabled() {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new_spinner();
@@ -36,7 +50,7 @@ pub fn make_spinner(msg: &str) -> ProgressBar {
 /// Aggregate progress bar that shows `{bar} {pos}/{len} · {msg}`.
 /// Use when installing a known number of packages.
 pub fn make_aggregate_bar(total: u64) -> ProgressBar {
-    if !Term::stderr().is_term() {
+    if !progress_enabled() {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new(total);

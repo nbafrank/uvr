@@ -613,6 +613,13 @@ fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()>
     // Embedding quotes causes double-escaping that Inno Setup rejects (exit 1).
     let dir_arg = format!("/DIR={}", dest.to_string_lossy());
     let log_arg = format!("/LOG={}", log_path.to_string_lossy());
+    // /MERGETASKS="!recordversion": the R Inno Setup installer exposes a
+    // `recordversion` task which writes `HKCU\Software\R-core\R\<ver>\InstallPath`
+    // to the Windows registry. That key is what RStudio (and other registry-aware
+    // R GUIs) reads to pick its "default" R version — so writing it every time
+    // `uvr r install` runs silently clobbers the user's RStudio choice on every
+    // install. Since uvr manages its own R resolution, we never want this side
+    // effect. The `!` prefix disables the task while leaving other defaults intact.
     let output = Command::new(&exe_path)
         .args([
             "/VERYSILENT",
@@ -621,6 +628,7 @@ fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()>
             "/CURRENTUSER",
             "/NOICONS",
             "/NORESTART",
+            "/MERGETASKS=!recordversion",
             &log_arg,
         ])
         .output()?;

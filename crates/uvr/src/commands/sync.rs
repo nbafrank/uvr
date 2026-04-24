@@ -54,9 +54,10 @@ pub async fn run_inner(
     crate::commands::init::ensure_positron_settings(&project.root)
         .context("Failed to write Positron settings")?;
 
-    // Add uvr entries to .Rbuildignore for R package projects (DESCRIPTION may have
-    // been created after `uvr init`, so we check on every sync).
-    if project.root.join("DESCRIPTION").exists() {
+    // Add uvr entries to .Rbuildignore only when DESCRIPTION has `Package:`
+    // (real R package source tree). DESCRIPTION may have been created after
+    // `uvr init`, so we check on every sync.
+    if crate::commands::init::is_r_package_dir(&project.root) {
         let _ = crate::commands::init::write_rbuildignore(&project.root);
     }
 
@@ -435,12 +436,11 @@ pub async fn install_from_lockfile(
             (0, u) => format!("Upgrading {u} package(s)"),
             (n, u) => format!("Installing {n}, upgrading {u}"),
         };
-        ui::info(format!(
-            "{} {} {}",
-            action,
-            palette::dim(ui::glyph::bullet()),
-            palette::dim(parts.join(&sep)),
-        ));
+        // Colon between the action and the breakdown reads cleaner than a bullet,
+        // which visually duplicates the separators inside `parts` — especially in
+        // ASCII mode where `bullet()` renders as `.` and the line ends up looking
+        // like "Installing 116 package(s) . 111 binary . 5 from source".
+        ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
     }
 
     if !plans.is_empty() {

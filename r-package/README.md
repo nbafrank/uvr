@@ -62,7 +62,8 @@ remove_pkgs("ggplot2")
 | `sync()` | `uvr sync` | Install all packages from lockfile |
 | `lock()` | `uvr lock` | Re-resolve deps, update lockfile |
 | `run()` | `uvr run` | Run a script in the project env |
-| `install_uvr()` | — | Install/update the uvr CLI binary |
+| `install_uvr()` | — | Install the uvr CLI binary |
+| `update_uvr()` | — | Update both R package (from GitHub) and CLI binary |
 
 ### Key arguments
 

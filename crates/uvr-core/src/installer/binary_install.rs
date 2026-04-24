@@ -24,22 +24,52 @@ fn remove_dir_with_retry(path: &Path) {
     }
 }
 
+/// On Windows, antivirus / Search Indexer / OneDrive can briefly hold a handle
+/// on files inside a freshly-extracted staging directory, causing `rename`
+/// (which ultimately calls `MoveFileExW`) to fail with `ERROR_ACCESS_DENIED`
+/// (raw_os_error == 5) or `ERROR_SHARING_VIOLATION` (32). Both are transient
+/// and usually clear within a second.
+#[cfg(windows)]
+fn is_transient_windows_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(not(windows))]
+fn is_transient_windows_error(_: &std::io::Error) -> bool {
+    false
+}
+
 /// Move `src` to `dst`, falling back to recursive copy + delete when
-/// `rename` fails with a cross-device error (EXDEV).  This handles
+/// `rename` fails with a cross-device error (EXDEV). This handles
 /// Docker volumes, NFS mounts, and bind-mounted library paths.
+///
+/// On Windows, also retries transient `ERROR_ACCESS_DENIED` /
+/// `ERROR_SHARING_VIOLATION` errors caused by AV / indexer / OneDrive holding
+/// file handles on just-extracted staging directories. Observed in the wild
+/// with `classInt`, `viridisLite`, `terra` — any package with many small
+/// files is a likely trigger. Backoff: 50, 100, 200, 400, 800 ms (~1.5 s total).
 fn rename_or_copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(e)
-            if e.raw_os_error() == Some(18 /* EXDEV */)
-                || e.to_string().contains("cross-device") =>
-        {
-            copy_dir_recursive(src, dst)?;
-            std::fs::remove_dir_all(src)?;
-            Ok(())
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..6 {
+        match std::fs::rename(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if e.raw_os_error() == Some(18 /* EXDEV */)
+                    || e.to_string().contains("cross-device") =>
+            {
+                copy_dir_recursive(src, dst)?;
+                std::fs::remove_dir_all(src)?;
+                return Ok(());
+            }
+            Err(e) if is_transient_windows_error(&e) && attempt < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(50 * (1 << attempt)));
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("rename_or_copy_dir exhausted retries")))
 }
 
 /// Extract a pre-built R binary package into `library`.

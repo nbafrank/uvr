@@ -56,8 +56,10 @@ pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
     // Write .gitignore
     write_gitignore(&cwd).context("Failed to write .gitignore")?;
 
-    // Add uvr files to .Rbuildignore for R package projects
-    if description_path.exists() {
+    // Add uvr files to .Rbuildignore only for actual R package source trees
+    // (DESCRIPTION with a `Package:` field). Non-package projects may still
+    // carry a DESCRIPTION for dependency tracking.
+    if is_r_package_dir(&cwd) {
         write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
     }
 
@@ -219,6 +221,20 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
     std::fs::write(&settings_path, pretty + "\n")
 }
 
+/// Returns true if `dir` looks like an R package source tree — DESCRIPTION
+/// exists and contains a `Package:` field. Non-package projects may still
+/// carry a DESCRIPTION (for dependency tracking) but shouldn't get a
+/// `.Rbuildignore`, since they aren't built with `R CMD build`.
+pub fn is_r_package_dir(dir: &Path) -> bool {
+    let desc = dir.join("DESCRIPTION");
+    let Ok(contents) = std::fs::read_to_string(&desc) else {
+        return false;
+    };
+    contents
+        .lines()
+        .any(|line| line.starts_with("Package:") || line.starts_with("Package :"))
+}
+
 pub fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".Rbuildignore");
     let entries = "^uvr\\.toml$\n^uvr\\.lock$\n^\\.uvr$\n";
@@ -290,5 +306,33 @@ mod rprofile_tests {
         let existing = RPROFILE_SNIPPET.to_string();
         let new = refresh_uvr_block(&existing, RPROFILE_SNIPPET).unwrap();
         assert_eq!(new, existing);
+    }
+
+    #[test]
+    fn is_r_package_dir_true_with_package_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("DESCRIPTION"),
+            "Package: foo\nVersion: 0.1.0\n",
+        )
+        .unwrap();
+        assert!(is_r_package_dir(tmp.path()));
+    }
+
+    #[test]
+    fn is_r_package_dir_false_without_package_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("DESCRIPTION"),
+            "Depends: R (>= 4.1)\nImports: dplyr\n",
+        )
+        .unwrap();
+        assert!(!is_r_package_dir(tmp.path()));
+    }
+
+    #[test]
+    fn is_r_package_dir_false_without_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_r_package_dir(tmp.path()));
     }
 }

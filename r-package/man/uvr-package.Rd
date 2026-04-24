@@ -16,7 +16,8 @@ with a lockfile, similar to how \code{uv} works for Python.
   \item{\code{\link{sync}}}{Install all packages from the lockfile}
   \item{\code{\link{lock}}}{Re-resolve dependencies and update the lockfile}
   \item{\code{\link{run}}}{Run an R script in the project environment}
-  \item{\code{\link{install_uvr}}}{Install or update the uvr CLI binary}
+  \item{\code{\link{install_uvr}}}{Install the uvr CLI binary}
+  \item{\code{\link{update_uvr}}}{Update both R package and CLI binary}
 }
 
 \strong{Typical workflow:}
