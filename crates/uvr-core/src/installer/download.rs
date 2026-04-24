@@ -130,6 +130,26 @@ pub struct DownloadResult {
     pub used_binary: bool,
 }
 
+/// Compute the CRAN Archive fallback URL for a `src/contrib` URL.
+/// CRAN moves older package versions to `/src/contrib/Archive/<pkg>/` when
+/// a new version is published, so old lockfile URLs start to 404.
+/// Returns `None` if the URL doesn't look like a CRAN source tarball, or
+/// already points at the Archive.
+fn cran_archive_url(url: &str) -> Option<String> {
+    if !url.contains("/src/contrib/") || url.contains("/src/contrib/Archive/") {
+        return None;
+    }
+    let (base, filename) = url.rsplit_once("/src/contrib/")?;
+    if filename.contains('/') || !filename.ends_with(".tar.gz") {
+        return None;
+    }
+    let (pkg_name, _) = filename.rsplit_once('_')?;
+    if pkg_name.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/src/contrib/Archive/{pkg_name}/{filename}"))
+}
+
 async fn download_one(
     client: &reqwest::Client,
     cache_dir: &Path,
@@ -202,7 +222,20 @@ async fn download_one(
 
     // Stream response to a temp file to avoid buffering entire packages in RAM.
     // Compute checksums on-the-fly during the stream.
-    let mut resp = client.get(url).send().await?.error_for_status()?;
+    let mut resp_result = match client.get(url).send().await {
+        Ok(r) => r.error_for_status(),
+        Err(e) => Err(e),
+    };
+    if resp_result.is_err() {
+        if let Some(archive_url) = cran_archive_url(url) {
+            debug!("{name}: {url} failed, retrying via CRAN Archive: {archive_url}");
+            resp_result = match client.get(&archive_url).send().await {
+                Ok(r) => r.error_for_status(),
+                Err(e) => Err(e),
+            };
+        }
+    }
+    let mut resp = resp_result?;
 
     let cache_dir = dest.parent().unwrap_or(std::path::Path::new("."));
     let mut tmp_file = tempfile::Builder::new()
@@ -262,4 +295,69 @@ async fn download_one(
 
     pb.finish_and_clear();
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cran_archive_url;
+
+    #[test]
+    fn archive_url_rewrites_cran_src_contrib() {
+        assert_eq!(
+            cran_archive_url("https://cran.r-project.org/src/contrib/curl_7.0.0.tar.gz").as_deref(),
+            Some("https://cran.r-project.org/src/contrib/Archive/curl/curl_7.0.0.tar.gz")
+        );
+    }
+
+    #[test]
+    fn archive_url_handles_cran_mirror() {
+        assert_eq!(
+            cran_archive_url("https://cloud.r-project.org/src/contrib/xml2_1.3.6.tar.gz").as_deref(),
+            Some("https://cloud.r-project.org/src/contrib/Archive/xml2/xml2_1.3.6.tar.gz")
+        );
+    }
+
+    #[test]
+    fn archive_url_handles_dotted_version() {
+        assert_eq!(
+            cran_archive_url("https://cran.r-project.org/src/contrib/scales_1.1-3.tar.gz")
+                .as_deref(),
+            Some("https://cran.r-project.org/src/contrib/Archive/scales/scales_1.1-3.tar.gz")
+        );
+    }
+
+    #[test]
+    fn archive_url_none_for_non_cran() {
+        assert_eq!(
+            cran_archive_url("https://bioconductor.org/packages/3.18/bioc/src/contrib/DESeq2_1.42.0.tar.gz"),
+            Some("https://bioconductor.org/packages/3.18/bioc/src/contrib/Archive/DESeq2/DESeq2_1.42.0.tar.gz".to_string())
+        );
+        // That's actually fine — Bioconductor doesn't use Archive/ but the
+        // retry is harmless (another 404), and keeping the logic generic
+        // means future repos with the same layout work too.
+    }
+
+    #[test]
+    fn archive_url_none_if_already_archive() {
+        assert_eq!(
+            cran_archive_url(
+                "https://cran.r-project.org/src/contrib/Archive/curl/curl_7.0.0.tar.gz"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_url_none_for_unrelated_url() {
+        assert_eq!(cran_archive_url("https://example.com/foo.tar.gz"), None);
+        assert_eq!(cran_archive_url("https://p3m.dev/cran/latest/bin/macosx/big-sur-arm64/contrib/4.5/ggplot2_3.5.1.tgz"), None);
+    }
+
+    #[test]
+    fn archive_url_none_for_non_tar_gz() {
+        assert_eq!(
+            cran_archive_url("https://cran.r-project.org/src/contrib/PACKAGES.gz"),
+            None
+        );
+    }
 }

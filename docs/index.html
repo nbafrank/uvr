@@ -978,8 +978,8 @@
         <p class="section-desc">
           Parallel downloads, global package cache with CoW cloning, no R process for binary installs.
           macOS arm64, R&nbsp;4.5, P3M binaries. Median of 5 runs, index caches warm.
-          uvr pre-resolves deps into a lockfile; other tools resolve inline.
-          renv uses its default global cache (symlinks).
+          <strong>First-install comparison:</strong> uvr pre-resolves deps via <code>uvr lock</code> (separate step) and only <code>uvr sync</code> (install) is timed; <code>install.packages</code>/<code>pak</code>/<code>renv</code> resolve + install inline.
+          For a like-for-like lockfile-restore comparison, see <code>pak::lockfile_install()</code> and <code>renv::restore()</code>.
         </p>
       </div>
       <div class="bench-grid">
@@ -1017,7 +1017,7 @@
             </div>
           </div>
 
-          <div class="bench-speedup">21x faster than install.packages()</div>
+          <div class="bench-speedup">21x faster than install.packages() (first install)</div>
         </div>
 
         <!-- tidyverse -->
@@ -1054,7 +1054,7 @@
             </div>
           </div>
 
-          <div class="bench-speedup">44x faster than install.packages()</div>
+          <div class="bench-speedup">44x faster than install.packages() (first install)</div>
         </div>
       </div>
     </div>
@@ -1217,8 +1217,8 @@
             <tr>
               <td>Declarative manifest</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check-note">&#10003;&dagger;</span></td>
+              <td><span class="check-note">&#10003;&dagger;</span></td>
               <td><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
@@ -1227,7 +1227,7 @@
               <td>Lockfile</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check">&#10003;</span></td>
               <td><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
@@ -1287,15 +1287,6 @@
               <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
-              <td>Single config file</td>
-              <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
-              <td><span class="cross">&mdash;</span></td>
-              <td><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
-              <td><span class="check">&#10003;</span></td>
-            </tr>
-            <tr>
               <td>CI mode (--frozen)</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="check">&#10003;</span></td>
@@ -1314,13 +1305,13 @@
               <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
-              <td>Single static binary</td>
+              <td>Standalone CLI (no R required)</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
               <td><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
               <td>Windows support</td>
@@ -1334,7 +1325,7 @@
           </tbody>
         </table>
       </div>
-      <p class="table-footnote">* Via conda-forge channel, not native CRAN/Bioconductor integration.</p>
+      <p class="table-footnote">* Via conda-forge channel, not native CRAN/Bioconductor integration. &nbsp; &dagger; Via DESCRIPTION-based workflow, not a dedicated manifest format.</p>
     </div>
   </section>
 

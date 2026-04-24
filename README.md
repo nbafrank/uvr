@@ -58,25 +58,25 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 
 ### Feature matrix
 
-|                              | uvr | renv | pak | rv  | rig | pixi |
-|------------------------------|-----|------|-----|-----|-----|------|
-| Declarative manifest         | Y   | -    | -   | Y   | -   | Y    |
-| Lockfile                     | Y   | Y    | -   | Y   | -   | Y    |
-| R version management         | Y   | -    | -   | -   | Y   | Y    |
-| Run scripts in isolated env  | Y   | -    | -   | -   | -   | Y    |
-| CRAN packages                | Y   | Y    | Y   | Y   | -   | Y*   |
-| Bioconductor packages        | Y   | Y    | Y   | Y   | -   | Y*   |
-| GitHub packages              | Y   | Y    | Y   | Y   | -   | -    |
-| Pre-built binaries (P3M)     | Y   | -    | Y   | -   | -   | -    |
-| System dep detection (Linux) | Y   | -    | Y   | -   | -   | Y    |
-| Single config file           | Y   | -    | -   | Y   | -   | Y    |
-| CI mode (`--frozen`)         | Y   | Y    | -   | -   | -   | Y    |
-| No admin rights required     | Y   | Y    | Y   | Y   | -** | Y    |
-| Single static binary         | Y   | -    | -   | Y   | Y   | -    |
-| Windows support              | Y   | Y    | Y   | Y   | Y   | Y    |
+|                                | uvr | renv | pak | rv  | rig | pixi |
+|--------------------------------|-----|------|-----|-----|-----|------|
+| Declarative manifest           | Y   | Y†   | Y†  | Y   | -   | Y    |
+| Lockfile                       | Y   | Y    | Y   | Y   | -   | Y    |
+| R version management           | Y   | -    | -   | -   | Y   | Y    |
+| Run scripts in isolated env    | Y   | -    | -   | -   | -   | Y    |
+| CRAN packages                  | Y   | Y    | Y   | Y   | -   | Y*   |
+| Bioconductor packages          | Y   | Y    | Y   | Y   | -   | Y*   |
+| GitHub packages                | Y   | Y    | Y   | Y   | -   | -    |
+| Pre-built binaries (P3M)       | Y   | -    | Y   | -   | -   | -    |
+| System dep detection (Linux)   | Y   | -    | Y   | -   | -   | Y    |
+| CI mode (`--frozen`)           | Y   | Y    | -   | -   | -   | Y    |
+| No admin rights required       | Y   | Y    | Y   | Y   | -** | Y    |
+| Standalone CLI (no R required) | Y   | -    | -   | Y   | Y   | Y    |
+| Windows support                | Y   | Y    | Y   | Y   | Y   | Y    |
 
 \* pixi installs R packages from conda-forge, not CRAN/Bioconductor directly.
 \** rig requires admin rights on Windows.
+† Via DESCRIPTION-based workflow, not a dedicated manifest format.
 
 ---
 
@@ -186,8 +186,8 @@ cargo install --git https://github.com/nbafrank/uvr
 
 ```sh
 # Create a new project
-uvr init my-project --r-version ">=4.3.0"
-cd my-project
+mkdir my-project && cd my-project
+uvr init --r-version ">=4.3.0"
 
 # Add packages (CRAN, Bioconductor, GitHub)
 uvr add ggplot2 dplyr

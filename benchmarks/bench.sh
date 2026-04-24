@@ -376,6 +376,100 @@ REOF
     fi
 }
 
+bench_pak_lockfile() {
+    # Apples-to-apples with uvr sync: pre-resolved lockfile, install only.
+    local manifest="$1" scenario="$2" tier="$3"
+    local times="" failed=0
+    local npkg
+    npkg=$(get_npkg "$scenario")
+
+    # Pre-generate pak lockfile (resolution excluded from timing)
+    local lockdir
+    lockdir="$(mktemp -d)"
+    cp "$manifest" "$lockdir/uvr.toml"
+    mkdir -p "$lockdir/.uvr/library"
+    cat > "$lockdir/bench_pak_lock.R" <<REOF
+library(pak)
+options(repos = c(CRAN = "${P3M_REPO}"))
+pak::lockfile_create("${scenario}", lockfile = file.path(getwd(), "pkg.lock"), lib = tempfile(), dependencies = TRUE)
+REOF
+    (cd "$lockdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak_lock.R >/dev/null 2>&1) || {
+        echo "  pak_lockfile ($tier):  SKIPPED (lockfile_create failed)"
+        rm -rf "$lockdir"
+        return
+    }
+    local lockfile_path="$lockdir/pkg.lock"
+    if [ ! -f "$lockfile_path" ]; then
+        echo "  pak_lockfile ($tier):  SKIPPED (no lockfile generated)"
+        rm -rf "$lockdir"
+        return
+    fi
+
+    # Warmup
+    clear_all_caches
+    local warmdir
+    warmdir="$(mktemp -d)"
+    cp "$lockfile_path" "$warmdir/pkg.lock"
+    mkdir -p "$warmdir/paklib"
+    cat > "$warmdir/bench_pak_li.R" <<REOF
+library(pak)
+lib <- file.path(getwd(), "paklib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib)
+pak::lockfile_install(lockfile = file.path(getwd(), "pkg.lock"), lib = lib, update = FALSE)
+REOF
+    (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak_li.R >/dev/null 2>&1) || true
+    rm -rf "$warmdir"
+
+    echo -n "  pak_lockfile ($tier): "
+    for i in $(seq 1 "$RUNS"); do
+        if [ "$tier" = "cold" ]; then
+            clear_all_caches
+        fi
+        local benchdir
+        benchdir="$(mktemp -d)"
+        cp "$lockfile_path" "$benchdir/pkg.lock"
+        mkdir -p "$benchdir/paklib"
+        cat > "$benchdir/bench_pak_li.R" <<REOF
+library(pak)
+lib <- file.path(getwd(), "paklib")
+dir.create(lib, recursive = TRUE, showWarnings = FALSE)
+.libPaths(lib)
+pak::lockfile_install(lockfile = file.path(getwd(), "pkg.lock"), lib = lib, update = FALSE)
+REOF
+        local t
+        t=$(time_cmd sh -c "cd '$benchdir' && R_LIBS= R_LIBS_USER= R_LIBS_SITE= '$UVR' run bench_pak_li.R") || true
+        if [ "$t" = "FAIL" ]; then
+            echo -n "FAIL "
+            failed=$((failed + 1))
+        else
+            times="$times $t"
+            echo -n "${t}s "
+        fi
+        rm -rf "$benchdir"
+    done
+
+    rm -rf "$lockdir"
+
+    if [ -z "$(echo "$times" | tr -d ' ')" ]; then
+        echo "→ ALL FAILED"
+        return
+    fi
+    local med
+    med=$(median $times)
+    set_result "${tier}:pak_lockfile:${scenario}" "$med"
+    local note=""
+    if [ "$failed" -gt 0 ]; then
+        note="$failed of $RUNS runs failed"
+    fi
+    json_add "$scenario" "$tier" "pak_lockfile" "$(echo "$times" | sed 's/^ //')" "$med" "$npkg" "$note"
+    if [ "$failed" -gt 0 ]; then
+        echo "→ median ${med}s ($failed failed)"
+    else
+        echo "→ median ${med}s"
+    fi
+}
+
 bench_renv() {
     local manifest="$1" scenario="$2" tier="$3"
     local times="" failed=0
@@ -463,7 +557,10 @@ for scenario in $SCENARIOS; do
         # finishes all its timed runs before the next tool's warmup clears caches.
         bench_uvr "$MANIFEST" "$scenario" "$tier"
         bench_install_packages "$MANIFEST" "$scenario" "$tier"
-        if $HAS_PAK; then bench_pak "$MANIFEST" "$scenario" "$tier"; fi
+        if $HAS_PAK; then
+            bench_pak "$MANIFEST" "$scenario" "$tier"
+            bench_pak_lockfile "$MANIFEST" "$scenario" "$tier"
+        fi
         if $HAS_RENV; then bench_renv "$MANIFEST" "$scenario" "$tier"; fi
 
         echo ""
@@ -481,7 +578,7 @@ print_table() {
     # Build header
     local header="| Scenario | Packages | uvr sync | install.packages"
     local sep="|----------|----------|----------|------------------"
-    if $HAS_PAK; then header="$header | pak"; sep="$sep|-----"; fi
+    if $HAS_PAK; then header="$header | pak | pak lockfile"; sep="$sep|-----|--------------"; fi
     if $HAS_RENV; then header="$header | renv"; sep="$sep|------"; fi
     echo "$header |"
     echo "$sep|"
@@ -493,7 +590,10 @@ print_table() {
         uvr_t="$(get_result "${tier}:uvr:${scenario}")s"
         ip_t="$(get_result "${tier}:ip:${scenario}")s"
         local row="| $scenario | $npkg | **$uvr_t** | $ip_t"
-        if $HAS_PAK; then row="$row | $(get_result "${tier}:pak:${scenario}")s"; fi
+        if $HAS_PAK; then
+            row="$row | $(get_result "${tier}:pak:${scenario}")s"
+            row="$row | $(get_result "${tier}:pak_lockfile:${scenario}")s"
+        fi
         if $HAS_RENV; then row="$row | $(get_result "${tier}:renv:${scenario}")s"; fi
         echo "$row |"
     done
@@ -515,7 +615,8 @@ echo "Methodology:"
 echo "- \"warm\": 1 warmup run (discarded), then index caches left intact; target library cleared between runs"
 echo "- \"cold\": all caches (index, download, metadata) cleared between runs"
 echo "- uvr: lockfile pre-resolved (\`uvr lock\`); only \`uvr sync\` (install) is timed"
-echo "- install.packages/pak/renv: resolution + install timed together"
+echo "- install.packages/pak/renv: resolution + install timed together (first-install scenario)"
+echo "- pak_lockfile: apples-to-apples with uvr sync — pak::lockfile_install() from a pre-built pkg.lock (install only)"
 echo "- All tools use P3M (p3m.dev/cran/latest) as CRAN mirror"
 echo "- .libPaths fully isolated for install.packages and pak (system library hidden)"
 echo "- renv uses its default global cache (matching real-world usage)"
