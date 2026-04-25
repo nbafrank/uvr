@@ -167,6 +167,14 @@ fn refresh_uvr_block(existing: &str, snippet: &str) -> Option<String> {
 
 /// Write `.vscode/settings.json` with Positron R interpreter path if a pinned
 /// R version is managed by uvr.
+///
+/// Positron's `interpreters.default` setting only selects from interpreters
+/// it has already discovered — and uvr's R install at
+/// `~/.uvr/r-versions/<ver>/` is not in any of Positron's standard discovery
+/// paths (R.framework, conda, pixi, /usr/local/bin). So we also write
+/// `positron.r.customBinaries` to inject the uvr R into discovery; `default`
+/// then picks it as the primary. Without `customBinaries`, `default` was
+/// silently a no-op.
 pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
     // Determine the pinned R version from .r-version
     let r_version_path = dir.join(R_VERSION_FILE);
@@ -193,21 +201,42 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
         return Ok(()); // Not a uvr-managed R version
     }
 
-    let r_binary_str = r_binary.to_string_lossy();
+    let r_binary_str = r_binary.to_string_lossy().into_owned();
     let vscode_dir = dir.join(".vscode");
     std::fs::create_dir_all(&vscode_dir)?;
     let settings_path = vscode_dir.join("settings.json");
 
-    let key = "positron.r.interpreters.default";
+    let default_key = "positron.r.interpreters.default";
+    let custom_binaries_key = "positron.r.customBinaries";
 
     if settings_path.exists() {
         let existing = std::fs::read_to_string(&settings_path)?;
         if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&existing) {
             if let Some(obj) = json.as_object_mut() {
                 obj.insert(
-                    key.to_string(),
-                    serde_json::Value::String(r_binary_str.into_owned()),
+                    default_key.to_string(),
+                    serde_json::Value::String(r_binary_str.clone()),
                 );
+
+                // customBinaries is an array of paths; merge our path in if
+                // not already present, preserving any user-added paths.
+                let entry = obj
+                    .entry(custom_binaries_key.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                if let Some(arr) = entry.as_array_mut() {
+                    let already = arr
+                        .iter()
+                        .any(|v| v.as_str() == Some(r_binary_str.as_str()));
+                    if !already {
+                        arr.push(serde_json::Value::String(r_binary_str.clone()));
+                    }
+                } else {
+                    // Existing value isn't an array — replace with one
+                    // containing just our path. Don't try to coerce; the
+                    // user can always add their own entries back manually.
+                    *entry = serde_json::json!([r_binary_str.clone()]);
+                }
+
                 let pretty = serde_json::to_string_pretty(&json).unwrap_or(existing);
                 return std::fs::write(&settings_path, pretty + "\n");
             }
@@ -216,7 +245,10 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
         return Ok(());
     }
 
-    let content = serde_json::json!({ key: r_binary_str });
+    let content = serde_json::json!({
+        default_key: r_binary_str,
+        custom_binaries_key: [r_binary_str],
+    });
     let pretty = serde_json::to_string_pretty(&content).unwrap();
     std::fs::write(&settings_path, pretty + "\n")
 }

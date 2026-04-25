@@ -79,19 +79,34 @@ impl Platform {
     /// Fallback URL for older R versions that have been moved to an archive.
     ///
     /// On Windows, older R releases are moved from `/base/` to `/base/old/<version>/`.
-    /// On macOS, older releases are moved to subdirectories as well.
+    /// On macOS arm64/x86_64, all versions live in the same `/base/` directory
+    /// (no `/old/` subdirectory exists for the per-arch builds), so there's no
+    /// useful fallback. Linux uses the Posit CDN which hosts all versions at
+    /// the same path.
     pub fn download_url_fallback(&self, version: &str) -> Option<String> {
         match self {
             Platform::WindowsX86_64 => Some(format!(
                 "https://cran.r-project.org/bin/windows/base/old/{version}/R-{version}-win.exe"
             )),
-            Platform::MacOsArm64 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-{version}-arm64.pkg"
-            )),
-            Platform::MacOsX86_64 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
-            )),
-            // Linux uses Posit CDN which hosts all versions at the same path.
+            Platform::MacOsArm64
+            | Platform::MacOsX86_64
+            | Platform::LinuxX86_64
+            | Platform::LinuxArm64 => None,
+        }
+    }
+
+    /// Where to find the directory listing for available R versions.
+    /// Used to build a helpful error message when a requested version 404s.
+    pub fn directory_listing_url(&self) -> Option<&'static str> {
+        match self {
+            Platform::MacOsArm64 => {
+                Some("https://cran.r-project.org/bin/macosx/big-sur-arm64/base/")
+            }
+            Platform::MacOsX86_64 => {
+                Some("https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/")
+            }
+            Platform::WindowsX86_64 => Some("https://cran.r-project.org/bin/windows/base/"),
+            // Posit CDN doesn't expose a directory listing.
             Platform::LinuxX86_64 | Platform::LinuxArm64 => None,
         }
     }
@@ -171,18 +186,22 @@ pub async fn download_and_install_r(
                 "Primary URL returned {}, trying {fallback}",
                 response.status()
             );
-            client
-                .get(&fallback)
-                .send()
-                .await?
-                .error_for_status()?
-                .bytes()
-                .await?
+            let fallback_resp = client.get(&fallback).send().await?;
+            if fallback_resp.status().is_success() {
+                fallback_resp.bytes().await?
+            } else {
+                return Err(version_not_found_error(
+                    client,
+                    version,
+                    platform,
+                    fallback_resp.status(),
+                )
+                .await);
+            }
         } else {
-            return Err(UvrError::Other(format!(
-                "R {version} not found at {url} (HTTP {}). Check available versions with `uvr r list --all`.",
-                response.status()
-            )));
+            return Err(
+                version_not_found_error(client, version, platform, response.status()).await,
+            );
         }
     } else {
         response.error_for_status()?.bytes().await?
@@ -211,6 +230,55 @@ pub async fn download_and_install_r(
 
     info!("R {version} installed to {}", install_dir.display());
     Ok(install_dir)
+}
+
+/// Build a helpful error when CRAN/Posit returns 4xx for a requested R version.
+/// Tries to list available versions from the platform's directory listing so
+/// users see "latest available is 4.5.3" instead of just "404 Not Found".
+async fn version_not_found_error(
+    client: &reqwest::Client,
+    version: &str,
+    platform: Platform,
+    status: reqwest::StatusCode,
+) -> UvrError {
+    // Best-effort version enumeration. If the listing fetch fails or the
+    // platform has no listing endpoint, fall back to the generic message.
+    let mut available_hint = String::new();
+    if let Some(listing_url) = platform.directory_listing_url() {
+        if let Ok(resp) = client.get(listing_url).send().await {
+            if let Ok(body) = resp.text().await {
+                let mut versions: Vec<String> = scan_versions_from_listing(&body);
+                versions.sort_by(|a, b| version_compare(a, b));
+                versions.dedup();
+                if let Some(latest) = versions.last() {
+                    available_hint = format!("\nLatest available for your platform: {latest}.\nTry `uvr r install {latest}`, or `uvr r list --all` to see every published version.");
+                }
+            }
+        }
+    }
+    if available_hint.is_empty() {
+        available_hint = "\nCheck available versions with `uvr r list --all`. If R was just released, the upstream mirror may not have published the build for your platform yet — try again in a day.".to_string();
+    }
+    UvrError::Other(format!(
+        "R {version} is not published for your platform (HTTP {status}).{available_hint}"
+    ))
+}
+
+/// Pull `R-X.Y.Z` version strings out of an HTML directory listing.
+fn scan_versions_from_listing(body: &str) -> Vec<String> {
+    use regex::Regex;
+    let re = Regex::new(r"R-(\d+\.\d+\.\d+)(?:[-_])").unwrap();
+    re.captures_iter(body)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+/// Numeric comparison of "X.Y.Z" version strings. Non-numeric components
+/// sort lexicographically as a fallback.
+fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse =
+        |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse::<u32>().ok()).collect() };
+    parse(a).cmp(&parse(b))
 }
 
 /// macOS: `.pkg` → xar → Payload (gzip+cpio) → extract
