@@ -80,10 +80,18 @@ impl Downloader {
                             used_binary: is_binary,
                         }),
                         Err(e) if is_binary && fallback_url.is_some() => {
-                            // Binary download failed — fall back to source tarball
+                            // Binary download failed — fall back to source tarball.
+                            // The most common reason here is "Posit hasn't built this
+                            // version against this R minor" (especially on older R
+                            // branches), which is normal and not a uvr error. Keep the
+                            // detail at debug-level; users see a single dim INFO line
+                            // so it's clear *why* the install is taking longer.
                             let fallback = fallback_url.as_ref().unwrap();
-                            tracing::warn!(
-                                "P3M binary download failed for {pkg_name}, falling back to source: {e}"
+                            tracing::debug!(
+                                "P3M binary unavailable for {pkg_name} {pkg_version}, falling back to source: {e}"
+                            );
+                            tracing::info!(
+                                "{pkg_name} {pkg_version}: no P3M binary for this R minor, compiling from source"
                             );
                             let path = download_one(
                                 &client,
