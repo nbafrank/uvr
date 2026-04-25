@@ -153,8 +153,8 @@ pub async fn install_from_lockfile(
     // and the companion is already installed.
     let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
     if !companion_installed || !to_install.is_empty() {
-        if let Some((_, ref current_r)) = r_info {
-            ensure_companion_package(&library, current_r);
+        if let Some((ref r_bin, ref current_r)) = r_info {
+            ensure_companion_package(&library, current_r, r_bin);
         }
     }
 
@@ -550,7 +550,11 @@ const COMPANION_HASH: &str = "820dd6eb191fb4496662de3d524005c1c876206831724d4e21
 /// Security: the download is pinned to an immutable commit SHA and verified
 /// against a hardcoded SHA-256 hash, preventing supply-chain attacks via the
 /// companion repo.
-pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &str) {
+pub fn ensure_companion_package(
+    library: &std::path::Path,
+    current_r_version: &str,
+    r_binary: &std::path::Path,
+) {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
         // Check if the companion was built with a different R major.minor.
@@ -570,12 +574,10 @@ pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &s
     let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
 
     // Retry once if the first attempt fails with a bad cached tarball or a
-    // transient extract/copy failure. In practice this is the path taken when
-    // a previous run cached an error-page HTML instead of a tarball, or when
-    // the initial extract lost a race with file-indexing.
+    // transient download/install failure.
     let mut last_err: Option<String> = None;
     for attempt in 0..2 {
-        match try_install_companion(library, &tarball) {
+        match try_install_companion(library, &tarball, r_binary) {
             Ok(()) => {
                 ui::bullet_dim("uvr R companion package installed");
                 return;
@@ -593,8 +595,6 @@ pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &s
         }
     }
 
-    // Both attempts failed — surface a user-visible hint so the R session
-    // doesn't fail mysteriously with `library(uvr)` not being installed.
     ui::warn(format!(
         "Could not install the uvr R companion package automatically ({}).\n   \
          Install manually from R: remotes::install_github(\"nbafrank/uvr-r\", lib = .libPaths()[1])",
@@ -602,11 +602,19 @@ pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &s
     ));
 }
 
-/// Attempt the download + verify + extract + copy cycle once. Returns the
-/// first failure on any step. Caller decides retry policy.
+/// Attempt the download + verify + install cycle once. Returns the first
+/// failure on any step. Caller decides retry policy.
+///
+/// Install uses `R CMD INSTALL` on the extracted source tree — required for
+/// `library(uvr)` to work, since R's loader expects the compiled install
+/// layout (`Meta/package.rds`, lazy-load `.rdb`/`.rdx`, help indices) that
+/// only `R CMD INSTALL` produces. An earlier shortcut that directly copied
+/// source files was ~400ms faster but produced a directory that looked
+/// installed to `.Rprofile`'s package count but that R refused to load.
 fn try_install_companion(
     library: &std::path::Path,
     tarball: &std::path::Path,
+    r_binary: &std::path::Path,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
     if !tarball.exists() {
@@ -631,34 +639,22 @@ fn try_install_companion(
         }
     }
 
-    // Extract directly instead of spawning R CMD INSTALL (~400ms savings).
-    // The GitHub tarball contains `owner-repo-sha/` at the top level with the
-    // R package source inside. We extract it, find the package dir, and copy
-    // the R/, DESCRIPTION, NAMESPACE files into library/uvr/.
-    let file = std::fs::File::open(tarball)?;
-    let gz = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(gz);
-    let tmp_dir = tempfile::tempdir()?;
-    archive.unpack(tmp_dir.path())?;
+    // R CMD INSTALL can take a tarball directly — it extracts, finds the
+    // package dir by DESCRIPTION, and installs to --library. The GitHub
+    // tarball has a `nbafrank-uvr-r-<sha>/` top-level dir, but R CMD INSTALL
+    // keys on the Package: field from DESCRIPTION, so the installed dir ends
+    // up correctly named `uvr/`.
+    let installer =
+        uvr_core::installer::r_cmd_install::RCmdInstall::new(r_binary.to_string_lossy());
+    installer
+        .install(tarball, library, "uvr")
+        .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
 
-    let pkg_src = std::fs::read_dir(tmp_dir.path())?
-        .flatten()
-        .find(|e| e.path().join("DESCRIPTION").exists())
-        .map(|e| e.path())
-        .ok_or("companion package dir not found in tarball")?;
-
+    // Postcondition: Meta/package.rds is what `library()` checks first.
     let dest = library.join("uvr");
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest)?;
-    }
-    package_cache::copy_dir_recursive(&pkg_src, &dest)?;
-
-    // Guard: if the copy succeeded but DESCRIPTION isn't present at the final
-    // path (filesystem weirdness, race, etc.), treat as failure so the retry
-    // path can re-download and try again.
-    if !dest.join("DESCRIPTION").exists() {
+    if !dest.join("Meta").join("package.rds").exists() {
         return Err(format!(
-            "copy completed but DESCRIPTION missing at {}",
+            "R CMD INSTALL reported success but Meta/package.rds missing at {}",
             dest.display()
         )
         .into());

@@ -2296,7 +2296,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uvr"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "uvr-core"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "chrono",
