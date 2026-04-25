@@ -3,7 +3,7 @@ members = ["crates/uvr", "crates/uvr-core"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.12"
+version = "0.2.13"
 edition = "2021"
 authors = ["uvr contributors"]
 license = "MIT"

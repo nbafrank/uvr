@@ -1,9 +1,20 @@
 use std::path::PathBuf;
 
+use clap::builder::styling;
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::commands::export::ExportFormat;
+
+/// Match the runtime palette: cyan accents for headers/usage, magenta for
+/// literal flag names, yellow for placeholders. Keeps `--help` visually of
+/// a piece with the rest of uvr's output. Clap 4 made help styling opt-in,
+/// so without this block the help text renders flat.
+const HELP_STYLES: styling::Styles = styling::Styles::styled()
+    .header(styling::AnsiColor::Cyan.on_default().bold())
+    .usage(styling::AnsiColor::Cyan.on_default().bold())
+    .literal(styling::AnsiColor::Magenta.on_default().bold())
+    .placeholder(styling::AnsiColor::Yellow.on_default());
 
 #[derive(Debug, Parser)]
 #[command(
@@ -11,6 +22,7 @@ use crate::commands::export::ExportFormat;
     version,
     about = "Fast, reproducible R package management",
     long_about = None,
+    styles = HELP_STYLES,
 )]
 pub struct Cli {
     /// Enable verbose output
