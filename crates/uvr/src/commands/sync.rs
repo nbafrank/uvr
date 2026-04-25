@@ -569,71 +569,102 @@ pub fn ensure_companion_package(library: &std::path::Path, current_r_version: &s
     let _ = std::fs::create_dir_all(&cache_dir);
     let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
 
-    // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
-    // If the hash changes (new companion release), the filename changes too.
-    if !tarball.exists() {
-        let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
-        let download_ok = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
-            let resp = ureq::get(&url).header("User-Agent", "uvr").call()?;
-            let bytes = resp.into_body().read_to_vec()?;
-            std::fs::write(&tarball, &bytes)?;
-            Ok(())
-        })();
-
-        if download_ok.is_err() {
-            let _ = std::fs::remove_file(&tarball);
-            return;
+    // Retry once if the first attempt fails with a bad cached tarball or a
+    // transient extract/copy failure. In practice this is the path taken when
+    // a previous run cached an error-page HTML instead of a tarball, or when
+    // the initial extract lost a race with file-indexing.
+    let mut last_err: Option<String> = None;
+    for attempt in 0..2 {
+        match try_install_companion(library, &tarball) {
+            Ok(()) => {
+                ui::bullet_dim("uvr R companion package installed");
+                return;
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+                // Force re-download on next attempt — wipe the cached tarball
+                // regardless of hash, since any failure here means the cached
+                // file is suspect (wrong hash, truncated, corrupted).
+                let _ = std::fs::remove_file(&tarball);
+                if attempt == 0 {
+                    tracing::debug!("Companion install attempt 1 failed: {e}; retrying");
+                }
+            }
         }
     }
 
-    // Verify SHA-256 checksum on every run (cache could be corrupted or tampered with)
-    if let Ok(bytes) = std::fs::read(&tarball) {
+    // Both attempts failed — surface a user-visible hint so the R session
+    // doesn't fail mysteriously with `library(uvr)` not being installed.
+    ui::warn(format!(
+        "Could not install the uvr R companion package automatically ({}).\n   \
+         Install manually from R: remotes::install_github(\"nbafrank/uvr-r\", lib = .libPaths()[1])",
+        last_err.as_deref().unwrap_or("unknown error"),
+    ));
+}
+
+/// Attempt the download + verify + extract + copy cycle once. Returns the
+/// first failure on any step. Caller decides retry policy.
+fn try_install_companion(
+    library: &std::path::Path,
+    tarball: &std::path::Path,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
+    if !tarball.exists() {
+        let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
+        let resp = ureq::get(&url).header("User-Agent", "uvr").call()?;
+        let bytes = resp.into_body().read_to_vec()?;
+        std::fs::write(tarball, &bytes)?;
+    }
+
+    // Verify SHA-256 checksum on every run (cache could be corrupted or tampered with).
+    let bytes = std::fs::read(tarball)?;
+    {
         use sha2::{Digest, Sha256};
         let hash = hex::encode(Sha256::digest(&bytes));
         if hash != COMPANION_HASH {
-            tracing::warn!(
-                "Companion package checksum mismatch (expected {}, got {}), skipping install",
+            return Err(format!(
+                "companion tarball checksum mismatch (expected {}, got {})",
                 &COMPANION_HASH[..12],
                 &hash[..12]
-            );
-            let _ = std::fs::remove_file(&tarball);
-            return;
+            )
+            .into());
         }
-    } else {
-        return;
     }
 
     // Extract directly instead of spawning R CMD INSTALL (~400ms savings).
     // The GitHub tarball contains `owner-repo-sha/` at the top level with the
     // R package source inside. We extract it, find the package dir, and copy
     // the R/, DESCRIPTION, NAMESPACE files into library/uvr/.
-    let install_ok = (|| -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let file = std::fs::File::open(&tarball)?;
-        let gz = flate2::read::GzDecoder::new(file);
-        let mut archive = tar::Archive::new(gz);
+    let file = std::fs::File::open(tarball)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    let tmp_dir = tempfile::tempdir()?;
+    archive.unpack(tmp_dir.path())?;
 
-        let tmp_dir = tempfile::tempdir()?;
-        archive.unpack(tmp_dir.path())?;
+    let pkg_src = std::fs::read_dir(tmp_dir.path())?
+        .flatten()
+        .find(|e| e.path().join("DESCRIPTION").exists())
+        .map(|e| e.path())
+        .ok_or("companion package dir not found in tarball")?;
 
-        // Find the package dir: top-level-dir/ contains R/, DESCRIPTION, NAMESPACE
-        let pkg_src = std::fs::read_dir(tmp_dir.path())?
-            .flatten()
-            .find(|e| e.path().join("DESCRIPTION").exists())
-            .map(|e| e.path())
-            .ok_or("companion package dir not found in tarball")?;
-
-        let dest = library.join("uvr");
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)?;
-        }
-        package_cache::copy_dir_recursive(&pkg_src, &dest)?;
-
-        Ok(())
-    })();
-
-    if install_ok.is_ok() {
-        ui::bullet_dim("uvr R companion package installed");
+    let dest = library.join("uvr");
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest)?;
     }
+    package_cache::copy_dir_recursive(&pkg_src, &dest)?;
+
+    // Guard: if the copy succeeded but DESCRIPTION isn't present at the final
+    // path (filesystem weirdness, race, etc.), treat as failure so the retry
+    // path can re-download and try again.
+    if !dest.join("DESCRIPTION").exists() {
+        return Err(format!(
+            "copy completed but DESCRIPTION missing at {}",
+            dest.display()
+        )
+        .into());
+    }
+
+    Ok(())
 }
 
 /// Check if the installed companion package was built under a different R major.minor.
