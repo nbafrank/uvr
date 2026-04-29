@@ -57,10 +57,12 @@ impl Platform {
     pub fn download_url(&self, version: &str) -> String {
         match self {
             Platform::MacOsArm64 => format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-{version}-arm64.pkg"
+                "https://cran.r-project.org/bin/macosx/{}/base/R-{version}-arm64.pkg",
+                macos_arm64_dir()
             ),
             Platform::MacOsX86_64 => format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
+                "https://cran.r-project.org/bin/macosx/{}/base/R-{version}-x86_64.pkg",
+                macos_x86_64_dir()
             ),
             Platform::LinuxX86_64 => {
                 let distro = detect_posit_distro_slug();
@@ -76,17 +78,24 @@ impl Platform {
         }
     }
 
-    /// Fallback URL for older R versions that have been moved to an archive.
+    /// Fallback URL when the primary 4xx's.
     ///
-    /// On Windows, older R releases are moved from `/base/` to `/base/old/<version>/`.
-    /// On macOS arm64/x86_64, all versions live in the same `/base/` directory
-    /// (no `/old/` subdirectory exists for the per-arch builds), so there's no
-    /// useful fallback. Linux uses the Posit CDN which hosts all versions at
-    /// the same path.
+    /// - Windows: older R releases live at `/base/old/<version>/` (CRAN moves them out of `/base/`).
+    /// - macOS Sonoma+: CRAN also publishes a `big-sur-arm64/` (resp. `big-sur-x86_64/`) dir
+    ///   that holds older R versions not yet rebuilt for Sonoma. We try that as a fallback.
+    /// - macOS pre-Sonoma: no fallback to `sonoma-*` because those binaries require macOS 14+
+    ///   and won't run.
+    /// - Linux uses the Posit CDN which hosts all versions at the same path.
     pub fn download_url_fallback(&self, version: &str) -> Option<String> {
         match self {
             Platform::WindowsX86_64 => Some(format!(
                 "https://cran.r-project.org/bin/windows/base/old/{version}/R-{version}-win.exe"
+            )),
+            Platform::MacOsArm64 if macos_major_version() >= 14 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-{version}-arm64.pkg"
+            )),
+            Platform::MacOsX86_64 if macos_major_version() >= 14 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
             )),
             Platform::MacOsArm64
             | Platform::MacOsX86_64
@@ -97,18 +106,64 @@ impl Platform {
 
     /// Where to find the directory listing for available R versions.
     /// Used to build a helpful error message when a requested version 404s.
-    pub fn directory_listing_url(&self) -> Option<&'static str> {
+    pub fn directory_listing_url(&self) -> Option<String> {
         match self {
-            Platform::MacOsArm64 => {
-                Some("https://cran.r-project.org/bin/macosx/big-sur-arm64/base/")
+            Platform::MacOsArm64 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/{}/base/",
+                macos_arm64_dir()
+            )),
+            Platform::MacOsX86_64 => Some(format!(
+                "https://cran.r-project.org/bin/macosx/{}/base/",
+                macos_x86_64_dir()
+            )),
+            Platform::WindowsX86_64 => {
+                Some("https://cran.r-project.org/bin/windows/base/".to_string())
             }
-            Platform::MacOsX86_64 => {
-                Some("https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/")
-            }
-            Platform::WindowsX86_64 => Some("https://cran.r-project.org/bin/windows/base/"),
             // Posit CDN doesn't expose a directory listing.
             Platform::LinuxX86_64 | Platform::LinuxArm64 => None,
         }
+    }
+}
+
+/// Detect macOS major version (Sonoma=14, Ventura=13, Big Sur=11). Cached.
+/// Returns 0 on non-macOS platforms; falls back to 11 if `sw_vers` fails on macOS.
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> u32 {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().split('.').next()?.parse::<u32>().ok())
+            .unwrap_or(11)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_major_version() -> u32 {
+    0
+}
+
+/// CRAN subdir for arm64 binaries on the running macOS.
+/// Sonoma (14) and later: `sonoma-arm64`. Earlier: `big-sur-arm64`.
+fn macos_arm64_dir() -> &'static str {
+    if macos_major_version() >= 14 {
+        "sonoma-arm64"
+    } else {
+        "big-sur-arm64"
+    }
+}
+
+/// CRAN subdir for x86_64 binaries on the running macOS.
+/// Sonoma (14) and later: `sonoma-x86_64`. Earlier: `big-sur-x86_64`.
+fn macos_x86_64_dir() -> &'static str {
+    if macos_major_version() >= 14 {
+        "sonoma-x86_64"
+    } else {
+        "big-sur-x86_64"
     }
 }
 
@@ -245,13 +300,13 @@ async fn version_not_found_error(
     // platform has no listing endpoint, fall back to the generic message.
     let mut available_hint = String::new();
     if let Some(listing_url) = platform.directory_listing_url() {
-        if let Ok(resp) = client.get(listing_url).send().await {
+        if let Ok(resp) = client.get(&listing_url).send().await {
             if let Ok(body) = resp.text().await {
                 let mut versions: Vec<String> = scan_versions_from_listing(&body);
                 versions.sort_by(|a, b| version_compare(a, b));
                 versions.dedup();
                 if let Some(latest) = versions.last() {
-                    available_hint = format!("\nLatest available for your platform: {latest}.\nTry `uvr r install {latest}`, or `uvr r list --all` to see every published version.");
+                    available_hint = format!("\nLatest available for your platform: {latest} (from {listing_url}).\nTry `uvr r install {latest}`, or `uvr r list --all` to see every published version.");
                 }
             }
         }
@@ -801,17 +856,17 @@ pub async fn fetch_available_versions(
 ) -> Result<Vec<String>> {
     // Use the platform-specific binary index when possible; fall back to the
     // CRAN source index (which lists every released version) for Linux.
+    let macos_arm64_listing = format!(
+        "https://cran.r-project.org/bin/macosx/{}/base/",
+        macos_arm64_dir()
+    );
+    let macos_x86_64_listing = format!(
+        "https://cran.r-project.org/bin/macosx/{}/base/",
+        macos_x86_64_dir()
+    );
     let (url, prefix, suffix): (&str, &str, &str) = match platform {
-        Platform::MacOsArm64 => (
-            "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/",
-            "R-",
-            "-arm64.pkg",
-        ),
-        Platform::MacOsX86_64 => (
-            "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/",
-            "R-",
-            "-x86_64.pkg",
-        ),
+        Platform::MacOsArm64 => (macos_arm64_listing.as_str(), "R-", "-arm64.pkg"),
+        Platform::MacOsX86_64 => (macos_x86_64_listing.as_str(), "R-", "-x86_64.pkg"),
         Platform::LinuxX86_64 | Platform::LinuxArm64 => {
             ("https://cran.r-project.org/src/base/", "R-", ".tar.gz")
         }
@@ -921,6 +976,44 @@ mod tests {
         assert!(url.contains("arm64"));
         assert!(url.contains("4.4.2"));
         assert!(url.ends_with(".pkg"));
+        // Must be one of the two known CRAN dirs.
+        assert!(
+            url.contains("/sonoma-arm64/") || url.contains("/big-sur-arm64/"),
+            "unexpected dir in {url}"
+        );
+    }
+
+    #[test]
+    fn macos_arm64_dir_is_expected() {
+        let d = macos_arm64_dir();
+        assert!(
+            d == "sonoma-arm64" || d == "big-sur-arm64",
+            "unexpected macos_arm64_dir: {d}"
+        );
+    }
+
+    #[test]
+    fn macos_fallback_only_on_sonoma() {
+        let fb = Platform::MacOsArm64.download_url_fallback("4.5.3");
+        if macos_major_version() >= 14 {
+            let fb = fb.expect("Sonoma+ should provide big-sur fallback");
+            assert!(fb.contains("/big-sur-arm64/"), "{fb}");
+        } else {
+            assert!(
+                fb.is_none(),
+                "non-Sonoma must not return sonoma fallback (binary won't run): {fb:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_listing_matches_primary() {
+        let listing = Platform::MacOsArm64.directory_listing_url().unwrap();
+        let url = Platform::MacOsArm64.download_url("4.4.2");
+        // Listing dir should be the same arch dir as the download URL uses.
+        let dir = macos_arm64_dir();
+        assert!(listing.contains(dir));
+        assert!(url.contains(dir));
     }
 
     #[test]

@@ -27,6 +27,18 @@ async fn run() -> Result<()> {
         console::set_colors_enabled_stderr(false);
     }
 
+    // SIGINT / Ctrl+C handler (#58): kill any in-flight `R CMD INSTALL`,
+    // remove its 00LOCK-<pkg>/ dir, then exit 130 so the shell sees a
+    // standard interrupt code. Without this, the child keeps running and
+    // the next sync trips over a stale lock dir.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            uvr_core::signal::kill_and_cleanup_all();
+            // 128 + SIGINT(2) = 130, the shell convention for Ctrl+C exit.
+            std::process::exit(130);
+        }
+    });
+
     let cli = Cli::parse();
 
     // Initialize tracing
@@ -48,18 +60,47 @@ async fn run() -> Result<()> {
         return Ok(());
     };
 
+    // #63/#64 phase 1: warn loudly if the project pin doesn't match the active R.
+    // Only for library-affecting commands — `init`, `r ...`, `cache`, etc. don't
+    // touch the library and the warning would be noise there.
+    if matches!(
+        command,
+        Commands::Add(_)
+            | Commands::Remove(_)
+            | Commands::Sync(_)
+            | Commands::Run(_)
+            | Commands::Update(_)
+            | Commands::Lock(_)
+            | Commands::Tree(_)
+            | Commands::Export(_)
+            | Commands::Import(_)
+            | Commands::Doctor
+    ) {
+        commands::util::warn_r_pin_mismatch();
+    }
+
     match command {
         Commands::Init(args) => {
             commands::init::run(args.name, args.r_version)?;
         }
         Commands::Add(args) => {
-            commands::add::run(args.packages, args.dev, args.bioc, args.source, args.jobs).await?;
+            let timeout = parse_cli_timeout(args.timeout.as_deref())?;
+            commands::add::run(
+                args.packages,
+                args.dev,
+                args.bioc,
+                args.source,
+                args.jobs,
+                timeout,
+            )
+            .await?;
         }
         Commands::Remove(args) => {
             commands::remove::run(args.packages).await?;
         }
         Commands::Sync(args) => {
-            commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library).await?;
+            let timeout = parse_cli_timeout(args.timeout.as_deref())?;
+            commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout).await?;
         }
         Commands::Run(args) => {
             commands::run::run(args.script, args.r_version, args.with_packages, args.args).await?;
@@ -161,6 +202,19 @@ fn render_error(e: &anyhow::Error) {
     };
     let hint = hint_for(&full);
     ui::error_block(&headline, context.as_deref(), hint);
+}
+
+/// Parse the `--timeout <DURATION>` CLI flag value into a `Duration`.
+/// Empty / `None` → `Ok(None)` (caller falls back to env var or default).
+fn parse_cli_timeout(s: Option<&str>) -> Result<Option<std::time::Duration>> {
+    let Some(raw) = s.map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    uvr_core::installer::r_cmd_install::parse_install_timeout(raw)
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Invalid --timeout value: {raw} (expected e.g. 30m, 2h, 90s)")
+        })
 }
 
 fn hint_for(msg: &str) -> Option<&'static str> {

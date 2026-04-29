@@ -81,6 +81,7 @@ pub async fn run(
     bioc: bool,
     source: Option<String>,
     jobs: usize,
+    timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
@@ -171,7 +172,7 @@ pub async fn run(
     }
     let lockfile = resolve_result.unwrap();
 
-    crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None)
+    crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None, timeout)
         .await
         .context("Failed to install packages after add")?;
 

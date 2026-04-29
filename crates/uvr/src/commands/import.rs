@@ -208,7 +208,7 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
         ui::info("Resolving dependencies");
         let project = Project::find_cwd().context("Failed to load imported project")?;
         let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
-        crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None).await?;
+        crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None, None).await?;
     } else {
         println!();
         ui::hint(format!(

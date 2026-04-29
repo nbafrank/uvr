@@ -126,6 +126,11 @@ pub struct AddArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
+
+    /// Per-package install timeout, e.g. `30m`, `2h`, `90s`. Defaults to 30m
+    /// (override via `UVR_INSTALL_TIMEOUT`).
+    #[arg(long, value_name = "DURATION")]
+    pub timeout: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -161,6 +166,11 @@ pub struct SyncArgs {
     /// (also reads UVR_LIBRARY env var)
     #[arg(long, value_name = "PATH")]
     pub library: Option<PathBuf>,
+
+    /// Per-package install timeout, e.g. `30m`, `2h`, `90s`. Defaults to 30m
+    /// (override via `UVR_INSTALL_TIMEOUT`).
+    #[arg(long, value_name = "DURATION")]
+    pub timeout: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────

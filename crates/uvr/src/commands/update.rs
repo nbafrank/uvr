@@ -135,7 +135,7 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
         ui::warn("Dry run — no changes written");
     } else {
         // Install updated packages
-        install_from_lockfile(&project, &effective_lockfile, jobs, None).await?;
+        install_from_lockfile(&project, &effective_lockfile, jobs, None, None).await?;
     }
 
     Ok(())

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -16,11 +17,17 @@ use uvr_core::resolver::topological_install_order;
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run(frozen: bool, no_dev: bool, jobs: usize, library: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    frozen: bool,
+    no_dev: bool,
+    jobs: usize,
+    library: Option<PathBuf>,
+    timeout: Option<Duration>,
+) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     // CLI --library takes precedence, then UVR_LIBRARY env var.
     let library = library.or_else(|| std::env::var("UVR_LIBRARY").ok().map(PathBuf::from));
-    run_inner(&project, frozen, no_dev, jobs, library.as_deref()).await
+    run_inner(&project, frozen, no_dev, jobs, library.as_deref(), timeout).await
 }
 
 /// Install all packages from the existing lockfile.
@@ -37,6 +44,7 @@ pub async fn run_inner(
     no_dev: bool,
     jobs: usize,
     library_override: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<()> {
     if let Some(lib) = library_override {
         std::fs::create_dir_all(lib)
@@ -92,7 +100,7 @@ pub async fn run_inner(
         lockfile
     };
 
-    install_from_lockfile(project, &lockfile, jobs, library_override).await
+    install_from_lockfile(project, &lockfile, jobs, library_override, timeout).await
 }
 
 /// Download and install any packages in `lockfile` not yet present in the project library.
@@ -109,6 +117,7 @@ pub async fn install_from_lockfile(
     lockfile: &Lockfile,
     jobs: usize,
     library_override: Option<&std::path::Path>,
+    timeout: Option<Duration>,
 ) -> Result<()> {
     let library = library_override
         .map(|p| p.to_path_buf())
@@ -120,15 +129,26 @@ pub async fn install_from_lockfile(
         .ok()
         .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
 
-    // Detect R version mismatch: compare lockfile major.minor against current R.
+    // Detect R version mismatch in two places:
+    //   (a) lockfile R minor vs current R → user retargeted lockfile but library is stale.
+    //   (b) library sentinel R minor vs current R → user upgraded R out from under the library
+    //       even though the lockfile already reflects the new R (issue #66).
+    // (b) is the load-bearing check on its own; (a) stays for the case where there is no
+    // sentinel yet (older libraries, fresh checkouts that ran `uvr lock` before `uvr sync`).
     if let Some((_, ref current_r)) = r_info {
-        let locked_r = &lockfile.r.version;
         let current_minor = r_minor(current_r);
-        let locked_minor = r_minor(locked_r);
-        if looks_like_version(locked_r) && current_minor != locked_minor {
+        let locked_minor = r_minor(&lockfile.r.version);
+        let sentinel_minor = read_library_r_sentinel(&library);
+
+        let lockfile_mismatch =
+            looks_like_version(&lockfile.r.version) && current_minor != locked_minor;
+        let sentinel_mismatch = sentinel_minor.as_ref().is_some_and(|m| m != &current_minor);
+
+        if lockfile_mismatch || sentinel_mismatch {
+            let from = sentinel_minor.unwrap_or(locked_minor);
             ui::warn(format!(
                 "R version changed ({} {} {}) — wiping library and reinstalling",
-                palette::dim(&locked_minor),
+                palette::dim(&from),
                 palette::dim(ui::glyph::arrow()),
                 palette::info(&current_minor),
             ));
@@ -159,6 +179,9 @@ pub async fn install_from_lockfile(
     }
 
     if to_install.is_empty() {
+        if let Some((_, ref current_r)) = r_info {
+            write_library_r_sentinel(&library, &r_minor(current_r));
+        }
         ui::summary(
             "Everything is up to date",
             format!(
@@ -487,7 +510,7 @@ pub async fn install_from_lockfile(
                 let version = plan.pkg.version.clone();
                 let pb_for_closure = pb.clone();
                 installer
-                    .install_streaming(&result.path, &library, &plan.pkg.name, |line| {
+                    .install_streaming(&result.path, &library, &plan.pkg.name, timeout, |line| {
                         let short: String = line.chars().take(50).collect();
                         pb_for_closure.set_message(format!("compiling {name} {version} ({short})"));
                     })
@@ -534,6 +557,10 @@ pub async fn install_from_lockfile(
     }
     let sep = format!(" {} ", ui::glyph::bullet());
     ui::summary(headline, sub_parts.join(&sep));
+
+    if let Some((_, ref current_r)) = r_info {
+        write_library_r_sentinel(&library, &r_minor(current_r));
+    }
 
     Ok(())
 }
@@ -766,6 +793,31 @@ fn r_minor(version: &str) -> String {
     }
 }
 
+/// Path to the per-library sentinel that records which R minor the library
+/// was last populated against. Used to detect cross-R-minor reuse (#66).
+fn library_sentinel_path(library: &std::path::Path) -> std::path::PathBuf {
+    library.join(".uvr-r-version")
+}
+
+/// Read the library's R-minor sentinel. Returns `None` when the sentinel is
+/// absent (legacy library or fresh sync) or the file is malformed.
+fn read_library_r_sentinel(library: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(library_sentinel_path(library)).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Write the library's R-minor sentinel. Best-effort: failures are swallowed
+/// (they only cost us the next-run safety net, not correctness today).
+fn write_library_r_sentinel(library: &std::path::Path, minor: &str) {
+    let _ = std::fs::create_dir_all(library);
+    let _ = std::fs::write(library_sentinel_path(library), format!("{minor}\n"));
+}
+
 /// Return the source download URL for a locked package.
 /// Prefers the stored `url` field; falls back to reconstructing it.
 /// Uses `raw_version` (e.g. `"1.1-3"`) when available so the reconstructed
@@ -805,6 +857,36 @@ mod tests {
     #[test]
     fn r_minor_three_component() {
         assert_eq!(r_minor("4.4.2"), "4.4");
+    }
+
+    #[test]
+    fn library_sentinel_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let lib = tmp.path().join("library");
+        assert!(read_library_r_sentinel(&lib).is_none());
+        write_library_r_sentinel(&lib, "4.5");
+        assert_eq!(read_library_r_sentinel(&lib).as_deref(), Some("4.5"));
+        // Overwriting reflects the new value.
+        write_library_r_sentinel(&lib, "4.6");
+        assert_eq!(read_library_r_sentinel(&lib).as_deref(), Some("4.6"));
+    }
+
+    #[test]
+    fn library_sentinel_handles_whitespace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(library_sentinel_path(&lib), "  4.5\n\n").unwrap();
+        assert_eq!(read_library_r_sentinel(&lib).as_deref(), Some("4.5"));
+    }
+
+    #[test]
+    fn library_sentinel_empty_returns_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(library_sentinel_path(&lib), "").unwrap();
+        assert!(read_library_r_sentinel(&lib).is_none());
     }
 
     #[test]

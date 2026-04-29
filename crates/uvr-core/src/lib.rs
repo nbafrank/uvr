@@ -8,5 +8,6 @@ pub mod project;
 pub mod r_version;
 pub mod registry;
 pub mod resolver;
+pub mod signal;
 pub mod sysreqs;
 pub mod sysreqs_rules;
