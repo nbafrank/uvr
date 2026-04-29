@@ -442,6 +442,13 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     // to load with "Symbol not found: _dgebal_".
     patch_r_dylibs(dest);
 
+    // Step 9(a.5): patch bin/exec/R (and siblings). R 4.6+ ships these with
+    // hardened-runtime signatures pointing at the framework path; without
+    // rewriting those load commands and re-signing ad-hoc, dyld can't find
+    // libR.dylib and the process is SIGKILLed at startup. (Pre-4.6 used
+    // ad-hoc signing so DYLD_LIBRARY_PATH was enough — 4.6 changed that.)
+    patch_r_executables(dest);
+
     // Step 9(b): write etc/Renviron.site so that DYLD_LIBRARY_PATH is set for every
     // R process this installation spawns — including the fresh `R --slave` sessions
     // used by R CMD INSTALL for byte-compilation.  On macOS 15+ (SIP), DYLD_*
@@ -533,28 +540,108 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
 /// packages compiled against it can find it at runtime without DYLD_LIBRARY_PATH.
 ///
 /// IMPORTANT: `install_name_tool` invalidates the Mach-O code signature.
-/// On Apple Silicon every dylib must be signed; we re-apply an ad-hoc signature
-/// with `codesign --force --sign -` immediately after the rename.
+/// On Apple Silicon every dylib must be signed; we always re-apply an ad-hoc
+/// signature afterwards. The ad-hoc re-sign also strips the original hardened
+/// runtime flag (set by CRAN's Developer ID signing on R 4.6+) — without that
+/// strip, macOS would refuse to load the dylib through DYLD_LIBRARY_PATH.
 fn fix_libr_install_name(dest: &Path) {
     let libr = dest.join("lib").join("libR.dylib");
     if !libr.exists() {
         return;
     }
     let new_id = libr.to_string_lossy().to_string();
-
-    let ok = Command::new("install_name_tool")
+    let _ = Command::new("install_name_tool")
         .args(["-id", &new_id, &new_id])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .status();
+    // Always re-sign — even if install_name_tool was a no-op, the original
+    // CRAN signature has the hardened runtime flag set on R 4.6+, which makes
+    // DYLD_LIBRARY_PATH ineffective for the executables that load this dylib.
+    resign_adhoc(&libr);
+}
 
-    if ok {
-        // Re-sign with an ad-hoc signature after modifying the binary.
-        // Without this, macOS (arm64) kills any process that loads the dylib.
-        let _ = Command::new("codesign")
-            .args(["--force", "--sign", "-", &new_id])
-            .status();
+/// Patch executable Mach-O binaries under `<r_home>/bin/exec/` so they load
+/// our managed `lib/libR.dylib` instead of the framework path baked in by CRAN.
+///
+/// Without this, R 4.6+ (which CRAN signs with hardened runtime) silently
+/// SIGKILLs at startup because:
+///   1. `bin/exec/R` has a load command for `/Library/Frameworks/R.framework/Versions/4.6/Resources/lib/libR.dylib`.
+///   2. The framework path doesn't exist in our extracted install.
+///   3. Hardened runtime causes macOS to strip `DYLD_LIBRARY_PATH`, so the
+///      `Renviron.site` hint we set has no effect on the dyld lookup.
+///
+/// Fix: rewrite the load command to point at our `lib/libR.dylib`, then re-sign
+/// ad-hoc (which also clears the hardened-runtime flag).
+pub fn patch_r_executables(r_home: &Path) {
+    let exec_dir = r_home.join("bin").join("exec");
+    if !exec_dir.exists() {
+        return;
     }
+    let lib_dir = r_home.join("lib");
+    let Ok(entries) = std::fs::read_dir(&exec_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        rewrite_framework_loads(&path, &lib_dir);
+    }
+}
+
+/// Rewrite every `/Library/Frameworks/R.framework/...` load command in `binary`
+/// to point at the corresponding file in `lib_dir` (matched by basename), then
+/// re-sign ad-hoc. No-op when otool reports no framework references.
+fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
+    let path_str = binary.to_string_lossy().to_string();
+    let Ok(deps_out) = Command::new("otool").args(["-L", &path_str]).output() else {
+        return;
+    };
+    if !deps_out.status.success() {
+        return;
+    }
+    let Ok(deps) = String::from_utf8(deps_out.stdout) else {
+        return;
+    };
+    let mut changed = false;
+    for line in deps.lines().skip(1) {
+        let dep = line.split_whitespace().next().unwrap_or("");
+        if !dep.contains("/Library/Frameworks/R.framework/") {
+            continue;
+        }
+        let Some(filename) = std::path::Path::new(dep).file_name() else {
+            continue;
+        };
+        let new_dep = lib_dir.join(filename);
+        if !new_dep.exists() {
+            continue;
+        }
+        let new_dep_str = new_dep.to_string_lossy().to_string();
+        if Command::new("install_name_tool")
+            .args(["-change", dep, &new_dep_str, &path_str])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            changed = true;
+        }
+    }
+    if changed {
+        resign_adhoc(binary);
+    } else {
+        // Even when install_name_tool was a no-op, R 4.6+ has hardened runtime
+        // on bin/exec/R that prevents DYLD_LIBRARY_PATH from rescuing the load.
+        // Re-sign defensively to drop the runtime flag.
+        resign_adhoc(binary);
+    }
+}
+
+/// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag.
+fn resign_adhoc(path: &Path) {
+    let path_str = path.to_string_lossy().to_string();
+    let _ = Command::new("codesign")
+        .args(["--force", "--sign", "-", &path_str])
+        .status();
 }
 
 /// Patch all `.dylib` install names in `<r_home>/lib/` to use the managed-R

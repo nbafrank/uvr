@@ -72,8 +72,9 @@ pub enum Commands {
     /// Generate shell completions
     Completions(CompletionsArgs),
 
-    /// Update uvr itself to the latest release
-    SelfUpdate,
+    /// Check for and install the latest uvr release
+    #[command(aliases = ["self-update"])]
+    Upgrade(UpgradeArgs),
 
     /// Manage R versions
     #[command(name = "r")]
@@ -340,6 +341,18 @@ pub struct RPinArgs {
     /// Exact R version to pin in .r-version (e.g. "4.3.2").
     /// If omitted, uses the currently active R version.
     pub version: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  upgrade
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct UpgradeArgs {
+    /// Print the latest version and whether an update is available, without
+    /// downloading or installing anything.
+    #[arg(long)]
+    pub check: bool,
 }
 
 // ────────────────────────────────────────────────────────────

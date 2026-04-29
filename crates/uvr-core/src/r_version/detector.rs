@@ -141,17 +141,25 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
     }
 
     // 3. Prefer managed installation, fall back to first system R.
-    //    Use the already-fetched list — do NOT call find_all() again.
-    let system_fallback = installations
-        .iter()
-        .find(|i| !i.managed)
-        .map(|i| i.binary.clone());
-    installations
-        .into_iter()
-        .find(|i| i.managed)
-        .map(|i| i.binary)
-        .or(system_fallback)
-        .ok_or(UvrError::RNotFound)
+    //    Validate each candidate via `query_r_version` so a broken managed
+    //    install (e.g. R 4.6 before the install-name patch on macOS — see
+    //    `patch_r_executables`) doesn't silently capture every uvr command.
+    let mut managed: Vec<&RInstallation> = installations.iter().filter(|i| i.managed).collect();
+    let mut system: Vec<&RInstallation> = installations.iter().filter(|i| !i.managed).collect();
+    // Probe in version-descending order so the newest working install wins.
+    managed.sort_by(|a, b| version_cmp(&b.version, &a.version));
+    system.sort_by(|a, b| version_cmp(&b.version, &a.version));
+    for inst in managed.into_iter().chain(system.into_iter()) {
+        if query_r_version(&inst.binary).is_some() {
+            return Ok(inst.binary.clone());
+        }
+    }
+    Err(UvrError::RNotFound)
+}
+
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
+    parse(a).cmp(&parse(b))
 }
 
 fn find_exact_version(installations: &[RInstallation], version: &str) -> Result<PathBuf> {
@@ -192,20 +200,14 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     // before user code runs. The version string from our `-e` script is always
     // the last line, so pick the last non-empty line that parses as a version.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let t = line.trim();
-            if !t.is_empty()
-                && t.chars().all(|c| c.is_ascii_digit() || c == '.')
-                && t.contains('.')
-            {
-                Some(t.to_string())
-            } else {
-                None
-            }
-        })
+    stdout.lines().rev().find_map(|line| {
+        let t = line.trim();
+        if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.contains('.') {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]

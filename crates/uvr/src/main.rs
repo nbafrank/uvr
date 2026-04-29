@@ -123,8 +123,8 @@ async fn run() -> Result<()> {
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
         }
-        Commands::SelfUpdate => {
-            commands::self_update::run().await?;
+        Commands::Upgrade(args) => {
+            commands::self_update::run(args.check).await?;
         }
         Commands::Doctor => {
             commands::doctor::run()?;

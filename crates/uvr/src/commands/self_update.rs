@@ -5,7 +5,7 @@ use uvr_core::r_version::downloader::Platform;
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run() -> Result<()> {
+pub async fn run(check_only: bool) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     ui::info(format!("Checking for updates (current: v{current})"));
 
@@ -25,6 +25,11 @@ pub async fn run() -> Result<()> {
         palette::dim(ui::glyph::arrow()),
         palette::upgraded(format!("v{latest}")),
     );
+
+    if check_only {
+        ui::hint("Run `uvr upgrade` to install. Skipping download (--check).");
+        return Ok(());
+    }
 
     let target = Platform::detect()
         .map(|p| p.rust_target_triple())

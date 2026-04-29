@@ -121,6 +121,17 @@ fn test_add_help_works() {
 }
 
 #[test]
+fn test_upgrade_help_works() {
+    uvr_cmd().args(["upgrade", "--help"]).assert().success();
+}
+
+#[test]
+fn test_self_update_alias_works() {
+    // Backward-compat: `uvr self-update` is a hidden alias for `uvr upgrade`.
+    uvr_cmd().args(["self-update", "--help"]).assert().success();
+}
+
+#[test]
 fn test_r_use_exact_writes_r_version_file() {
     let dir = init_project("pin-test");
     uvr_cmd()

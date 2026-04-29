@@ -10,7 +10,9 @@ use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
-use uvr_core::r_version::downloader::{patch_r_dylibs, patch_renviron_site, Platform};
+use uvr_core::r_version::downloader::{
+    patch_r_dylibs, patch_r_executables, patch_renviron_site, Platform,
+};
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
@@ -335,6 +337,7 @@ pub async fn install_from_lockfile(
             if cfg!(target_os = "macos") {
                 let _ = patch_renviron_site(r_home);
                 patch_r_dylibs(r_home);
+                patch_r_executables(r_home);
             }
             let libr_name = if cfg!(target_os = "macos") {
                 "libR.dylib"
