@@ -5,8 +5,42 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
-Fixes and small features that have landed on `main` but aren't tagged yet
-will accumulate here until the next batched release.
+### Features
+- **`uvr init <name>`** creates a new directory and initializes inside it,
+  matching `uv init`'s behavior (#56). `uvr init --here [<name>]` keeps the
+  old in-place behavior with optional name override.
+
+### Fixes
+- **#70 follow-up**: cross-R-minor wipe guard moved out of the wipe
+  conditional. A library already at the resolved R minor (no wipe) but
+  invoked from a calling R session on a different minor was still
+  installing packages the calling session couldn't load. Now bails
+  unconditionally when calling R minor differs from resolved R minor.
+- **#65**: `.gitignore` and `.Rbuildignore` writers compare line-by-line
+  (leading-slash insensitive for gitignore) so existing entries don't get
+  duplicated.
+- **#61**: ASCII fallback for the bullet separator is now `-` instead of
+  `.`, so "74 cached - 61 binary" reads as a separator list, not three
+  sentences.
+- **#60**: drop the "uvr R companion package installed" line from the
+  user-facing output (demoted to debug — visible under `-v`).
+- **#59**: `.Rprofile` now reports "0 of N package(s) installed, run
+  uvr::sync()" when the project library hasn't been created yet but the
+  lockfile exists.
+- `find_r_binary` validates pin and constraint paths via `query_r_version`
+  (not just the no-pin fallback). A broken pinned R install now surfaces
+  "install at <path> is broken — reinstall" instead of a cryptic
+  downstream error.
+- macOS install patch: warn when `otool` or `codesign` are missing instead
+  of silently no-op'ing — silent failure on a container with no Xcode CLT
+  was leaving users chasing a SIGKILL.
+- `find_r_binary`'s broken-install fallback now also kicks in for the
+  `[project] r_version` constraint path, in version-descending order.
+
+### Internal
+- Document `COMPANION_HASH`'s provenance in `sync.rs` — it's the SHA-256
+  of the `/repos/<owner>/<repo>/tarball/<sha>` API output, not the
+  `/archive/<sha>.tar.gz` archive.
 
 ## v0.2.10 – v0.2.20 (2026-04-23 → 2026-04-29)
 
