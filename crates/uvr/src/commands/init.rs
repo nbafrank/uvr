@@ -11,8 +11,29 @@ use uvr_core::r_version::detector::find_r_binary;
 use crate::ui;
 use crate::ui::palette;
 
-pub fn run(name: Option<String>, r_version: Option<String>) -> Result<()> {
-    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
+pub fn run(name: Option<String>, here: bool, r_version: Option<String>) -> Result<()> {
+    let starting_cwd = std::env::current_dir().context("Cannot determine current directory")?;
+
+    // #56 — `uvr init <name>` creates a new directory `<name>/` and
+    // initializes inside it; `uvr init --here [<name>]` keeps the project
+    // in the current directory; `uvr init` alone uses the current directory
+    // and derives the name from its basename.
+    let create_subdir = name.is_some() && !here;
+    let cwd = if create_subdir {
+        let dir_name = name.as_deref().expect("checked above");
+        let new_dir = starting_cwd.join(dir_name);
+        if new_dir.exists() {
+            anyhow::bail!(
+                "Cannot create directory {} — it already exists. Use `uvr init --here` to initialize in the current directory.",
+                new_dir.display()
+            );
+        }
+        std::fs::create_dir_all(&new_dir)
+            .with_context(|| format!("Failed to create directory {}", new_dir.display()))?;
+        new_dir
+    } else {
+        starting_cwd
+    };
 
     let manifest_path = cwd.join(MANIFEST_FILE);
     if manifest_path.exists() {
@@ -101,25 +122,31 @@ const RPROFILE_END: &str = "# <<< uvr <<<";
 const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- file.path(getwd(), ".uvr", "library")
+  lock <- file.path(getwd(), "uvr.lock")
+  count_locked <- function(path) {
+    if (!file.exists(path)) return(0L)
+    length(grep("^\\[\\[package\\]\\]", readLines(path, warn = FALSE)))
+  }
   if (dir.exists(lib)) {
     .libPaths(lib)
-    lock <- file.path(getwd(), "uvr.lock")
-    if (file.exists(lock)) {
-      lock_lines <- readLines(lock, warn = FALSE)
-      n_locked <- length(grep("^\\[\\[package\\]\\]", lock_lines))
-      installed <- list.dirs(lib, recursive = FALSE, full.names = FALSE)
-      n_installed <- length(setdiff(installed, "uvr"))
-      if (n_locked > 0 && n_installed < n_locked) {
-        message("uvr: ", n_locked - n_installed, " of ", n_locked,
-                " package(s) not installed. Run uvr::sync() to install.")
-      } else if (n_locked > 0) {
-        message("uvr: library linked (", n_installed, " packages)")
-      } else {
-        message("uvr: library active, but uvr.lock is empty. Run uvr::lock() to populate it.")
-      }
+    n_locked <- count_locked(lock)
+    installed <- list.dirs(lib, recursive = FALSE, full.names = FALSE)
+    n_installed <- length(setdiff(installed, "uvr"))
+    if (n_locked > 0 && n_installed < n_locked) {
+      message("uvr: ", n_locked - n_installed, " of ", n_locked,
+              " package(s) not installed. Run uvr::sync() to install.")
+    } else if (n_locked > 0) {
+      message("uvr: library linked (", n_installed, " packages)")
+    } else if (file.exists(lock)) {
+      message("uvr: library active, but uvr.lock is empty. Run uvr::lock() to populate it.")
     } else {
       message("uvr: library active, but no uvr.lock found. Run uvr::lock() to create one.")
     }
+  } else if (file.exists(lock)) {
+    # #59: .uvr/library/ doesn't exist yet but the lockfile does — fresh
+    # checkout, never synced. Tell the user.
+    n_locked <- count_locked(lock)
+    message("uvr: 0 of ", n_locked, " package(s) installed. Run uvr::sync() to install.")
   }
 })
 # <<< uvr <<<
@@ -269,31 +296,41 @@ pub fn is_r_package_dir(dir: &Path) -> bool {
 
 pub fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".Rbuildignore");
-    let entries = "^uvr\\.toml$\n^uvr\\.lock$\n^\\.uvr$\n";
+    let wanted = ["^uvr\\.toml$", "^uvr\\.lock$", "^\\.uvr$"];
 
-    if path.exists() {
-        let existing = std::fs::read_to_string(&path)?;
-        if existing.contains("uvr\\.toml") {
-            return Ok(());
-        }
-        let mut content = existing;
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(entries);
-        std::fs::write(&path, content)
-    } else {
-        std::fs::write(&path, entries)
+    if !path.exists() {
+        let body = wanted.iter().map(|s| format!("{s}\n")).collect::<String>();
+        return std::fs::write(&path, body);
     }
+
+    // Append only lines that aren't already there. Issue #65 — don't duplicate.
+    let existing = std::fs::read_to_string(&path)?;
+    let missing: Vec<&str> = wanted
+        .iter()
+        .copied()
+        .filter(|w| !line_already_present(&existing, w))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    for line in missing {
+        content.push_str(line);
+        content.push('\n');
+    }
+    std::fs::write(&path, content)
 }
 
 fn write_gitignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".gitignore");
-    let uvr_entry = format!("/{DOT_UVR_DIR}/{LIBRARY_DIR}/\n");
+    let uvr_entry = format!("/{DOT_UVR_DIR}/{LIBRARY_DIR}/");
 
     if path.exists() {
         let existing = std::fs::read_to_string(&path)?;
-        if existing.contains(&uvr_entry.trim_end().to_string()) {
+        if line_already_present(&existing, &uvr_entry) {
             return Ok(());
         }
         let mut content = existing;
@@ -301,10 +338,26 @@ fn write_gitignore(dir: &Path) -> std::io::Result<()> {
             content.push('\n');
         }
         content.push_str(&uvr_entry);
+        content.push('\n');
         std::fs::write(&path, content)
     } else {
-        std::fs::write(&path, uvr_entry)
+        std::fs::write(&path, format!("{uvr_entry}\n"))
     }
+}
+
+/// True if `entry` is already present in `existing` as a non-comment line,
+/// ignoring leading slashes (so `/foo` and `foo` count as the same entry —
+/// gitignore treats them differently semantically, but for dedup purposes the
+/// user almost certainly meant the same thing). Issue #65.
+fn line_already_present(existing: &str, entry: &str) -> bool {
+    let needle = entry.trim().trim_start_matches('/');
+    existing.lines().any(|l| {
+        let l = l.trim();
+        if l.is_empty() || l.starts_with('#') {
+            return false;
+        }
+        l.trim_start_matches('/') == needle
+    })
 }
 
 #[cfg(test)]

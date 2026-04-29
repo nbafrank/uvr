@@ -10,7 +10,7 @@ fn uvr_cmd() -> Command {
 fn init_project(name: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     uvr_cmd()
-        .args(["init", name])
+        .args(["init", "--here", name])
         .current_dir(dir.path())
         .assert()
         .success();
@@ -29,7 +29,8 @@ fn fixture(rel: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn test_init_creates_manifest() {
+fn test_init_creates_subdirectory() {
+    // #56: `uvr init <name>` creates `<name>/` and initializes inside it.
     let dir = TempDir::new().unwrap();
     uvr_cmd()
         .args(["init", "test-project"])
@@ -38,21 +39,36 @@ fn test_init_creates_manifest() {
         .success()
         .stdout(predicate::str::contains("test-project"));
 
-    assert!(dir.path().join("uvr.toml").exists(), "uvr.toml not created");
+    let subdir = dir.path().join("test-project");
+    assert!(subdir.is_dir(), "subdirectory not created");
+    assert!(subdir.join("uvr.toml").exists(), "uvr.toml not created");
     assert!(
-        dir.path().join(".uvr").join("library").exists(),
+        subdir.join(".uvr").join("library").exists(),
         ".uvr/library not created"
     );
-
-    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let content = fs::read_to_string(subdir.join("uvr.toml")).unwrap();
     assert!(content.contains("test-project"));
+}
+
+#[test]
+fn test_init_here_uses_current_dir() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "in-place"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    assert!(dir.path().join("uvr.toml").exists(), "uvr.toml not created");
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    assert!(content.contains("in-place"));
 }
 
 #[test]
 fn test_init_with_r_version() {
     let dir = TempDir::new().unwrap();
     uvr_cmd()
-        .args(["init", "my-proj", "--r-version", ">=4.3.0"])
+        .args(["init", "--here", "my-proj", "--r-version", ">=4.3.0"])
         .current_dir(dir.path())
         .assert()
         .success();
@@ -65,7 +81,7 @@ fn test_init_with_r_version() {
 fn test_init_fails_if_manifest_exists() {
     let dir = init_project("already-exists");
     uvr_cmd()
-        .args(["init", "again"])
+        .args(["init", "--here", "again"])
         .current_dir(dir.path())
         .assert()
         .failure()

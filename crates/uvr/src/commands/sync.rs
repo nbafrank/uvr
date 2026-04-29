@@ -639,7 +639,10 @@ pub fn ensure_companion_package(
     for attempt in 0..2 {
         match try_install_companion(library, &tarball, r_binary) {
             Ok(()) => {
-                ui::bullet_dim("uvr R companion package installed");
+                // #60: don't surface the install in the user-facing output —
+                // by the time they see uvr::sync()'s output they've already
+                // loaded the companion. Available under -v / --verbose.
+                tracing::debug!("uvr R companion package installed");
                 return;
             }
             Err(e) => {

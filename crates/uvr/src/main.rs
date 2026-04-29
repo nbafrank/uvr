@@ -81,7 +81,7 @@ async fn run() -> Result<()> {
 
     match command {
         Commands::Init(args) => {
-            commands::init::run(args.name, args.r_version)?;
+            commands::init::run(args.name, args.here, args.r_version)?;
         }
         Commands::Add(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;

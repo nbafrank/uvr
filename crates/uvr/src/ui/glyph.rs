@@ -42,7 +42,9 @@ g!(hint, "→", "->");
 g!(add, "+", "+");
 g!(remove, "−", "-");
 g!(upgrade, "↑", "^");
-g!(bullet, "·", ".");
+// ASCII fallback is `-` (not `.`) so separators read as separators rather
+// than sentence terminators in messages like "74 cached · 61 binary". #61.
+g!(bullet, "·", "-");
 g!(arrow, "→", "->");
 g!(change, "~", "~");
 

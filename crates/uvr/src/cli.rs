@@ -94,8 +94,17 @@ pub enum Commands {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Project name (defaults to current directory name)
+    /// Project name (positional). When provided, a new directory of this
+    /// name is created and the project is initialized inside it (matches
+    /// `uv init <name>` semantics from #56). Pass `--here` to keep the old
+    /// behavior of initializing in the current directory.
     pub name: Option<String>,
+
+    /// Initialize in the current directory instead of creating a new one.
+    /// When combined with a positional name, the project name is set in
+    /// uvr.toml without creating a directory (preserves pre-0.3 behavior).
+    #[arg(long)]
+    pub here: bool,
 
     /// R version constraint, e.g. ">=4.3.0"
     #[arg(long = "r-version", value_name = "CONSTRAINT")]
