@@ -591,11 +591,20 @@ pub fn patch_r_executables(r_home: &Path) {
 
 /// Rewrite every `/Library/Frameworks/R.framework/...` load command in `binary`
 /// to point at the corresponding file in `lib_dir` (matched by basename), then
-/// re-sign ad-hoc. No-op when otool reports no framework references.
+/// re-sign ad-hoc.
 fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
     let path_str = binary.to_string_lossy().to_string();
-    let Ok(deps_out) = Command::new("otool").args(["-L", &path_str]).output() else {
-        return;
+    let deps_out = match Command::new("otool").args(["-L", &path_str]).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                "otool not found — skipping load-command patch for {}. \
+                 Install Xcode Command Line Tools (`xcode-select --install`) so R 4.6+ installs work.",
+                binary.display()
+            );
+            return;
+        }
+        Err(_) => return,
     };
     if !deps_out.status.success() {
         return;
@@ -603,7 +612,6 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
     let Ok(deps) = String::from_utf8(deps_out.stdout) else {
         return;
     };
-    let mut changed = false;
     for line in deps.lines().skip(1) {
         let dep = line.split_whitespace().next().unwrap_or("");
         if !dep.contains("/Library/Frameworks/R.framework/") {
@@ -617,31 +625,34 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
             continue;
         }
         let new_dep_str = new_dep.to_string_lossy().to_string();
-        if Command::new("install_name_tool")
+        let _ = Command::new("install_name_tool")
             .args(["-change", dep, &new_dep_str, &path_str])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            changed = true;
-        }
+            .status();
     }
-    if changed {
-        resign_adhoc(binary);
-    } else {
-        // Even when install_name_tool was a no-op, R 4.6+ has hardened runtime
-        // on bin/exec/R that prevents DYLD_LIBRARY_PATH from rescuing the load.
-        // Re-sign defensively to drop the runtime flag.
-        resign_adhoc(binary);
-    }
+    // Always re-sign — even when no load commands changed, R 4.6+ ships with
+    // hardened runtime that suppresses DYLD_LIBRARY_PATH and blocks library
+    // validation against ad-hoc dylibs. An ad-hoc re-sign drops the runtime
+    // flag so the existing `Renviron.site` workaround actually takes effect.
+    resign_adhoc(binary);
 }
 
 /// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag.
 fn resign_adhoc(path: &Path) {
     let path_str = path.to_string_lossy().to_string();
-    let _ = Command::new("codesign")
+    match Command::new("codesign")
         .args(["--force", "--sign", "-", &path_str])
-        .status();
+        .status()
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                "codesign not found — skipping ad-hoc re-sign of {}. \
+                 R 4.6+ binaries will SIGKILL at startup until codesign is on PATH.",
+                path.display()
+            );
+        }
+        Err(_) => {}
+    }
 }
 
 /// Patch all `.dylib` install names in `<r_home>/lib/` to use the managed-R

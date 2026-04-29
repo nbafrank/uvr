@@ -142,29 +142,33 @@ pub async fn install_from_lockfile(
         let locked_minor = r_minor(&lockfile.r.version);
         let sentinel_minor = read_library_r_sentinel(&library);
 
+        // #70 guard — must fire BEFORE the wipe check, not inside it. A library
+        // already at `current_minor` (sentinel matches) skips the wipe but still
+        // installs new packages under the resolved R. From a calling R session
+        // on a different minor, those packages are unloadable in the live
+        // session. Bail unconditionally when the calling R differs from the
+        // R uvr would install for. Terminal-invoked uvr (R_HOME unset) returns
+        // None from calling_r_minor() and proceeds normally.
+        if let Some(calling_minor) = calling_r_minor() {
+            if calling_minor != current_minor {
+                anyhow::bail!(
+                    "Refusing to install: uvr is running inside R {calling} but the project pin/lockfile \
+                     resolves to R {target}. Packages built for R {target} would not load in this {calling} \
+                     session. Restart R against {target} (e.g. point your IDE at \
+                     ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
+                     then re-run `uvr sync`.",
+                    calling = calling_minor,
+                    target = current_minor,
+                    target_full = current_r,
+                );
+            }
+        }
+
         let lockfile_mismatch =
             looks_like_version(&lockfile.r.version) && current_minor != locked_minor;
         let sentinel_mismatch = sentinel_minor.as_ref().is_some_and(|m| m != &current_minor);
 
         if lockfile_mismatch || sentinel_mismatch {
-            // #70: refuse to wipe when called from an R session whose minor
-            // doesn't match `current_minor`. Otherwise we silently rebuild
-            // the library for the resolved R while leaving the calling R
-            // session unable to load any of it.
-            if let Some(calling_minor) = calling_r_minor() {
-                if calling_minor != current_minor {
-                    anyhow::bail!(
-                        "Refusing to wipe and rebuild the library: uvr is running inside R {calling} \
-                         but the project pin/lockfile resolves to R {target}. The rebuilt library would not \
-                         load in this {calling} session. Restart R against {target} (e.g. point your IDE at \
-                         ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
-                         then re-run `uvr sync`.",
-                        calling = calling_minor,
-                        target = current_minor,
-                        target_full = current_r,
-                    );
-                }
-            }
             let from = sentinel_minor.unwrap_or(locked_minor);
             ui::warn(format!(
                 "R version changed ({} {} {}) — wiping library and reinstalling",
@@ -587,7 +591,15 @@ pub async fn install_from_lockfile(
 }
 
 /// Pinned commit SHA and expected SHA-256 hash of the companion R package tarball.
-/// Update these together when releasing a new companion version.
+///
+/// IMPORTANT — `COMPANION_HASH` is the SHA-256 of the GitHub
+/// `https://api.github.com/repos/<owner>/<repo>/tarball/<sha>` endpoint output,
+/// **not** the `https://github.com/<owner>/<repo>/archive/<sha>.tar.gz` archive.
+/// Both are gzipped tarballs of the same tree but use different compression
+/// settings → different SHA-256. To compute a new hash:
+///   curl -sL "https://api.github.com/repos/nbafrank/uvr-r/tarball/<sha>" | shasum -a 256
+/// Mismatch is silently fatal: `ensure_companion_package` swallows install
+/// failures and the user just doesn't get the companion R package.
 const COMPANION_SHA: &str = "2503f7a2d3bfa6dd4e5977266444a016638222b6";
 const COMPANION_HASH: &str = "3bb74e3e59a24a1244970e529be7b54289c2cc74d3297cab2f8fff9505241ec2";
 

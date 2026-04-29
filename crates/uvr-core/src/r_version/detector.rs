@@ -110,18 +110,38 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
     // 1. Honour .r-version exact pin
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Some(pinned) = read_r_version_pin_from(&cwd) {
-        return find_exact_version(&installations, &pinned);
+        let bin = find_exact_version(&installations, &pinned)?;
+        // Validate the pinned install — a broken managed R (e.g. unpatched
+        // R 4.6 on macOS, see patch_r_executables) shouldn't propagate as
+        // a "found" binary that crashes downstream.
+        if query_r_version(&bin).is_none() {
+            return Err(UvrError::Other(format!(
+                "R {pinned} is pinned in .r-version but the install at {} is broken \
+                 (no version response). Reinstall: `uvr r uninstall {pinned} && uvr r install {pinned}`.",
+                bin.display()
+            )));
+        }
+        return Ok(bin);
     }
 
     // 2. Honour semver constraint from uvr.toml
     if let Some(constraint) = version_constraint {
         let req = crate::resolver::parse_version_req(constraint)?;
-        for inst in &installations {
-            let norm = normalize_version(&inst.version);
-            if let Ok(ver) = semver::Version::parse(&norm) {
-                if req.matches(&ver) {
-                    return Ok(inst.binary.clone());
-                }
+        // Probe matches in version-descending order and skip broken installs,
+        // mirroring case (3) below.
+        let mut matches: Vec<&RInstallation> = installations
+            .iter()
+            .filter(|inst| {
+                let norm = normalize_version(&inst.version);
+                semver::Version::parse(&norm)
+                    .map(|v| req.matches(&v))
+                    .unwrap_or(false)
+            })
+            .collect();
+        matches.sort_by(|a, b| version_cmp(&b.version, &a.version));
+        for inst in matches {
+            if query_r_version(&inst.binary).is_some() {
+                return Ok(inst.binary.clone());
             }
         }
         let installed = installations
