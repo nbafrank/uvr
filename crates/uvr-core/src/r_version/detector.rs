@@ -149,7 +149,7 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
     // Probe in version-descending order so the newest working install wins.
     managed.sort_by(|a, b| version_cmp(&b.version, &a.version));
     system.sort_by(|a, b| version_cmp(&b.version, &a.version));
-    for inst in managed.into_iter().chain(system.into_iter()) {
+    for inst in managed.into_iter().chain(system) {
         if query_r_version(&inst.binary).is_some() {
             return Ok(inst.binary.clone());
         }
