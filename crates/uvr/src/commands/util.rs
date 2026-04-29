@@ -15,12 +15,17 @@ pub fn make_spinner(msg: &str) -> ProgressBar {
     crate::ui::make_spinner(msg)
 }
 
-/// Phase-1 R-pin sanity check (#63, #64). Best-effort: never errors, never
-/// blocks the command. Compares the project's pinned R minor (.r-version
-/// preferred; falls back to an exact `[project] r_version` in uvr.toml) to
-/// whatever R uvr will actually dispatch to. On mismatch — including the
-/// "pin set, pinned version not installed" case — prints a loud WARN so
-/// users notice silent fallbacks.
+/// R-pin sanity check (#63, #64, #70). Best-effort: never errors, never
+/// blocks the command. Surfaces three classes of mismatch:
+///
+/// 1. Pin set but the pinned version isn't installed → "Run uvr r install".
+/// 2. Pin minor != the R uvr will resolve and use → silent-fallback warning.
+/// 3. Pin set, R uvr resolves to == pin, but uvr is being **invoked from an
+///    R session whose minor differs from the pin** (`R_HOME` env points at a
+///    different R) → packages built for the pinned R won't load in the calling
+///    session. This is the case from #70 — pin to 4.6 from inside a 4.5 R
+///    session, sync silently rebuilds the library for 4.6 and the calling
+///    session ends up unable to load anything.
 pub fn warn_r_pin_mismatch() {
     use uvr_core::project::Project;
     use uvr_core::r_version::detector::{find_all, find_r_binary, query_r_version};
@@ -59,7 +64,14 @@ pub fn warn_r_pin_mismatch() {
                     "R version mismatch: pinned {pinned} via {pin_label}, active R is {active_ver} ({}). Run `uvr r install {pinned}` to align.",
                     active_bin.display()
                 ));
+                // No need to also check calling-R below — the active-vs-pin
+                // warning is the louder signal here.
+                return;
             }
+
+            // (3) Calling-session R vs pin. Only meaningful when uvr is
+            // invoked from inside R (R_HOME set by the parent process).
+            warn_calling_r_mismatch(&pinned, pin_label, &active_ver);
         }
         Err(_) => {
             // find_r_binary errors when the pinned version isn't installed.
@@ -79,6 +91,27 @@ pub fn warn_r_pin_mismatch() {
             ));
         }
     }
+}
+
+/// Warn when the calling R session (`R_HOME`) doesn't match the pinned/active
+/// R that uvr will install for. Silent if `R_HOME` isn't set (terminal call).
+fn warn_calling_r_mismatch(pinned: &str, pin_label: &str, active_ver: &str) {
+    let Ok(r_home) = std::env::var("R_HOME") else {
+        return;
+    };
+    let r_name = if cfg!(windows) { "R.exe" } else { "R" };
+    let calling_bin = std::path::PathBuf::from(&r_home).join("bin").join(r_name);
+    let Some(calling_ver) = uvr_core::r_version::detector::query_r_version(&calling_bin) else {
+        return;
+    };
+    if r_minor_of(&calling_ver) == r_minor_of(active_ver) {
+        return;
+    }
+    crate::ui::warn(format!(
+        "Calling R session is {calling_ver} ({r_home}) but uvr will install for R {active_ver} (pinned {pinned} via {pin_label}). \
+         Packages built for {active_ver} won't load in this {calling_ver} session — restart your R IDE pointed at \
+         the pinned R, or change the pin to match this session."
+    ));
 }
 
 fn r_minor_of(v: &str) -> String {

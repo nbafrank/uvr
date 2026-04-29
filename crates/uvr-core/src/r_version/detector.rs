@@ -184,11 +184,28 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
         ])
         .output()
         .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
+    if !output.status.success() {
+        return None;
     }
+    // R sometimes prints startup warnings (e.g. "WARNING: ignoring environment
+    // value of R_HOME" when R_HOME points at a different install) to **stdout**
+    // before user code runs. The version string from our `-e` script is always
+    // the last line, so pick the last non-empty line that parses as a version.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let t = line.trim();
+            if !t.is_empty()
+                && t.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && t.contains('.')
+            {
+                Some(t.to_string())
+            } else {
+                None
+            }
+        })
 }
 
 #[cfg(test)]

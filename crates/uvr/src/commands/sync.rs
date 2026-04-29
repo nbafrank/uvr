@@ -145,6 +145,24 @@ pub async fn install_from_lockfile(
         let sentinel_mismatch = sentinel_minor.as_ref().is_some_and(|m| m != &current_minor);
 
         if lockfile_mismatch || sentinel_mismatch {
+            // #70: refuse to wipe when called from an R session whose minor
+            // doesn't match `current_minor`. Otherwise we silently rebuild
+            // the library for the resolved R while leaving the calling R
+            // session unable to load any of it.
+            if let Some(calling_minor) = calling_r_minor() {
+                if calling_minor != current_minor {
+                    anyhow::bail!(
+                        "Refusing to wipe and rebuild the library: uvr is running inside R {calling} \
+                         but the project pin/lockfile resolves to R {target}. The rebuilt library would not \
+                         load in this {calling} session. Restart R against {target} (e.g. point your IDE at \
+                         ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
+                         then re-run `uvr sync`.",
+                        calling = calling_minor,
+                        target = current_minor,
+                        target_full = current_r,
+                    );
+                }
+            }
             let from = sentinel_minor.unwrap_or(locked_minor);
             ui::warn(format!(
                 "R version changed ({} {} {}) — wiping library and reinstalling",
@@ -791,6 +809,18 @@ fn r_minor(version: &str) -> String {
     } else {
         version.to_string()
     }
+}
+
+/// Major.minor of the R session that invoked uvr, if any. Read from
+/// `R_HOME` (set by R when it spawns child processes); used by the sync
+/// wipe guard to refuse a destructive rebuild that would strand the
+/// calling R session with packages built for a different R (#70).
+fn calling_r_minor() -> Option<String> {
+    let r_home = std::env::var("R_HOME").ok()?;
+    let r_name = if cfg!(windows) { "R.exe" } else { "R" };
+    let bin = std::path::PathBuf::from(&r_home).join("bin").join(r_name);
+    let ver = uvr_core::r_version::detector::query_r_version(&bin)?;
+    Some(r_minor(&ver))
 }
 
 /// Path to the per-library sentinel that records which R minor the library
