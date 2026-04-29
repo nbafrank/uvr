@@ -1,6 +1,6 @@
 Package: uvr
 Title: R Interface to the 'uvr' Package Manager
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: person("Francesco", "Grazzini", role = c("aut", "cre"),
                   email = "francesco@example.com")
 Description: Provides R functions that wrap the 'uvr' command-line tool for

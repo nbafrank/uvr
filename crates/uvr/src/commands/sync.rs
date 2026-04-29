@@ -567,8 +567,8 @@ pub async fn install_from_lockfile(
 
 /// Pinned commit SHA and expected SHA-256 hash of the companion R package tarball.
 /// Update these together when releasing a new companion version.
-const COMPANION_SHA: &str = "4ddd0e991ebd19679b7c0343495250a201820ee4";
-const COMPANION_HASH: &str = "820dd6eb191fb4496662de3d524005c1c876206831724d4e2183e60591f4841e";
+const COMPANION_SHA: &str = "2503f7a2d3bfa6dd4e5977266444a016638222b6";
+const COMPANION_HASH: &str = "3bb74e3e59a24a1244970e529be7b54289c2cc74d3297cab2f8fff9505241ec2";
 
 /// Install the uvr R companion package from GitHub into the project library
 /// if it's not already installed. Failures are silently ignored — the companion
