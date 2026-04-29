@@ -19,29 +19,36 @@ pub struct ActiveInstall {
 
 static ACTIVE: Mutex<Vec<ActiveInstall>> = Mutex::new(Vec::new());
 
+/// Acquire the registry lock, recovering from prior panics. Poisoning here
+/// is non-fatal — a panic in another thread that held the lock leaves the
+/// `Vec` in a recoverable state, and silently dropping the install record
+/// is worse than continuing.
+fn lock_recover() -> std::sync::MutexGuard<'static, Vec<ActiveInstall>> {
+    match ACTIVE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("signal registry mutex poisoned, recovering");
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Record an in-flight `R CMD INSTALL`. Call this immediately after spawning.
 pub fn register(info: ActiveInstall) {
-    if let Ok(mut guard) = ACTIVE.lock() {
-        guard.push(info);
-    }
+    lock_recover().push(info);
 }
 
 /// Drop the in-flight record for this PID. Call this when the install
 /// completes (success or failure) so the SIGINT handler doesn't try to
 /// kill an already-finished process.
 pub fn unregister(pid: u32) {
-    if let Ok(mut guard) = ACTIVE.lock() {
-        guard.retain(|a| a.pid != pid);
-    }
+    lock_recover().retain(|a| a.pid != pid);
 }
 
 /// Snapshot the current in-flight installs and drain the registry. Used by
 /// the signal handler so callbacks fire exactly once per Ctrl+C.
 pub fn drain() -> Vec<ActiveInstall> {
-    ACTIVE
-        .lock()
-        .map(|mut g| std::mem::take(&mut *g))
-        .unwrap_or_default()
+    std::mem::take(&mut *lock_recover())
 }
 
 /// Kill every in-flight install and remove its `00LOCK-<pkg>/` dir.

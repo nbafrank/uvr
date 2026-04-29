@@ -220,6 +220,12 @@ impl RCmdInstall {
         completed.store(true, Ordering::SeqCst);
         let _ = watchdog.join();
 
+        // Once the OS reaps the child, the PID can be recycled. Drop the
+        // registration immediately so a concurrent SIGINT handler can't snapshot
+        // the registry and SIGTERM an unrelated process that inherits the PID.
+        // The Deregister Drop guard below stays as a safety net for panic paths.
+        crate::signal::unregister(pid);
+
         if timed_out.load(Ordering::SeqCst) {
             return Err(UvrError::Other(format!(
                 "Install of '{package_name}' timed out after {}s — killed by uvr (#52). \

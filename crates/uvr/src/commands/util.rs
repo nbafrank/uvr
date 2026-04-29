@@ -91,7 +91,14 @@ fn r_minor_of(v: &str) -> String {
 }
 
 fn looks_like_exact(v: &str) -> bool {
-    !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') && v.contains('.')
+    if v.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.parse::<u32>().is_ok())
 }
 
 #[cfg(test)]
@@ -118,5 +125,18 @@ mod tests {
         assert!(!looks_like_exact(">=4.0.0"));
         assert!(!looks_like_exact("*"));
         assert!(!looks_like_exact("~4.5"));
+    }
+
+    #[test]
+    fn looks_like_exact_rejects_malformed() {
+        // Trailing dot — not a real version.
+        assert!(!looks_like_exact("4.5."));
+        // Bare major — not exact enough to be a pin.
+        assert!(!looks_like_exact("4"));
+        // All-dots / empty components.
+        assert!(!looks_like_exact("..."));
+        assert!(!looks_like_exact("4..5"));
+        // Letters mid-string.
+        assert!(!looks_like_exact("4.5a"));
     }
 }
