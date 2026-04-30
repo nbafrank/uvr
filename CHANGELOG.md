@@ -11,6 +11,17 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
   old in-place behavior with optional name override.
 
 ### Fixes
+- **Ubuntu / Linux**: `R CMD INSTALL` (used for the companion package and
+  source-built dependencies) now skips the user/project `.Rprofile` via
+  `R_PROFILE_USER=/dev/null`. Previously a leftover `source("renv/activate.R")`
+  in a project's `.Rprofile` would abort R startup and the companion would
+  fail to install with a confusing "cannot open the connection" error.
+- **Ubuntu / Linux**: `uvr r install` pre-flights `ar` (binutils) and `tar`
+  on PATH. Missing tools now produce an actionable "install binutils"
+  message instead of the opaque "I/O error: No such file or directory".
+- **Ubuntu / Linux**: `uvr r list --all` now returns the current-major
+  R 4.x release list. Was scraping `/src/base/` (which lists R-1/R-2/R-3/R-4
+  subdirs, not tarballs) and returning an empty list.
 - **#70 follow-up**: cross-R-minor wipe guard moved out of the wipe
   conditional. A library already at the resolved R minor (no wipe) but
   invoked from a calling R session on a different minor was still
