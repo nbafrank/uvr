@@ -888,6 +888,27 @@ fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()>
 
 /// Linux: `.deb` → `ar x` → `data.tar.gz` → extract
 fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
+    // Pre-flight: `ar` (binutils) and `tar` are required. Some minimal Ubuntu
+    // / Debian images and stripped-down container bases ship without binutils;
+    // raw ENOENT from Command::status() reads as "I/O error: No such file or
+    // directory" with no hint at the cause. Surface a clear message before
+    // we even try to download.
+    require_tool(
+        "ar",
+        &[
+            "Debian/Ubuntu: sudo apt install binutils",
+            "RHEL/Fedora:  sudo dnf install binutils",
+            "Alpine:       sudo apk add binutils",
+        ],
+    )?;
+    require_tool(
+        "tar",
+        &[
+            "Debian/Ubuntu: sudo apt install tar",
+            "Alpine:       sudo apk add tar",
+        ],
+    )?;
+
     let tmp = tempfile::tempdir()?;
     let deb_path = tmp.path().join(format!("r-{version}.deb"));
     std::fs::write(&deb_path, deb_bytes)?;
@@ -896,7 +917,12 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     let status = Command::new("ar")
         .args(["x", &deb_path.to_string_lossy()])
         .current_dir(tmp.path())
-        .status()?;
+        .status()
+        .map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to run `ar x` on the downloaded .deb ({e}). Install binutils."
+            ))
+        })?;
     if !status.success() {
         return Err(UvrError::Other("ar x failed on .deb".into()));
     }
@@ -912,7 +938,12 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
             &dest.to_string_lossy(),
             "--strip-components=4", // strip ./opt/R/<version>/
         ])
-        .status()?;
+        .status()
+        .map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to run `tar` to extract the .deb payload ({e}). Install tar."
+            ))
+        })?;
     if !status.success() {
         return Err(UvrError::Other(
             "tar extraction of Linux R .deb failed".into(),
@@ -933,6 +964,19 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     write_renviron_site(dest)?;
 
     Ok(())
+}
+
+/// Verify a CLI tool is present on `PATH`. Returns a clear error including
+/// platform-specific install hints if it isn't, so users see actionable
+/// diagnostics instead of "I/O error: No such file or directory".
+fn require_tool(tool: &str, install_hints: &[&str]) -> Result<()> {
+    if which::which(tool).is_ok() {
+        return Ok(());
+    }
+    let hints = install_hints.join("\n  ");
+    Err(UvrError::Other(format!(
+        "`{tool}` not found on PATH — required to extract the R .deb. Install with:\n  {hints}"
+    )))
 }
 
 fn find_data_tar(dir: &Path) -> Result<PathBuf> {
@@ -966,7 +1010,11 @@ pub async fn fetch_available_versions(
         Platform::MacOsArm64 => (macos_arm64_listing.as_str(), "R-", "-arm64.pkg"),
         Platform::MacOsX86_64 => (macos_x86_64_listing.as_str(), "R-", "-x86_64.pkg"),
         Platform::LinuxX86_64 | Platform::LinuxArm64 => {
-            ("https://cran.r-project.org/src/base/", "R-", ".tar.gz")
+            // CRAN's `/src/base/` lists subdirs (R-1, R-2, R-3, R-4) — not
+            // tarballs. Point at `R-4/` directly to enumerate current-major
+            // releases. Pre-R-4 versions are out of scope for uvr (R 3.x
+            // pre-dates the supported R 4.0+ ABI).
+            ("https://cran.r-project.org/src/base/R-4/", "R-", ".tar.gz")
         }
         Platform::WindowsX86_64 => (
             "https://cran.r-project.org/bin/windows/base/",

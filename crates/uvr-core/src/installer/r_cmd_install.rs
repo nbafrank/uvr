@@ -278,6 +278,18 @@ impl RCmdInstall {
             &tarball_str,
         ]);
 
+        // Neutralize the project / user .Rprofile during install. Project
+        // .Rprofiles often contain `source("renv/activate.R")` (renv pattern)
+        // or other side-effecting startup code that aborts R before the
+        // install begins. Pointing R_PROFILE_USER at the platform's null
+        // device tells R to skip the user/project Rprofile. The library
+        // destination is set explicitly via --library, so the suppressed
+        // `.libPaths()` call has no install-side effect.
+        // (We deliberately leave R_ENVIRON_USER alone — ~/.Renviron often
+        // holds load-bearing TZ / locale settings.)
+        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        cmd.env("R_PROFILE_USER", null_device);
+
         if cfg!(target_os = "windows") {
             let mut path_ext = String::new();
             let rtools_candidates: Vec<String> = [
