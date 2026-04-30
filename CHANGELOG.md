@@ -53,6 +53,14 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
   of the `/repos/<owner>/<repo>/tarball/<sha>` API output, not the
   `/archive/<sha>.tar.gz` archive.
 
+### Known issues
+- **macOS R 4.6 + source package installs**: byte-compile / lazy-load step
+  in `R CMD INSTALL` errors with "missing value where TRUE/FALSE needed"
+  on the patched 4.6 install. R 4.5.x is unaffected. Likely interaction
+  between `patch_r_executables`'s ad-hoc resign and R 4.6's lazy-loader.
+  Workaround: pin `.r-version` to 4.5.3 for now, or wait for a follow-up
+  release that diagnoses the patch interaction.
+
 ## v0.2.10 – v0.2.20 (2026-04-23 → 2026-04-29)
 
 A two-week cluster of releases driven by issue triage. Going forward,
