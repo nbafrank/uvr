@@ -5,6 +5,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
+Pure tracking section — fixes and small features land here between tags.
+
+## v0.3.1 (2026-04-30)
+
+Hotfix-eligible release: closes the macOS R 4.6 byte-compile bug that
+v0.3.0 shipped as a known issue, plus three smaller items that landed
+together. Per the batched-cadence rule (#69), this tag is allowed under
+the install-blocking-bug exception (R 4.6 source-package installs were
+fully broken on macOS in v0.3.0).
+
 ### Features
 - **`uvr r install --distribution <SLUG>`** — manual override for the
   Posit CDN distro slug (e.g. `ubuntu-2204`, `debian-12`, `rhel-9`).
