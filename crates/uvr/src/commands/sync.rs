@@ -600,8 +600,8 @@ pub async fn install_from_lockfile(
 ///   curl -sL "https://api.github.com/repos/nbafrank/uvr-r/tarball/<sha>" | shasum -a 256
 /// Mismatch is silently fatal: `ensure_companion_package` swallows install
 /// failures and the user just doesn't get the companion R package.
-const COMPANION_SHA: &str = "2503f7a2d3bfa6dd4e5977266444a016638222b6";
-const COMPANION_HASH: &str = "3bb74e3e59a24a1244970e529be7b54289c2cc74d3297cab2f8fff9505241ec2";
+const COMPANION_SHA: &str = "f20019c39d8ab16dd360632c0f44b7e6a947162d";
+const COMPANION_HASH: &str = "1bc618215ad80666eea815d88f6bf53ca1c201f7883b970647c96eb18b677ffe";
 
 /// Install the uvr R companion package from GitHub into the project library
 /// if it's not already installed. Failures are silently ignored — the companion

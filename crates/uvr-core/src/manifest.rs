@@ -172,15 +172,21 @@ impl Manifest {
         }
 
         // Remotes override matching Imports/Depends/Suggests entries — they
-        // declare the *source* for a dep already listed by name above.
+        // declare the *source* for a dep already listed by name above. The
+        // package name is derived from the repo URL by default, but R's
+        // companion-package idiom often names the repo `<pkg>-r` while the
+        // Imports/Suggests line uses `<pkg>` (#68). When the URL-derived
+        // name doesn't match an existing dep, we strip common `-r` / `_r` /
+        // `.r` suffixes before giving up.
         if let Some(remotes) = fields.get("Remotes") {
-            for (pkg, spec) in parse_remotes_field(remotes) {
-                let target = if dev_dependencies.contains_key(&pkg) {
+            for (url_pkg, spec) in parse_remotes_field(remotes) {
+                let resolved = resolve_remote_pkg_name(&url_pkg, &dependencies, &dev_dependencies);
+                let target = if dev_dependencies.contains_key(&resolved) {
                     &mut dev_dependencies
                 } else {
                     &mut dependencies
                 };
-                target.insert(pkg, spec);
+                target.insert(resolved, spec);
             }
         }
 
@@ -259,6 +265,34 @@ fn parse_dep_field(field: &str) -> Vec<(String, DependencySpec)> {
         }
     }
     result
+}
+
+/// Pick the dependency name that a `Remotes:` URL should bind to.
+///
+/// 1. If the URL-derived name (e.g. `uvr-r` from `nbafrank/uvr-r`) already
+///    matches a dep declared in Imports/Depends/Suggests, use that.
+/// 2. Otherwise try common R companion-package suffixes (`-r`, `_r`, `.r`):
+///    `uvr-r` → look for `uvr`. Strips one suffix at a time.
+/// 3. Otherwise fall back to the URL-derived name (preserves prior behavior
+///    when nothing better matches; the dep is then inserted as a new entry
+///    with a git source).
+fn resolve_remote_pkg_name(
+    url_pkg: &str,
+    dependencies: &BTreeMap<String, DependencySpec>,
+    dev_dependencies: &BTreeMap<String, DependencySpec>,
+) -> String {
+    let known = |name: &str| dependencies.contains_key(name) || dev_dependencies.contains_key(name);
+    if known(url_pkg) {
+        return url_pkg.to_string();
+    }
+    for suffix in ["-r", "_r", ".r", "-R", "_R", ".R"] {
+        if let Some(stripped) = url_pkg.strip_suffix(suffix) {
+            if !stripped.is_empty() && known(stripped) {
+                return stripped.to_string();
+            }
+        }
+    }
+    url_pkg.to_string()
 }
 
 /// Parse an R `Remotes:` field into `(package_name, DependencySpec)` pairs.
@@ -505,6 +539,66 @@ Remotes:
         if let DependencySpec::Detailed(d) = pk {
             assert_eq!(d.rev.as_deref(), Some("v1.0"));
         }
+    }
+
+    #[test]
+    fn description_remotes_companion_suffix_binds_to_existing_dep() {
+        // #68 — `Remotes: nbafrank/uvr-r` paired with `Suggests: uvr` should
+        // bind to the `uvr` dev-dep, not create a new `uvr-r` runtime dep.
+        let dcf = r#"Package: templates
+Suggests:
+    uvr (>= 0.1.0)
+Remotes:
+    nbafrank/uvr-r
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+
+        // No spurious runtime dep was created.
+        assert!(
+            !m.dependencies.contains_key("uvr-r"),
+            "uvr-r should not be a runtime dep, got {:?}",
+            m.dependencies
+        );
+
+        // The Suggests entry survives as a dev-dep with git source merged in.
+        let uvr = m
+            .dev_dependencies
+            .get("uvr")
+            .expect("uvr should remain a dev-dep");
+        assert_eq!(uvr.git(), Some("nbafrank/uvr-r"));
+    }
+
+    #[test]
+    fn description_remotes_underscore_r_suffix_binds() {
+        let dcf = r#"Package: thing
+Imports:
+    foo
+Remotes:
+    user/foo_r
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+        assert!(!m.dependencies.contains_key("foo_r"));
+        assert_eq!(m.dependencies.get("foo").unwrap().git(), Some("user/foo_r"));
+    }
+
+    #[test]
+    fn description_remotes_unmatched_falls_back_to_url_name() {
+        // Remote name doesn't match anything in Imports/Suggests and doesn't
+        // strip to a known dep — keep prior behavior (insert as new dep).
+        let dcf = r#"Package: thing
+Imports:
+    foo
+Remotes:
+    user/totally-unrelated
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+        assert_eq!(
+            m.dependencies.get("totally-unrelated").unwrap().git(),
+            Some("user/totally-unrelated")
+        );
+        // foo stays unsourced.
+        let foo = m.dependencies.get("foo").unwrap();
+        assert!(foo.git().is_none(), "foo should remain version-only");
     }
 
     #[test]

@@ -192,92 +192,145 @@ fn refresh_uvr_block(existing: &str, snippet: &str) -> Option<String> {
     Some(out)
 }
 
-/// Write `.vscode/settings.json` with Positron R interpreter path if a pinned
-/// R version is managed by uvr.
+/// Write `.vscode/settings.json` with R interpreter paths so that both
+/// Positron and the vanilla VSCode R extension pick up the project's R.
 ///
-/// Positron's `interpreters.default` setting only selects from interpreters
-/// it has already discovered — and uvr's R install at
-/// `~/.uvr/r-versions/<ver>/` is not in any of Positron's standard discovery
-/// paths (R.framework, conda, pixi, /usr/local/bin). So we also write
-/// `positron.r.customBinaries` to inject the uvr R into discovery; `default`
-/// then picks it as the primary. Without `customBinaries`, `default` was
-/// silently a no-op.
+/// Keys we manage:
+/// - `positron.r.interpreters.default` — Positron's preferred interpreter.
+/// - `positron.r.customBinaries` — adds the project R to Positron's discovery
+///   set. `interpreters.default` only selects from already-discovered
+///   binaries, so `customBinaries` is what makes the pin actually take.
+/// - `positron.r.customRootFolders` — exposes ALL uvr-managed R installs
+///   under `~/.uvr/r-versions/` to Positron's picker (#62).
+/// - `r.rterm.<os>` / `r.rpath.<os>` — vanilla VSCode R extension keys
+///   for the integrated terminal and LSP (#50).
+///
+/// Resolves the project R binary by reading `.r-version` first, then
+/// falling back to whatever `find_r_binary(None)` resolves to. This means
+/// projects with a system R and no pin still get IDE config, instead of
+/// silently leaving the file unwritten (#50).
 pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
-    // Determine the pinned R version from .r-version
-    let r_version_path = dir.join(R_VERSION_FILE);
-    let version = match std::fs::read_to_string(&r_version_path) {
-        Ok(v) => {
-            let v = v.trim().to_string();
-            if v.is_empty() {
-                return Ok(());
-            }
-            v
-        }
-        Err(_) => return Ok(()), // No .r-version, nothing to do
+    let Some(r_binary) = resolve_project_r_binary(dir) else {
+        return Ok(()); // No R available — nothing to bind to.
     };
-
-    // Check the R binary actually exists
-    let r_home = dirs::home_dir().unwrap_or_default();
-    let r_binary = r_home
-        .join(".uvr")
-        .join("r-versions")
-        .join(&version)
-        .join("bin")
-        .join("R");
-    if !r_binary.exists() {
-        return Ok(()); // Not a uvr-managed R version
-    }
-
     let r_binary_str = r_binary.to_string_lossy().into_owned();
+
     let vscode_dir = dir.join(".vscode");
     std::fs::create_dir_all(&vscode_dir)?;
     let settings_path = vscode_dir.join("settings.json");
 
-    let default_key = "positron.r.interpreters.default";
-    let custom_binaries_key = "positron.r.customBinaries";
+    // Build the OS-specific vanilla VSCode key suffix once.
+    let vscode_os_suffix = if cfg!(target_os = "macos") {
+        "mac"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+    let rterm_key = format!("r.rterm.{vscode_os_suffix}");
+    let rpath_key = format!("r.rpath.{vscode_os_suffix}");
 
-    if settings_path.exists() {
+    let r_versions_root = dirs::home_dir().map(|h| {
+        h.join(".uvr")
+            .join("r-versions")
+            .to_string_lossy()
+            .into_owned()
+    });
+
+    let mut json: serde_json::Value = if settings_path.exists() {
         let existing = std::fs::read_to_string(&settings_path)?;
-        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&existing) {
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    default_key.to_string(),
-                    serde_json::Value::String(r_binary_str.clone()),
-                );
-
-                // customBinaries is an array of paths; merge our path in if
-                // not already present, preserving any user-added paths.
-                let entry = obj
-                    .entry(custom_binaries_key.to_string())
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-                if let Some(arr) = entry.as_array_mut() {
-                    let already = arr
-                        .iter()
-                        .any(|v| v.as_str() == Some(r_binary_str.as_str()));
-                    if !already {
-                        arr.push(serde_json::Value::String(r_binary_str.clone()));
-                    }
-                } else {
-                    // Existing value isn't an array — replace with one
-                    // containing just our path. Don't try to coerce; the
-                    // user can always add their own entries back manually.
-                    *entry = serde_json::json!([r_binary_str.clone()]);
-                }
-
-                let pretty = serde_json::to_string_pretty(&json).unwrap_or(existing);
-                return std::fs::write(&settings_path, pretty + "\n");
-            }
+        match serde_json::from_str(&existing) {
+            Ok(v) => v,
+            // Don't clobber user JSON we can't parse.
+            Err(_) => return Ok(()),
         }
-        // If we can't parse existing JSON, don't clobber it
+    } else {
+        serde_json::json!({})
+    };
+
+    let Some(obj) = json.as_object_mut() else {
         return Ok(());
+    };
+
+    // 1. Positron interpreter default.
+    obj.insert(
+        "positron.r.interpreters.default".into(),
+        serde_json::Value::String(r_binary_str.clone()),
+    );
+
+    // 2. Positron customBinaries — merge, preserving existing entries.
+    merge_string_into_array(obj, "positron.r.customBinaries", &r_binary_str);
+
+    // 3. Positron customRootFolders — expose ~/.uvr/r-versions/ so the
+    //    Positron interpreter picker shows every uvr-managed R install.
+    if let Some(root) = r_versions_root {
+        merge_string_into_array(obj, "positron.r.customRootFolders", &root);
     }
 
-    let content = serde_json::json!({
-        default_key: r_binary_str,
-        custom_binaries_key: [r_binary_str],
-    });
-    let pretty = serde_json::to_string_pretty(&content).unwrap();
+    // 4. Vanilla VSCode R extension — point at the project R for both the
+    //    integrated terminal (rterm) and the LSP (rpath).
+    obj.insert(rterm_key, serde_json::Value::String(r_binary_str.clone()));
+    obj.insert(rpath_key, serde_json::Value::String(r_binary_str));
+
+    let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
     std::fs::write(&settings_path, pretty + "\n")
+}
+
+/// Append `value` to the array at `obj[key]` if it isn't already there.
+/// Initializes the array when missing; replaces any non-array value with
+/// a fresh single-entry array (don't try to coerce structured values).
+fn merge_string_into_array(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &str,
+) {
+    let entry = obj
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    match entry.as_array_mut() {
+        Some(arr) => {
+            let already = arr.iter().any(|v| v.as_str() == Some(value));
+            if !already {
+                arr.push(serde_json::Value::String(value.to_string()));
+            }
+        }
+        None => *entry = serde_json::json!([value]),
+    }
+}
+
+/// Resolve the R binary uvr would use for this project. Reads `.r-version`
+/// and the [project] r_version constraint; falls back to whatever R is
+/// available system-wide.
+fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
+    use uvr_core::r_version::detector::find_r_binary;
+
+    // Prefer the explicit pin in `dir/.r-version` if it points at a
+    // uvr-managed install we can verify on disk.
+    if let Ok(pin) = std::fs::read_to_string(dir.join(R_VERSION_FILE)) {
+        let pin = pin.trim();
+        if !pin.is_empty() {
+            if let Some(home) = dirs::home_dir() {
+                let candidate = home
+                    .join(".uvr")
+                    .join("r-versions")
+                    .join(pin)
+                    .join("bin")
+                    .join(if cfg!(target_os = "windows") {
+                        "R.exe"
+                    } else {
+                        "R"
+                    });
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // No pin (or pin not yet installed) — fall through to whatever
+    // uvr would find on the system. Captures system R for projects
+    // that haven't installed an R via uvr yet.
+    find_r_binary(None).ok()
 }
 
 /// Returns true if `dir` looks like an R package source tree — DESCRIPTION

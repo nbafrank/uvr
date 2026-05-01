@@ -99,7 +99,30 @@ fn constraint_matches(c: &ConstraintStatic, distribution: &str, version: &str) -
     if c.versions.is_empty() {
         return true;
     }
-    c.versions.contains(&version)
+    // Match the host's full `VERSION_ID` against rule versions first; then
+    // retry with a major.minor truncation. Upstream rules key on `3.21`,
+    // `22.04`, etc., but `/etc/os-release` on Alpine 3.23.4 reports
+    // `VERSION_ID="3.23.4"` — without truncation a 3.23.4 host gets zero
+    // rule hits even though the rules cover 3.23 (issue #30).
+    if c.versions.contains(&version) {
+        return true;
+    }
+    let major_minor = truncate_to_minor(version);
+    if let Some(mm) = major_minor.as_deref() {
+        return c.versions.contains(&mm);
+    }
+    false
+}
+
+/// Truncate a `major.minor.patch` string to `major.minor`. Returns `None`
+/// when the input has fewer than three dot-separated components (no patch
+/// to strip).
+fn truncate_to_minor(v: &str) -> Option<String> {
+    let mut parts = v.split('.');
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    parts.next()?; // require at least 3 components
+    Some(format!("{major}.{minor}"))
 }
 
 #[cfg(test)]
@@ -114,6 +137,26 @@ mod tests {
             pkgs.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev, got {pkgs:?}"
         );
+    }
+
+    #[test]
+    fn alpine_full_version_id_normalizes_to_minor() {
+        // pat-s's repro from #30: Alpine 3.23.4 reports VERSION_ID="3.23.4"
+        // but rules key on "3.23". The fallback truncates the patch.
+        let pkgs = resolve_local("libxml2 (>= 2.6.3)", "alpine", "3.23.4");
+        assert!(
+            pkgs.iter().any(|p| p == "libxml2-dev"),
+            "expected libxml2-dev for alpine-3.23.4, got {pkgs:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_minor_strips_patch() {
+        assert_eq!(truncate_to_minor("3.23.4").as_deref(), Some("3.23"));
+        assert_eq!(truncate_to_minor("22.04.1").as_deref(), Some("22.04"));
+        // No truncation when fewer than 3 components.
+        assert!(truncate_to_minor("3.23").is_none());
+        assert!(truncate_to_minor("22").is_none());
     }
 
     #[test]
