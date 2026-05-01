@@ -5,12 +5,51 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
+Pure tracking section — fixes and small features land here between tags.
+
+## v0.3.0 (2026-04-30)
+
+First batched-cadence release per #69. Wraps everything since v0.2.20: the
+B-Nilson UX papercut sweep, the `uvr upgrade` command from v0.2.20, the
+Ubuntu / Linux install fixes, and the alpine / Remotes / IDE-config /
+companion 0.1.2 batch from this iteration. Companion R package bumps to
+**0.1.2**.
+
 ### Features
 - **`uvr init <name>`** creates a new directory and initializes inside it,
   matching `uv init`'s behavior (#56). `uvr init --here [<name>]` keeps the
   old in-place behavior with optional name override.
+- **R companion package 0.1.2** — adds `update_pkgs()` (uvr-r #2), a thin
+  wrapper around `lock(upgrade = TRUE)` followed by `sync()`.
+- **`.vscode/settings.json` covers more keys** (#62, #50): `positron.r.customRootFolders`
+  exposes every uvr-managed R install to Positron's picker; `r.rterm.<os>`
+  and `r.rpath.<os>` are written for the vanilla VSCode R extension. When
+  there's no `.r-version` pin, settings still bind to whatever R uvr would
+  use system-wide instead of leaving the file unwritten.
 
 ### Fixes
+- **Linux sysreqs (#30, pat-s)**: rule lookup now matches a host's full
+  `VERSION_ID` *and* a `major.minor` truncation. Alpine 3.23.4 reports
+  `3.23.4` in `/etc/os-release` but rules key on `3.23` — without the
+  truncation a 3.23.4 host got zero rule hits despite the rules covering
+  3.23.
+- **DESCRIPTION Remotes parser (#68, B-Nilson)**: `Remotes: nbafrank/uvr-r`
+  paired with a `Suggests: uvr` entry now binds to the `uvr` dev-dep
+  instead of inserting a new `uvr-r` runtime dep. URL-derived names are
+  tried first; on no match, common R companion suffixes (`-r`, `_r`, `.r`
+  and uppercase) are stripped before giving up.
+- **Ubuntu / Linux**: `R CMD INSTALL` (used for the companion package and
+  source-built dependencies) now skips the user/project `.Rprofile` via
+  `R_PROFILE_USER=/dev/null`. Previously a leftover `source("renv/activate.R")`
+  in a project's `.Rprofile` would abort R startup and the companion would
+  fail to install with a confusing "cannot open the connection" error.
+- **Ubuntu / Linux**: `uvr r install` pre-flights `ar` (binutils) and `tar`
+  on PATH. Missing tools now produce an actionable "install binutils"
+  message instead of the opaque "I/O error: No such file or directory".
+- **Ubuntu / Linux**: `uvr r list --all` now returns the current-major
+  R 4.x release list. Was scraping `/src/base/` (which lists R-1/R-2/R-3/R-4
+  subdirs, not tarballs) and returning an empty list.
+- **#70 follow-up**: cross-R-minor wipe guard moved out of the wipe
 - **Ubuntu / Linux**: `R CMD INSTALL` (used for the companion package and
   source-built dependencies) now skips the user/project `.Rprofile` via
   `R_PROFILE_USER=/dev/null`. Previously a leftover `source("renv/activate.R")`
