@@ -27,10 +27,18 @@ if ! command -v docker >/dev/null; then
     exit 1
 fi
 
+# Force linux/amd64 — CI runs on x86_64, so building/running an arm64
+# image on Apple Silicon would produce numbers that aren't comparable to
+# the published CI results. macOS users on M-series will hit Rosetta /
+# QEMU emulation here (slower bench) but get apples-to-apples numbers.
+# Override with PLATFORM=linux/arm64 if you want native arm64 timings.
+PLATFORM="${PLATFORM:-linux/amd64}"
+
 mkdir -p benchmarks/out
 
-echo "Building uvr-bench image (R ${R_VERSION}, PPM ${PPM_SNAPSHOT})..."
+echo "Building uvr-bench image (R ${R_VERSION}, PPM ${PPM_SNAPSHOT}, ${PLATFORM})..."
 docker build \
+    --platform "${PLATFORM}" \
     --build-arg "R_VERSION=${R_VERSION}" \
     --build-arg "PPM_SNAPSHOT=${PPM_SNAPSHOT}" \
     -t "uvr-bench:r${R_VERSION}-${PPM_SNAPSHOT}" \
@@ -40,6 +48,8 @@ docker build \
 echo ""
 echo "Running benchmark (BENCH_RUNS=${BENCH_RUNS})..."
 docker run --rm \
+    --platform "${PLATFORM}" \
+    --user "$(id -u):$(id -g)" \
     -e "BENCH_RUNS=${BENCH_RUNS}" \
     -v "${REPO_ROOT}/benchmarks/out:/out" \
     "uvr-bench:r${R_VERSION}-${PPM_SNAPSHOT}"

@@ -21,11 +21,14 @@
 ARG R_VERSION=4.5.3
 
 # ─── Stage 1: build the uvr binary ──────────────────────────────────────────
-# Pinned rust version so the binary doesn't drift across rebuilds. Builds
-# against musl so the resulting binary is portable across Linux distros
-# and matches what we ship as `uvr-x86_64-unknown-linux-musl.tar.gz` in
-# release artifacts.
-FROM rust:1.83-slim-bookworm AS builder
+# Pinned to an exact patch (1.83.0) so the binary is byte-reproducible
+# across rebuilds on the same uvr commit. The `1.83-slim-bookworm` tag is
+# a moving alias for "latest 1.83.x" — using `1.83.0` instead pins the
+# patch as well as the minor.
+# Builds against musl so the resulting binary is portable across Linux
+# distros and matches what we ship as
+# `uvr-x86_64-unknown-linux-musl.tar.gz` in release artifacts.
+FROM rust:1.83.0-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config musl-tools \
@@ -40,9 +43,9 @@ COPY crates/ ./crates/
 RUN cargo build --release --target x86_64-unknown-linux-musl -p uvr
 
 # ─── Stage 2: bench environment ────────────────────────────────────────────
-# rocker/r-ver pins R to a specific minor on debian:bookworm. Tagged
-# images are immutable, so the same Dockerfile on the same uvr commit
-# produces the same R version reproducibly.
+# rocker/r-ver pins R to a specific patch release (e.g. 4.5.3) on
+# debian:bookworm. Tagged images are immutable, so the same Dockerfile on
+# the same uvr commit produces the same R version reproducibly.
 FROM rocker/r-ver:${R_VERSION}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -65,9 +68,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PPM_SNAPSHOT is an explicit "we're updating the comparison baseline"
 # act, not something that drifts under us.
 ARG PPM_SNAPSHOT=2025-04-01
+# Snapshot retention note: PPM keeps dated snapshots for an extended (but
+# not contractually committed) window. If the snapshot date is ever GC'd,
+# this layer's `install.packages` returns HTTP 404 and the image build
+# fails LOUDLY — preferred over silent version drift. Bumping the
+# PPM_SNAPSHOT arg is an explicit "we're updating the comparison
+# baseline" act, not something that drifts under us.
 RUN printf 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/bookworm/%s"))\n' \
         "${PPM_SNAPSHOT}" >> /usr/local/lib/R/etc/Rprofile.site \
  && R -e "install.packages(c('pak','renv'), Ncpus = parallel::detectCores())"
+
+# Make the system library reachable from `uvr run` (#40). uvr's run
+# isolation sets `R_LIBS_SITE=""` so the project library can't bleed in
+# from system-wide installs — but that also hides pak and renv (which
+# we *need* for the bench's tool-detection block). UVR_EXTRA_LIBS gets
+# appended to R_LIBS_USER inside `uvr run`, restoring visibility for
+# this controlled environment without un-isolating in general.
+ENV UVR_EXTRA_LIBS=/usr/local/lib/R/site-library
 
 # Pull the freshly-built uvr binary from the builder stage. The bench
 # tests THIS binary — exactly what a tagged release would produce for
@@ -76,18 +93,25 @@ COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/uvr /usr/local
 RUN chmod +x /usr/local/bin/uvr && uvr --version
 
 # Bench inputs. Copy late so iterating on the bench script doesn't
-# invalidate the heavy R-deps layer.
+# invalidate the heavy R-deps layer. /bench is made world-writable so
+# the container can be safely run via `--user $(id -u):$(id -g)` from
+# run-in-docker.sh — bench.sh writes bench-results.json into the
+# WORKDIR before the entrypoint copies it to /out.
 WORKDIR /bench
 COPY benchmarks/bench.sh benchmarks/uvr-*.toml ./
-RUN chmod +x bench.sh
+RUN chmod +x bench.sh && chmod 0777 /bench
 
 # Mount /out from the host to capture results.
 VOLUME ["/out"]
 ENV BENCH_RUNS=5
 
 # Tee bench output to /out/bench.log too so a CI failure has both the
-# JSON (if reached) and the raw run log to debug from.
+# JSON (if reached) and the raw run log to debug from. Files written
+# from the container as root would otherwise be unreadable by the host
+# user — chmod 666 the outputs so a subsequent local `run-in-docker.sh`
+# can overwrite them without sudo.
 ENTRYPOINT ["/bin/bash", "-c", "\
     bash bench.sh 2>&1 | tee /out/bench.log; \
-    cp -f bench-results.json /out/bench-results.json 2>/dev/null || true \
+    cp -f bench-results.json /out/bench-results.json 2>/dev/null || true; \
+    chmod -f 666 /out/bench-results.json /out/bench.log 2>/dev/null || true \
 "]

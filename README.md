@@ -95,7 +95,7 @@ Install wall time (empty library, index caches warm). All tools use P3M as CRAN 
 > uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks).
 >
 > **Reproduce on your own machine:** `bash benchmarks/bench.sh`.
-> **Reproduce in a clean container:** `bash benchmarks/run-in-docker.sh` builds [`benchmarks/Dockerfile`](benchmarks/Dockerfile) (pinned R version + pinned debian base + pinned PPM snapshot) and runs the bench inside it. The same image runs on every tag push via [`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml); the workflow uploads `bench-results.json` as an artifact.
+> **Reproduce in a clean container:** `bash benchmarks/run-in-docker.sh` builds [`benchmarks/Dockerfile`](benchmarks/Dockerfile) and runs the bench inside it. The Dockerfile pins **R version, debian base, Rust toolchain, and the CRAN-mirror PPM snapshot** — so numbers from a CI run today are directly comparable to a CI run a month from now and to a local docker-build by anyone who wants to verify the published numbers (per [#40](https://github.com/nbafrank/uvr/issues/40)). The same image runs on every tag push via [`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml); the workflow uploads `bench-results.json` as an artifact and surfaces the meta block in the GH Actions step summary.
 
 ---
 

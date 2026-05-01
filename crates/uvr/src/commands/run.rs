@@ -49,19 +49,30 @@ pub async fn run(
         None
     };
 
-    // Build R_LIBS_USER: with-library (if any) prepended to project library.
-    // R uses ";" as path separator on Windows, ":" everywhere else.
-    let libs_user = match &with_library {
-        Some(with_lib) => {
-            let sep = if cfg!(target_os = "windows") {
-                ";"
-            } else {
-                ":"
-            };
-            format!("{}{sep}{}", with_lib.display(), library.display())
-        }
+    // Build R_LIBS_USER: with-library (if any) prepended to project library,
+    // plus any path supplied via the UVR_EXTRA_LIBS escape hatch. The escape
+    // hatch covers cases where a controlled environment (a Docker image, a
+    // shared lab machine, the bench harness in #40) needs to expose a system
+    // library to `uvr run` without un-isolating the project — without it,
+    // setting R_LIBS_SITE="" below would shadow the system library entirely
+    // and any package installed there (pak / renv / cli / …) becomes
+    // invisible.
+    let path_sep = if cfg!(target_os = "windows") {
+        ";"
+    } else {
+        ":"
+    };
+    let mut libs_user = match &with_library {
+        Some(with_lib) => format!("{}{path_sep}{}", with_lib.display(), library.display()),
         None => library.to_string_lossy().into_owned(),
     };
+    if let Ok(extra) = std::env::var("UVR_EXTRA_LIBS") {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            libs_user.push_str(path_sep);
+            libs_user.push_str(extra);
+        }
+    }
 
     // Derive R's lib directory for DYLD_LIBRARY_PATH so that compiled packages
     // (e.g. rlang) can find libR.dylib at runtime regardless of its embedded install-name.

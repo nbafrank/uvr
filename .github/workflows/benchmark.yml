@@ -18,6 +18,12 @@ name: Benchmark
 on:
   push:
     tags: ["v*"]
+  # Catch Dockerfile / bench-script regressions on PRs that touch the
+  # benchmark surface, without spending CI minutes on every unrelated PR.
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - ".github/workflows/benchmark.yml"
   workflow_dispatch:
     inputs:
       r_version:
@@ -78,6 +84,23 @@ jobs:
             -e BENCH_RUNS=${{ steps.args.outputs.runs }} \
             -v "$PWD/benchmarks/out:/out" \
             uvr-bench:${{ github.sha }}
+
+      # Belt + suspenders: the bench is allowed to fail individual scenarios
+      # gracefully (network flakes, package-build segfaults), but the run as
+      # a whole must produce a results file. Without this guard the workflow
+      # would go green even when bench-results.json was never written —
+      # exactly the credibility-eroding outcome BjarkeHautop wants to avoid.
+      - name: Assert results produced
+        run: |
+          if [ ! -f benchmarks/out/bench-results.json ]; then
+            echo "::error::bench-results.json not produced — bench failed end-to-end. See bench.log artifact."
+            exit 1
+          fi
+          # Sanity-check it has at least one result entry.
+          if ! grep -q '"scenario"' benchmarks/out/bench-results.json; then
+            echo "::error::bench-results.json present but contains no scenario entries."
+            exit 1
+          fi
 
       - name: Inspect results
         if: always()
