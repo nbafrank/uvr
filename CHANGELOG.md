@@ -7,6 +7,41 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.3 (2026-04-30)
+
+Hotfix for v0.3.2's Linux PPM binaries — the feature was end-to-end
+broken in two ways found by post-release code review. Both produced
+silent install corruption (no error, just unloadable packages at
+`library()` time). Allowed under the cadence rule's install-blocking
+exception.
+
+### Fixes
+- **Linux PPM package downloads now carry the R-shaped User-Agent.**
+  v0.3.2 set the UA on the index fetch (which correctly returned binary
+  URLs) but not on the per-package tarball downloads. PPM serves source
+  vs. binary at the same URL based on UA — without it on the download,
+  every "binary" package was actually a source tarball that
+  `install_binary_package` extracted as if it had pre-compiled `.so`
+  files. Threaded a `user_agent` field through `DownloadSpec` and
+  `download_one`; sync sets it for any URL containing `/__linux__/`.
+- **Bioconductor packages on Linux no longer enter the binary path.**
+  v0.3.2 fetched `bioconductor.org/packages/<release>/bioc/src/contrib/PACKAGES.gz`
+  on Linux and registered those URLs in the binary index — but
+  Bioconductor doesn't serve Linux binaries, so the tarballs at those
+  URLs are sources. They got installed as binaries → unloadable. Now
+  guarded with `!info.is_linux` so Bioc on Linux falls through to
+  source install (same path as before #55).
+- **Linux UA uses the project's actual R minor instead of a hardcoded
+  `4.5.3`.** Future-proof against PPM tightening its UA sniffing.
+
+### Tests
+- New `ppm_codename_rhel_centos_naming_discontinuity` pins the
+  rhel-7/8 → centos7/8 / rhel-9 → rhel9 mapping (the asymmetry was an
+  unsigned cliff in the table).
+- New `linux_user_agent_uses_r_minor_not_hardcoded` asserts both arch
+  variants (x86_64, aarch64) get the right UA from the wired-through
+  `r_minor`.
+
 ## v0.3.2 (2026-04-30)
 
 Linux gets pre-built binary packages. The platform-support table no

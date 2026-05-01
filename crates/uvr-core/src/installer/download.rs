@@ -49,6 +49,7 @@ impl Downloader {
                 let url = spec.url.to_string();
                 let fallback_url = spec.fallback_url.map(str::to_string);
                 let is_binary = spec.is_binary;
+                let user_agent = spec.user_agent.map(str::to_string);
                 // Binary packages: lockfile checksum is for the source tarball, not the
                 // P3M binary. Skip verification on binary downloads, but keep the
                 // checksum for the fallback path which downloads the source tarball.
@@ -62,7 +63,8 @@ impl Downloader {
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
 
-                    // Try primary URL
+                    // Try primary URL. The UA override only applies to the
+                    // primary path — fallbacks (CRAN source) don't need it.
                     let primary_result = download_one(
                         &client,
                         &cache_dir,
@@ -70,6 +72,7 @@ impl Downloader {
                         &pkg_version,
                         &url,
                         primary_checksum.as_deref(),
+                        user_agent.as_deref(),
                         &mp,
                     )
                     .await;
@@ -100,6 +103,7 @@ impl Downloader {
                                 &pkg_version,
                                 fallback,
                                 source_checksum.as_deref(),
+                                None, // fallback URL is plain CRAN source — no UA override needed
                                 &mp,
                             )
                             .await?;
@@ -129,6 +133,11 @@ pub struct DownloadSpec<'a> {
     /// Fallback URL to try if primary fails (e.g. source tarball when P3M binary 500s).
     pub fallback_url: Option<&'a str>,
     pub is_binary: bool,
+    /// Per-request `User-Agent` override. Set this for Linux PPM binary
+    /// URLs — PPM uses the UA to choose between binary and source builds
+    /// served at the same URL, and the default `uvr/x.y.z` UA gets you
+    /// source. None = use the client's default UA.
+    pub user_agent: Option<&'a str>,
 }
 
 /// Result of downloading a single package.
@@ -158,6 +167,7 @@ fn cran_archive_url(url: &str) -> Option<String> {
     Some(format!("{base}/src/contrib/Archive/{pkg_name}/{filename}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_one(
     client: &reqwest::Client,
     cache_dir: &Path,
@@ -165,6 +175,7 @@ async fn download_one(
     version: &str,
     url: &str,
     expected_checksum: Option<&str>,
+    user_agent: Option<&str>,
     mp: &MultiProgress,
 ) -> Result<PathBuf> {
     // Derive the cache filename from the URL so that source tarballs (.tar.gz)
@@ -230,14 +241,23 @@ async fn download_one(
 
     // Stream response to a temp file to avoid buffering entire packages in RAM.
     // Compute checksums on-the-fly during the stream.
-    let mut resp_result = match client.get(url).send().await {
+    let request = |target: &str| {
+        let mut req = client.get(target);
+        if let Some(ua) = user_agent {
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        req
+    };
+    let mut resp_result = match request(url).send().await {
         Ok(r) => r.error_for_status(),
         Err(e) => Err(e),
     };
     if resp_result.is_err() {
         if let Some(archive_url) = cran_archive_url(url) {
             debug!("{name}: {url} failed, retrying via CRAN Archive: {archive_url}");
-            resp_result = match client.get(&archive_url).send().await {
+            // CRAN Archive doesn't require the R-shaped UA, but plumbing the
+            // override here is harmless and keeps requests symmetric.
+            resp_result = match request(&archive_url).send().await {
                 Ok(r) => r.error_for_status(),
                 Err(e) => Err(e),
             };

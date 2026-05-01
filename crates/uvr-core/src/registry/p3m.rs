@@ -45,7 +45,7 @@ impl P3MBinaryIndex {
         bioc_release: Option<&str>,
         posit_distro_slug: Option<&str>,
     ) -> Self {
-        let Some(info) = platform_info(platform, posit_distro_slug) else {
+        let Some(info) = platform_info(platform, posit_distro_slug, r_minor) else {
             // Unsupported platform combination: macOS x86 / Windows always
             // OK; Linux only when we recognise the distro. Falls through
             // to source — same behavior as before #55.
@@ -55,10 +55,19 @@ impl P3MBinaryIndex {
         let cran_fut = fetch_repo_index(client, r_minor, &info, P3MRepo::Cran);
         let bioc_fut = async {
             match bioc_release {
-                Some(release) => fetch_repo_index(client, r_minor, &info, P3MRepo::Bioc(release))
-                    .await
-                    .ok(),
-                None => None,
+                // BLOCK fix: Bioconductor doesn't serve Linux binaries — its
+                // /packages/<release>/bioc/src/contrib/PACKAGES.gz is the
+                // SOURCE index. Without this guard, Linux projects with Bioc
+                // deps would register source tarball URLs in the binary index,
+                // and `install_binary_package` would extract a source tree
+                // (R/, src/, no libs/*.so) into the library — silently broken
+                // installs that fail at `library()` time.
+                Some(release) if !info.is_linux => {
+                    fetch_repo_index(client, r_minor, &info, P3MRepo::Bioc(release))
+                        .await
+                        .ok()
+                }
+                _ => None,
             }
         };
         let (cran_result, bioc_result) = tokio::join!(cran_fut, bioc_fut);
@@ -280,7 +289,11 @@ struct PlatformInfo {
 /// `posit_distro_slug` should be the same slug uvr uses for the R install
 /// URL (`ubuntu-2204`, `debian-12`, `rhel-9`, …); we translate it to PPM's
 /// codename system (`jammy`, `bookworm`, `rhel9`) here.
-fn platform_info(platform: Platform, posit_distro_slug: Option<&str>) -> Option<PlatformInfo> {
+fn platform_info(
+    platform: Platform,
+    posit_distro_slug: Option<&str>,
+    r_minor: &str,
+) -> Option<PlatformInfo> {
     match platform {
         Platform::MacOsArm64 => Some(PlatformInfo {
             url_segment: "macosx/big-sur-arm64".to_string(),
@@ -317,10 +330,11 @@ fn platform_info(platform: Platform, posit_distro_slug: Option<&str>) -> Option<
             } else {
                 "aarch64"
             };
-            // R prints UA as `R (<ver> <triple> <arch> <os>-gnu)`. We use a
-            // current R minor; PPM only checks for "R " prefix and a Linux
-            // arch in the triple — exact ver isn't material.
-            let user_agent = format!("R (4.5.3 {arch}-pc-linux-gnu {arch} linux-gnu)");
+            // R prints UA as `R (<ver> <triple> <arch> <os>-gnu)`. PPM
+            // currently sniffs the "R " prefix and the linux-gnu marker;
+            // pass the actual r_minor so the UA stays plausibly current
+            // if PPM tightens its sniffing rules.
+            let user_agent = format!("R ({r_minor}.0 {arch}-pc-linux-gnu {arch} linux-gnu)");
             Some(PlatformInfo {
                 url_segment: String::new(),
                 cache_key: format!("linux-{codename}-{arch}"),
@@ -473,7 +487,7 @@ Version: 1.1.4
 
     #[test]
     fn platform_info_macos_arm64() {
-        let info = platform_info(Platform::MacOsArm64, None).unwrap();
+        let info = platform_info(Platform::MacOsArm64, None, "4.5").unwrap();
         assert_eq!(info.url_segment, "macosx/big-sur-arm64");
         assert_eq!(info.pkg_ext, "tgz");
         assert!(!info.is_linux);
@@ -481,7 +495,7 @@ Version: 1.1.4
 
     #[test]
     fn platform_info_windows() {
-        let info = platform_info(Platform::WindowsX86_64, None).unwrap();
+        let info = platform_info(Platform::WindowsX86_64, None, "4.5").unwrap();
         assert_eq!(info.url_segment, "windows");
         assert_eq!(info.pkg_ext, "zip");
         assert!(!info.is_linux);
@@ -490,8 +504,8 @@ Version: 1.1.4
     #[test]
     fn platform_info_linux_supported_distro() {
         // #55: Linux gets a binary index when the distro maps to a PPM codename.
-        let info =
-            platform_info(Platform::LinuxX86_64, Some("ubuntu-2204")).expect("ubuntu-2204 covered");
+        let info = platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.5")
+            .expect("ubuntu-2204 covered");
         assert!(info.is_linux);
         assert_eq!(info.linux_codename.as_deref(), Some("jammy"));
         assert_eq!(info.pkg_ext, "tar.gz");
@@ -504,10 +518,10 @@ Version: 1.1.4
     #[test]
     fn platform_info_linux_unknown_distro_none() {
         // Slackware isn't on PPM — falls back to None (source-only).
-        assert!(platform_info(Platform::LinuxX86_64, Some("slackware-15")).is_none());
-        assert!(platform_info(Platform::LinuxArm64, Some("nixos-2411")).is_none());
+        assert!(platform_info(Platform::LinuxX86_64, Some("slackware-15"), "4.5").is_none());
+        assert!(platform_info(Platform::LinuxArm64, Some("nixos-2411"), "4.5").is_none());
         // Without a slug, we can't translate.
-        assert!(platform_info(Platform::LinuxX86_64, None).is_none());
+        assert!(platform_info(Platform::LinuxX86_64, None, "4.5").is_none());
     }
 
     #[test]
@@ -550,6 +564,37 @@ Version: 1.1.4
         assert_eq!(ppm_linux_codename("rhel-9"), Some("rhel9"));
         assert_eq!(ppm_linux_codename("opensuse-155"), Some("opensuse155"));
         assert!(ppm_linux_codename("alpine-3.21").is_none());
+    }
+
+    #[test]
+    fn ppm_codename_rhel_centos_naming_discontinuity() {
+        // RHEL 9 broke the centosN naming convention because CentOS Stream
+        // replaced CentOS Linux. Pin both the symmetric and the asymmetric
+        // cases since they're the highest-value regression anchors when
+        // someone edits the match table.
+        assert_eq!(ppm_linux_codename("rhel-7"), Some("centos7"));
+        assert_eq!(ppm_linux_codename("centos-7"), Some("centos7"));
+        assert_eq!(ppm_linux_codename("rhel-8"), Some("centos8"));
+        assert_eq!(ppm_linux_codename("centos-8"), Some("centos8"));
+        assert_eq!(ppm_linux_codename("rhel-9"), Some("rhel9"));
+        assert_eq!(ppm_linux_codename("centos-9"), Some("rhel9"));
+    }
+
+    #[test]
+    fn linux_user_agent_uses_r_minor_not_hardcoded() {
+        // Reviewer flagged the prior hardcoded "4.5.3" UA as a future
+        // staleness risk if PPM tightens its UA matching. r_minor flows
+        // through and shows up in the UA — verify both arch variants.
+        let info_x86 =
+            platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.6").expect("supported");
+        let ua = info_x86.user_agent.expect("Linux gets a UA");
+        assert!(ua.starts_with("R (4.6.0 x86_64-pc-linux-gnu"), "got {ua}");
+        assert!(ua.contains("linux-gnu"));
+
+        let info_arm =
+            platform_info(Platform::LinuxArm64, Some("debian-12"), "4.5").expect("supported");
+        let ua = info_arm.user_agent.expect("Linux gets a UA");
+        assert!(ua.starts_with("R (4.5.0 aarch64-pc-linux-gnu"), "got {ua}");
     }
 
     #[test]

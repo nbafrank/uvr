@@ -421,8 +421,34 @@ pub async fn install_from_lockfile(
         is_binary: bool,
     }
 
+    // Linux-specific UA. PPM serves source vs. binary at the same URL, gated
+    // by the User-Agent. The index fetch in `P3MBinaryIndex::fetch` sets this
+    // UA on its own request; we need to set the same UA on the per-package
+    // tarball downloads or PPM serves source for those even though the index
+    // told us they were binary (would extract a source tree as if it were a
+    // binary package — silent breakage). Built once and attached per-spec
+    // below.
+    let detected_platform = Platform::detect();
+    let linux_ppm_user_agent: Option<String> = match detected_platform {
+        Ok(p) if matches!(p, Platform::LinuxX86_64 | Platform::LinuxArm64) => {
+            let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
+            uvr_core::registry::p3m::ppm_linux_codename(&slug).map(|_| {
+                let arch = if matches!(p, Platform::LinuxX86_64) {
+                    "x86_64"
+                } else {
+                    "aarch64"
+                };
+                // R version is the project's actual minor, not a hardcoded
+                // string — future-proofs the UA against PPM tightening its
+                // sniffing rules.
+                format!("R ({r_minor_str}.0 {arch}-pc-linux-gnu {arch} linux-gnu)")
+            })
+        }
+        _ => None,
+    };
+
     let plans: Vec<PkgPlan> = if !cache_misses.is_empty() {
-        let p3m = match Platform::detect() {
+        let p3m = match detected_platform {
             Ok(platform) => {
                 // #55: Linux gets binaries via PPM's `__linux__/<codename>` URL
                 // space, gated by a User-Agent the registry sets internally.
@@ -516,6 +542,14 @@ pub async fn install_from_lockfile(
                 url: &p.url,
                 fallback_url: p.fallback_url.as_deref(),
                 is_binary: p.is_binary,
+                // Attach the R-shaped UA only for Linux PPM binary URLs so
+                // PPM serves the binary tarball, not source. macOS / Windows
+                // / source-fallback paths leave it None (default uvr UA).
+                user_agent: if p.is_binary && p.url.contains("/__linux__/") {
+                    linux_ppm_user_agent.as_deref()
+                } else {
+                    None
+                },
             })
             .collect();
 
