@@ -1,0 +1,128 @@
+name: Benchmark
+
+# Reproducible-bench workflow per #40 (BjarkeHautop). Builds the
+# benchmarks/Dockerfile, runs `bench.sh` inside it on a clean ubuntu-latest
+# runner, and uploads the resulting `bench-results.json` + `bench.log` as
+# workflow artifacts. The Dockerfile pins R version, debian base, and PPM
+# snapshot — re-runs are deterministic to the level the comparison demands.
+#
+# Triggers:
+#   - Tag push (any v*) — bench numbers track the released binary.
+#   - Manual dispatch — useful for spot-checks and recomputing the published
+#     numbers without cutting a release.
+#
+# Output is uploaded as an artifact, NOT auto-committed back to the repo.
+# Auto-commit churn-spam was the cadence concern in #69; the maintainer
+# pulls the artifact and updates README + bench-results.json deliberately.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      r_version:
+        description: "R minor to bench (must be a rocker/r-ver tag)"
+        required: false
+        default: "4.5.3"
+      ppm_snapshot:
+        description: "PPM snapshot date (YYYY-MM-DD) to lock CRAN versions"
+        required: false
+        default: "2025-04-01"
+      runs:
+        description: "Number of timed runs per scenario"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Run benchmark in Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve build args
+        id: args
+        run: |
+          echo "r_version=${{ inputs.r_version || '4.5.3' }}" >> "$GITHUB_OUTPUT"
+          echo "ppm_snapshot=${{ inputs.ppm_snapshot || '2025-04-01' }}" >> "$GITHUB_OUTPUT"
+          echo "runs=${{ inputs.runs || '5' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Cache Docker layers across runs so iterating on the workflow doesn't
+      # rebuild the rocker base + R-deps layer (~10 minutes) every time.
+      # Bumping PPM_SNAPSHOT or R_VERSION will correctly bust the cache.
+      - name: Build benchmark image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: benchmarks/Dockerfile
+          load: true
+          tags: uvr-bench:${{ github.sha }}
+          build-args: |
+            R_VERSION=${{ steps.args.outputs.r_version }}
+            PPM_SNAPSHOT=${{ steps.args.outputs.ppm_snapshot }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prepare output directory
+        run: mkdir -p benchmarks/out
+
+      - name: Run benchmark
+        run: |
+          docker run --rm \
+            -e BENCH_RUNS=${{ steps.args.outputs.runs }} \
+            -v "$PWD/benchmarks/out:/out" \
+            uvr-bench:${{ github.sha }}
+
+      - name: Inspect results
+        if: always()
+        run: |
+          echo "=== bench-results.json ==="
+          if [ -f benchmarks/out/bench-results.json ]; then
+            cat benchmarks/out/bench-results.json
+          else
+            echo "MISSING — bench likely failed; see bench.log"
+          fi
+          echo ""
+          echo "=== bench.log (last 100 lines) ==="
+          if [ -f benchmarks/out/bench.log ]; then
+            tail -n 100 benchmarks/out/bench.log
+          else
+            echo "MISSING"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            benchmarks/out/bench-results.json
+            benchmarks/out/bench.log
+          if-no-files-found: warn
+
+      # Surface a one-line summary in the workflow run page so reviewers can
+      # eyeball the headline numbers without downloading the artifact.
+      - name: Summarize
+        if: always()
+        run: |
+          if [ -f benchmarks/out/bench-results.json ]; then
+            {
+              echo "## Benchmark results"
+              echo ""
+              echo "- R: ${{ steps.args.outputs.r_version }}"
+              echo "- PPM snapshot: ${{ steps.args.outputs.ppm_snapshot }}"
+              echo "- Runs per tier: ${{ steps.args.outputs.runs }}"
+              echo "- Image: uvr-bench:${{ github.sha }}"
+              echo ""
+              echo '```json'
+              jq '.meta' benchmarks/out/bench-results.json 2>/dev/null \
+                || cat benchmarks/out/bench-results.json | head -40
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -92,7 +92,10 @@ Install wall time (empty library, index caches warm). All tools use P3M as CRAN 
 | tidyverse | 99       | **0.27s**  | 0.82s  | 11.78s             | 8.1s  |
 <!-- BENCH:END -->
 
-> uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks). Run `bash benchmarks/bench.sh` to reproduce.
+> uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks).
+>
+> **Reproduce on your own machine:** `bash benchmarks/bench.sh`.
+> **Reproduce in a clean container:** `bash benchmarks/run-in-docker.sh` builds [`benchmarks/Dockerfile`](benchmarks/Dockerfile) (pinned R version + pinned debian base + pinned PPM snapshot) and runs the bench inside it. The same image runs on every tag push via [`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml); the workflow uploads `bench-results.json` as an artifact.
 
 ---
 
