@@ -5,7 +5,21 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
-Pure tracking section — fixes and small features land here between tags.
+### Features
+- **`uvr r install --distribution <SLUG>`** — manual override for the
+  Posit CDN distro slug (e.g. `ubuntu-2204`, `debian-12`, `rhel-9`).
+  Useful on Ubuntu / Debian derivatives that aren't matched by
+  `/etc/os-release` autodetection like PopOS or Manjaro (#54).
+- **`uvr import -i / --input <FILE>`** — alternative spelling of the
+  positional path argument, for symmetry with `uvr export -o <FILE>` (#71).
+
+### Fixes
+- **Positron-SSH spinner (#48)**: `UVR_PROGRESS=always` now actually
+  shows the spinner on terminals that report not-a-TTY. Indicatif's
+  default `ProgressDrawTarget::stderr()` runs its own `is_terminal()`
+  check and silently drops draws even when our env-var path approved
+  drawing — fix uses `ProgressDrawTarget::term()` to write through
+  `console::Term` unconditionally when force-on is requested.
 
 ## v0.3.0 (2026-04-30)
 
