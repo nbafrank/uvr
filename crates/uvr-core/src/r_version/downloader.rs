@@ -434,11 +434,27 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
 
     // Step 6: patch all text files that reference the original R_HOME.
     // bin/R, etc/Makeconf, etc/ldpaths, etc/R, and others contain absolute
-    // paths hardcoded at build time (e.g. /Library/Frameworks/R.framework/Resources).
-    // Extract the original R_HOME from bin/R, then replace it everywhere.
+    // paths hardcoded at build time. R 4.5 builds use the Versions-prefixed
+    // path everywhere (`/Library/Frameworks/R.framework/Versions/4.5-arm64/
+    // Resources`); R 4.6 uses TWO prefixes — Versions-prefixed for
+    // `R_HOME_DIR` and the bare `/Library/Frameworks/R.framework/Resources`
+    // (the framework's `Current` symlink target) for `R_SHARE_DIR`,
+    // `R_INCLUDE_DIR`, `R_DOC_DIR`. We patch both so that `R.home("share")`
+    // resolves to our managed install at runtime — without it, source-package
+    // installs on R 4.6 fail in `tools::makeLazyLoading` because
+    // `nspackloader.R` is looked up under the framework path that doesn't
+    // exist in our copy.
     let original_r_home = extract_r_home_dir(dest)?;
-    info!("Patching R_HOME: {} → {}", original_r_home, dest.display());
-    patch_text_files(dest, &original_r_home, &dest.to_string_lossy())?;
+    let dest_str = dest.to_string_lossy();
+    info!("Patching R_HOME: {} → {}", original_r_home, dest_str);
+    patch_text_files(dest, &original_r_home, &dest_str)?;
+    // Catch the symlink-target form used by CRAN's R 4.6 build for the
+    // SHARE/INCLUDE/DOC env vars. Skip if it'd be a no-op (extracted prefix
+    // already happens to be the bare Resources path, e.g. older builds).
+    let bare_resources = "/Library/Frameworks/R.framework/Resources";
+    if original_r_home != bare_resources {
+        patch_text_files(dest, bare_resources, &dest_str)?;
+    }
 
     // Step 7: fix the LIBR line in etc/Makeconf.
     // After the text substitution above, LIBR still contains the framework path

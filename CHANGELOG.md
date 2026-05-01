@@ -20,6 +20,19 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
   check and silently drops draws even when our env-var path approved
   drawing — fix uses `ProgressDrawTarget::term()` to write through
   `console::Term` unconditionally when force-on is requested.
+- **macOS R 4.6 source-package installs**: previously the v0.3.0 known-issue
+  ("missing value where TRUE/FALSE needed" in `tools::makeLazyLoading`).
+  Root cause: CRAN's R 4.6 build records two different framework prefixes
+  in `bin/R` — Versions-prefixed for `R_HOME_DIR` and the bare
+  `/Library/Frameworks/R.framework/Resources` path for `R_SHARE_DIR` /
+  `R_INCLUDE_DIR` / `R_DOC_DIR`. Our `patch_text_files` pass only
+  rewrote the prefix it extracted from `R_HOME_DIR`, so `R.home("share")`
+  resolved to `/Library/Frameworks/R.framework/Resources/share` (which
+  doesn't exist in our copy). `nspackloader.R` lookup returned NA file
+  size, the comparison evaluated to NA, and `if (NA) ... else ...`
+  bombed. Fix: also patch the bare `/Library/Frameworks/R.framework/Resources`
+  prefix when it differs from the extracted `R_HOME_DIR`. Closes the
+  v0.3.0 known issue.
 
 ## v0.3.0 (2026-04-30)
 
