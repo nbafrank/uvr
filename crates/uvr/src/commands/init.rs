@@ -278,7 +278,9 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
 
 /// Append `value` to the array at `obj[key]` if it isn't already there.
 /// Initializes the array when missing; replaces any non-array value with
-/// a fresh single-entry array (don't try to coerce structured values).
+/// a fresh single-entry array. The replacement is announced via `ui::warn`
+/// so users notice when their hand-edited string/object value is being
+/// dropped — silent settings loss is worse than the noise.
 fn merge_string_into_array(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -294,7 +296,17 @@ fn merge_string_into_array(
                 arr.push(serde_json::Value::String(value.to_string()));
             }
         }
-        None => *entry = serde_json::json!([value]),
+        None => {
+            // Reviewer flagged this as silent data loss (HIGH). User-set
+            // string / object values for these keys are uncommon but real;
+            // surface the swap so they're not surprised by a config change
+            // they didn't initiate.
+            let prior = serde_json::to_string(entry).unwrap_or_else(|_| "<unprintable>".into());
+            ui::warn(format!(
+                "Replacing non-array value at .vscode/settings.json[{key}] (was: {prior}) with [{value:?}]. Add other entries back manually if needed."
+            ));
+            *entry = serde_json::json!([value]);
+        }
     }
 }
 
@@ -327,10 +339,16 @@ fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
         }
     }
 
-    // No pin (or pin not yet installed) — fall through to whatever
-    // uvr would find on the system. Captures system R for projects
-    // that haven't installed an R via uvr yet.
-    find_r_binary(None).ok()
+    // No pin (or pin not yet installed) — fall through to whatever uvr
+    // would find on the system. Surface the fallback so users notice the
+    // IDE config is bound to whatever happened to be on PATH rather than
+    // a project-pinned R.
+    let fallback = find_r_binary(None).ok()?;
+    ui::bullet_dim(format!(
+        "No .r-version pin — IDE config bound to {}. Re-run `uvr init --here` after pinning a project R version.",
+        fallback.display()
+    ));
+    Some(fallback)
 }
 
 /// Returns true if `dir` looks like an R package source tree — DESCRIPTION

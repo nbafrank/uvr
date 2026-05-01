@@ -56,10 +56,12 @@ fn progress_mode() -> ProgressMode {
 /// Apply the right draw target for the current mode. Caller owns the bar.
 fn apply_draw_target(pb: &ProgressBar, mode: ProgressMode) {
     if mode == ProgressMode::ForceOn {
-        // 12 Hz matches indicatif's default refresh rate. Term::stderr()
-        // writes through console even on non-TTY pipes, so the spinner
-        // renders in environments where the default stderr target would
-        // bail out at the is_terminal check.
+        // 12 Hz is conservative relative to indicatif's default (20 Hz on
+        // 0.17.x). The slower refresh produces less flicker over high-latency
+        // SSH terminals, which is the exact scenario that lands us on this
+        // path. `Term::stderr()` writes through console::Term unconditionally
+        // (no internal `is_terminal()` re-check), bypassing the bail-out that
+        // otherwise hides the spinner. Verified against indicatif 0.17.
         pb.set_draw_target(ProgressDrawTarget::term(Term::stderr(), 12));
     }
 }

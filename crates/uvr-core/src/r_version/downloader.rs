@@ -173,8 +173,13 @@ fn macos_x86_64_dir() -> &'static str {
 /// other Ubuntu/Arch derivatives — see #54).
 static DISTRO_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Set the Posit CDN distro slug for the rest of this process. No-op if
-/// already set. Slug examples: `"ubuntu-2204"`, `"debian-12"`, `"rhel-9"`.
+/// Set the Posit CDN distro slug for the rest of this process. **Write-once**:
+/// subsequent calls are silently ignored (`OnceLock::set` returns `Err`). This
+/// matches the CLI's one-shot model — `uvr r install --distribution X` runs
+/// once per process. Library consumers that need per-call overrides must run
+/// each in a separate process.
+///
+/// Slug examples: `"ubuntu-2204"`, `"debian-12"`, `"rhel-9"`.
 pub fn set_posit_distro_override(slug: String) {
     let _ = DISTRO_OVERRIDE.set(slug);
 }
@@ -447,13 +452,24 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     let original_r_home = extract_r_home_dir(dest)?;
     let dest_str = dest.to_string_lossy();
     info!("Patching R_HOME: {} → {}", original_r_home, dest_str);
-    patch_text_files(dest, &original_r_home, &dest_str)?;
-    // Catch the symlink-target form used by CRAN's R 4.6 build for the
-    // SHARE/INCLUDE/DOC env vars. Skip if it'd be a no-op (extracted prefix
-    // already happens to be the bare Resources path, e.g. older builds).
-    let bare_resources = "/Library/Frameworks/R.framework/Resources";
-    if original_r_home != bare_resources {
-        patch_text_files(dest, bare_resources, &dest_str)?;
+
+    // Iterate the set of known framework prefixes that CRAN bakes into bin/R
+    // and friends. R 4.5 and earlier use only `R_HOME_DIR`'s
+    // Versions-prefixed form everywhere; R 4.6 added the bare-Resources
+    // form for the SHARE/INCLUDE/DOC env vars (the framework's
+    // `Current`-symlink target). If a future CRAN build introduces a
+    // third prefix variant, append it to this slice — guard against a
+    // self-rewrite via the `dest_str` comparison.
+    let prefixes: &[&str] = &[
+        original_r_home.as_str(),
+        "/Library/Frameworks/R.framework/Resources",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for prefix in prefixes {
+        if !seen.insert(*prefix) || *prefix == dest_str.as_ref() {
+            continue;
+        }
+        patch_text_files(dest, prefix, &dest_str)?;
     }
 
     // Step 7: fix the LIBR line in etc/Makeconf.

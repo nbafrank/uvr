@@ -542,6 +542,36 @@ Remotes:
     }
 
     #[test]
+    fn description_remotes_companion_suffix_binds_to_runtime_dep() {
+        // Companion #2 to the Suggests-side test: when the existing dep
+        // came from `Imports:` (runtime), the git source should land on
+        // dependencies, not dev_dependencies. Reviewer flagged this code
+        // path as untested — different target-selection branch.
+        let dcf = r#"Package: thing
+Imports:
+    uvr (>= 0.1.0)
+Remotes:
+    nbafrank/uvr-r
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+        assert!(
+            !m.dependencies.contains_key("uvr-r"),
+            "uvr-r should not be a runtime dep, got {:?}",
+            m.dependencies
+        );
+        assert!(
+            !m.dev_dependencies.contains_key("uvr"),
+            "uvr should not have moved to dev-deps, got {:?}",
+            m.dev_dependencies
+        );
+        let uvr = m
+            .dependencies
+            .get("uvr")
+            .expect("uvr should remain a runtime dep");
+        assert_eq!(uvr.git(), Some("nbafrank/uvr-r"));
+    }
+
+    #[test]
     fn description_remotes_companion_suffix_binds_to_existing_dep() {
         // #68 — `Remotes: nbafrank/uvr-r` paired with `Suggests: uvr` should
         // bind to the `uvr` dev-dep, not create a new `uvr-r` runtime dep.
