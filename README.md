@@ -385,8 +385,8 @@ Cache
 |----------|----------------|----------------|----------------------|
 | macOS ARM64 (Apple Silicon) | P3M | Y | Y |
 | macOS x86-64 | P3M | Y | Y |
-| Linux x86-64 | - | Y | Y (Ubuntu 22.04+) |
-| Linux ARM64 | - | Y | Y (Ubuntu 22.04+) |
+| Linux x86-64 | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y (Ubuntu 22.04+) |
+| Linux ARM64 | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y (Ubuntu 22.04+) |
 | Windows x86-64 | P3M | Y (with Rtools) | Y (no admin required) |
 
 P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). Linux R binaries are sourced from [Posit CDN](https://cdn.posit.co/) (Ubuntu 22.04+ only); macOS R binaries from CRAN; Windows R from the CRAN Inno Setup installer.

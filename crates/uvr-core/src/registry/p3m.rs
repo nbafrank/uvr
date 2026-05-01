@@ -12,8 +12,14 @@ use crate::resolver::normalize_version;
 
 /// Pre-built binary package index from Posit Package Manager (P3M).
 ///
-/// P3M provides pre-compiled `.tgz` binaries for macOS that can be extracted
-/// directly into the project library — no `R CMD INSTALL` or system libraries needed.
+/// P3M provides pre-compiled binaries for:
+/// - macOS (`.tgz`, extracted directly into the library).
+/// - Windows (`.zip`, extracted directly into the library).
+/// - Linux distros covered by PPM's `__linux__/<codename>/` URL space
+///   (Ubuntu 20.04/22.04/24.04, Debian 11/12, RHEL 8/9, openSUSE 15.4/15.5,
+///   …) — served as `.tar.gz` files at the same URL path as source, with
+///   a User-Agent-keyed binary build (#55). The tarball still installs
+///   via `R CMD INSTALL`, but no compilation is needed.
 pub struct P3MBinaryIndex {
     /// package name → (version, binary_url)
     packages: HashMap<String, (String, String)>,
@@ -37,9 +43,13 @@ impl P3MBinaryIndex {
         r_minor: &str,
         platform: Platform,
         bioc_release: Option<&str>,
+        posit_distro_slug: Option<&str>,
     ) -> Self {
-        let Some(info) = platform_info(platform) else {
-            return Self::empty(); // unsupported platform (e.g. Linux — no P3M binaries)
+        let Some(info) = platform_info(platform, posit_distro_slug) else {
+            // Unsupported platform combination: macOS x86 / Windows always
+            // OK; Linux only when we recognise the distro. Falls through
+            // to source — same behavior as before #55.
+            return Self::empty();
         };
 
         let cran_fut = fetch_repo_index(client, r_minor, &info, P3MRepo::Cran);
@@ -93,9 +103,18 @@ enum P3MRepo<'a> {
 }
 
 impl<'a> P3MRepo<'a> {
-    fn url_prefix(&self) -> String {
+    /// Build the repo prefix. On Linux for the CRAN repo we inject the
+    /// `__linux__/<codename>` segment that triggers PPM's binary-aware
+    /// routing. macOS/Windows use the plain `cran/latest` prefix and pick
+    /// up binaries through `bin/<arch>/contrib/<r_minor>/`.
+    fn url_prefix(&self, info: &PlatformInfo) -> String {
         match self {
-            P3MRepo::Cran => "https://packagemanager.posit.co/cran/latest".to_string(),
+            P3MRepo::Cran => match &info.linux_codename {
+                Some(codename) => {
+                    format!("https://packagemanager.posit.co/cran/__linux__/{codename}/latest")
+                }
+                None => "https://packagemanager.posit.co/cran/latest".to_string(),
+            },
             P3MRepo::Bioc(release) => {
                 format!("https://bioconductor.org/packages/{release}/bioc")
             }
@@ -130,19 +149,16 @@ async fn fetch_repo_index(
     let (text, from_cache) = if let Ok(cached) = std::fs::read_to_string(&cache) {
         (cached, true)
     } else {
-        let url = format!(
-            "{}/bin/{}/contrib/{r_minor}/PACKAGES.gz",
-            repo.url_prefix(),
-            platform_info.url_segment
-        );
+        let url = index_url(&repo, platform_info, r_minor);
         debug!("Fetching P3M {} binary index from {url}", repo.label());
-        let bytes = client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let mut req = client.get(&url);
+        if let Some(ua) = platform_info.user_agent.as_deref() {
+            // PPM Linux uses the User-Agent header to gate binary vs source
+            // responses. Without an R-shaped UA, PPM serves source even at
+            // the `__linux__/<codename>/...` URL.
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        let bytes = req.send().await?.error_for_status()?.bytes().await?;
         let mut gz = GzDecoder::new(bytes.as_ref());
         let mut text = String::new();
         gz.read_to_string(&mut text)?;
@@ -163,18 +179,48 @@ async fn fetch_repo_index(
     Ok(index)
 }
 
+/// Build the URL for a repo's `PACKAGES.gz` index. macOS and Windows live
+/// under `bin/<arch>/contrib/<r_minor>/`; Linux lives at the repo root's
+/// `src/contrib/` (PPM serves binaries via UA negotiation, not URL path).
+fn index_url(repo: &P3MRepo<'_>, info: &PlatformInfo, r_minor: &str) -> String {
+    let prefix = repo.url_prefix(info);
+    if info.is_linux {
+        format!("{prefix}/src/contrib/PACKAGES.gz")
+    } else {
+        format!(
+            "{prefix}/bin/{}/contrib/{r_minor}/PACKAGES.gz",
+            info.url_segment
+        )
+    }
+}
+
+/// Build the URL for a single package tarball. Mirrors `index_url`'s
+/// platform layout difference.
+fn package_url(
+    repo: &P3MRepo<'_>,
+    info: &PlatformInfo,
+    r_minor: &str,
+    name: &str,
+    version: &str,
+) -> String {
+    let prefix = repo.url_prefix(info);
+    let ext = info.pkg_ext;
+    if info.is_linux {
+        format!("{prefix}/src/contrib/{name}_{version}.{ext}")
+    } else {
+        format!(
+            "{prefix}/bin/{}/contrib/{r_minor}/{name}_{version}.{ext}",
+            info.url_segment
+        )
+    }
+}
+
 fn parse_index(
     text: &str,
     r_minor: &str,
     info: &PlatformInfo,
     repo: &P3MRepo<'_>,
 ) -> P3MBinaryIndex {
-    let base = format!(
-        "{}/bin/{}/contrib/{r_minor}",
-        repo.url_prefix(),
-        info.url_segment
-    );
-    let ext = info.pkg_ext;
     let mut packages = HashMap::new();
     for block in text.split("\n\n") {
         let block = block.trim();
@@ -191,7 +237,7 @@ fn parse_index(
             }
         }
         if let (Some(n), Some(v)) = (name, version) {
-            let url = format!("{base}/{n}_{v}.{ext}");
+            let url = package_url(repo, info, r_minor, &n, &v);
             // Normalize the version (e.g. "4.6.0-1" → "4.6.0.1") to match the
             // semver-normalized version stored in LockedPackage.
             packages.insert(n, (normalize_version(&v), url));
@@ -207,33 +253,104 @@ fn parse_index(
 
 /// Platform-specific info for P3M URL construction.
 struct PlatformInfo {
-    /// URL segment after `/bin/` (e.g. `macosx/big-sur-arm64` or `windows`).
-    url_segment: &'static str,
-    /// File extension for binary packages (`tgz` or `zip`).
+    /// URL segment after `/bin/` (e.g. `macosx/big-sur-arm64`, `windows`).
+    /// Empty for Linux (URLs use `src/contrib/` instead, with a codename
+    /// in the prefix).
+    url_segment: String,
+    /// File extension for binary packages (`tgz`, `zip`, `tar.gz`).
     pkg_ext: &'static str,
     /// Cache key suffix.
-    cache_key: &'static str,
+    cache_key: String,
+    /// True when this platform uses PPM's Linux URL layout (no `bin/`,
+    /// no R-minor segment; binaries are routed via User-Agent).
+    is_linux: bool,
+    /// PPM Linux codename (e.g. `jammy`, `bookworm`, `rhel9`). Used to
+    /// build the `__linux__/<codename>/latest` URL prefix. None for
+    /// macOS/Windows.
+    linux_codename: Option<String>,
+    /// Optional User-Agent override. PPM Linux requires an R-shaped UA
+    /// to serve binaries instead of source — without it, the `tar.gz` at
+    /// the same URL is the source bundle. None for macOS/Windows.
+    user_agent: Option<String>,
 }
 
-/// Map platform to P3M URL info. Returns `None` for platforms without binary support.
-fn platform_info(platform: Platform) -> Option<PlatformInfo> {
+/// Map platform to P3M URL info. Returns `None` for unsupported combinations
+/// (e.g. Linux with a distro PPM doesn't recognize).
+///
+/// `posit_distro_slug` should be the same slug uvr uses for the R install
+/// URL (`ubuntu-2204`, `debian-12`, `rhel-9`, …); we translate it to PPM's
+/// codename system (`jammy`, `bookworm`, `rhel9`) here.
+fn platform_info(platform: Platform, posit_distro_slug: Option<&str>) -> Option<PlatformInfo> {
     match platform {
         Platform::MacOsArm64 => Some(PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
+            url_segment: "macosx/big-sur-arm64".to_string(),
+            cache_key: "macos-arm64".to_string(),
             pkg_ext: "tgz",
+            is_linux: false,
+            linux_codename: None,
+            user_agent: None,
         }),
         Platform::MacOsX86_64 => Some(PlatformInfo {
-            url_segment: "macosx/big-sur-x86_64",
-            cache_key: "macos-x86_64",
+            url_segment: "macosx/big-sur-x86_64".to_string(),
+            cache_key: "macos-x86_64".to_string(),
             pkg_ext: "tgz",
+            is_linux: false,
+            linux_codename: None,
+            user_agent: None,
         }),
         Platform::WindowsX86_64 => Some(PlatformInfo {
-            url_segment: "windows",
-            cache_key: "windows",
+            url_segment: "windows".to_string(),
+            cache_key: "windows".to_string(),
             pkg_ext: "zip",
+            is_linux: false,
+            linux_codename: None,
+            user_agent: None,
         }),
-        _ => None, // Linux — no P3M binaries yet
+        Platform::LinuxX86_64 | Platform::LinuxArm64 => {
+            // PPM Linux only — Bioc binary support comes via Bioconductor's
+            // own server, which doesn't serve Linux binaries today; Bioc on
+            // Linux falls back to source as before.
+            let slug = posit_distro_slug?;
+            let codename = ppm_linux_codename(slug)?;
+            let arch = if matches!(platform, Platform::LinuxX86_64) {
+                "x86_64"
+            } else {
+                "aarch64"
+            };
+            // R prints UA as `R (<ver> <triple> <arch> <os>-gnu)`. We use a
+            // current R minor; PPM only checks for "R " prefix and a Linux
+            // arch in the triple — exact ver isn't material.
+            let user_agent = format!("R (4.5.3 {arch}-pc-linux-gnu {arch} linux-gnu)");
+            Some(PlatformInfo {
+                url_segment: String::new(),
+                cache_key: format!("linux-{codename}-{arch}"),
+                pkg_ext: "tar.gz",
+                is_linux: true,
+                linux_codename: Some(codename.to_string()),
+                user_agent: Some(user_agent),
+            })
+        }
+    }
+}
+
+/// Translate a uvr/Posit-CDN distro slug (`ubuntu-2204`, `debian-12`,
+/// `rhel-9`, `opensuse-155`, …) to PPM's Linux codename (`jammy`,
+/// `bookworm`, `rhel9`, `opensuse155`). Returns `None` for distros PPM
+/// doesn't carry binaries for. Slug list pulled from
+/// https://packagemanager.posit.co/client/#/repos/cran/setup.
+pub fn ppm_linux_codename(posit_slug: &str) -> Option<&'static str> {
+    match posit_slug {
+        "ubuntu-2004" => Some("focal"),
+        "ubuntu-2204" => Some("jammy"),
+        "ubuntu-2404" => Some("noble"),
+        "debian-11" => Some("bullseye"),
+        "debian-12" => Some("bookworm"),
+        "rhel-7" | "centos-7" => Some("centos7"),
+        "rhel-8" | "centos-8" => Some("centos8"),
+        "rhel-9" | "centos-9" => Some("rhel9"),
+        "opensuse-154" => Some("opensuse154"),
+        "opensuse-155" => Some("opensuse155"),
+        _ => None,
     }
 }
 
@@ -250,6 +367,39 @@ fn cache_path(r_minor: &str, key: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn macos_arm64_info() -> PlatformInfo {
+        PlatformInfo {
+            url_segment: "macosx/big-sur-arm64".to_string(),
+            cache_key: "macos-arm64".to_string(),
+            pkg_ext: "tgz",
+            is_linux: false,
+            linux_codename: None,
+            user_agent: None,
+        }
+    }
+
+    fn windows_info() -> PlatformInfo {
+        PlatformInfo {
+            url_segment: "windows".to_string(),
+            cache_key: "windows".to_string(),
+            pkg_ext: "zip",
+            is_linux: false,
+            linux_codename: None,
+            user_agent: None,
+        }
+    }
+
+    fn linux_info(codename: &str) -> PlatformInfo {
+        PlatformInfo {
+            url_segment: String::new(),
+            cache_key: format!("linux-{codename}-x86_64"),
+            pkg_ext: "tar.gz",
+            is_linux: true,
+            linux_codename: Some(codename.to_string()),
+            user_agent: Some("R (4.5.3 x86_64-pc-linux-gnu x86_64 linux-gnu)".to_string()),
+        }
+    }
+
     #[test]
     fn parse_index_basic() {
         let text = "\
@@ -260,11 +410,7 @@ Package: dplyr
 Version: 1.1.4
 
 ";
-        let info = PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
-            pkg_ext: "tgz",
-        };
+        let info = macos_arm64_info();
         let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         assert_eq!(index.packages.len(), 2);
 
@@ -280,11 +426,7 @@ Version: 1.1.4
     #[test]
     fn parse_index_windows() {
         let text = "Package: jsonlite\nVersion: 1.8.8\n\n";
-        let info = PlatformInfo {
-            url_segment: "windows",
-            cache_key: "windows",
-            pkg_ext: "zip",
-        };
+        let info = windows_info();
         let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         let url = index.binary_url("jsonlite", "1.8.8").unwrap();
         assert!(url.contains("jsonlite_1.8.8.zip"));
@@ -293,11 +435,7 @@ Version: 1.1.4
 
     #[test]
     fn parse_index_empty() {
-        let info = PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
-            pkg_ext: "tgz",
-        };
+        let info = macos_arm64_info();
         let index = parse_index("", "4.4", &info, &P3MRepo::Cran);
         assert_eq!(index.packages.len(), 0);
     }
@@ -305,11 +443,7 @@ Version: 1.1.4
     #[test]
     fn parse_index_bioc_uses_bioconductor_url() {
         let text = "Package: edgeR\nVersion: 4.6.3\n\n";
-        let info = PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
-            pkg_ext: "tgz",
-        };
+        let info = macos_arm64_info();
         let index = parse_index(text, "4.5", &info, &P3MRepo::Bioc("3.21"));
         let url = index.binary_url("edgeR", "4.6.3").unwrap();
         assert!(url.contains("bioconductor.org/packages/3.21/bioc/bin"));
@@ -319,11 +453,7 @@ Version: 1.1.4
     #[test]
     fn binary_url_version_mismatch() {
         let text = "Package: ggplot2\nVersion: 3.5.1\n\n";
-        let info = PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
-            pkg_ext: "tgz",
-        };
+        let info = macos_arm64_info();
         let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
         // Wrong version → None
         assert!(index.binary_url("ggplot2", "3.4.0").is_none());
@@ -335,35 +465,91 @@ Version: 1.1.4
     fn binary_url_version_normalization() {
         // P3M may have versions like "4.6.0-1" which normalize to "4.6.0.1"
         let text = "Package: RcppArmadillo\nVersion: 14.2.2-1\n\n";
-        let info = PlatformInfo {
-            url_segment: "macosx/big-sur-arm64",
-            cache_key: "macos-arm64",
-            pkg_ext: "tgz",
-        };
+        let info = macos_arm64_info();
         let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
-        // The lockfile stores the normalized version
         let normalized = crate::resolver::normalize_version("14.2.2-1");
         assert!(index.binary_url("RcppArmadillo", &normalized).is_some());
     }
 
     #[test]
     fn platform_info_macos_arm64() {
-        let info = platform_info(Platform::MacOsArm64).unwrap();
+        let info = platform_info(Platform::MacOsArm64, None).unwrap();
         assert_eq!(info.url_segment, "macosx/big-sur-arm64");
         assert_eq!(info.pkg_ext, "tgz");
+        assert!(!info.is_linux);
     }
 
     #[test]
     fn platform_info_windows() {
-        let info = platform_info(Platform::WindowsX86_64).unwrap();
+        let info = platform_info(Platform::WindowsX86_64, None).unwrap();
         assert_eq!(info.url_segment, "windows");
         assert_eq!(info.pkg_ext, "zip");
+        assert!(!info.is_linux);
     }
 
     #[test]
-    fn platform_info_linux_none() {
-        assert!(platform_info(Platform::LinuxX86_64).is_none());
-        assert!(platform_info(Platform::LinuxArm64).is_none());
+    fn platform_info_linux_supported_distro() {
+        // #55: Linux gets a binary index when the distro maps to a PPM codename.
+        let info =
+            platform_info(Platform::LinuxX86_64, Some("ubuntu-2204")).expect("ubuntu-2204 covered");
+        assert!(info.is_linux);
+        assert_eq!(info.linux_codename.as_deref(), Some("jammy"));
+        assert_eq!(info.pkg_ext, "tar.gz");
+        assert!(info
+            .user_agent
+            .as_deref()
+            .is_some_and(|ua| ua.contains("R (") && ua.contains("linux-gnu")));
+    }
+
+    #[test]
+    fn platform_info_linux_unknown_distro_none() {
+        // Slackware isn't on PPM — falls back to None (source-only).
+        assert!(platform_info(Platform::LinuxX86_64, Some("slackware-15")).is_none());
+        assert!(platform_info(Platform::LinuxArm64, Some("nixos-2411")).is_none());
+        // Without a slug, we can't translate.
+        assert!(platform_info(Platform::LinuxX86_64, None).is_none());
+    }
+
+    #[test]
+    fn linux_index_url_uses_codename_and_src_contrib() {
+        // #55: PPM Linux URLs put the codename in the prefix and serve
+        // PACKAGES from `src/contrib/`, not `bin/<arch>/contrib/<minor>/`.
+        let info = linux_info("jammy");
+        let url = index_url(&P3MRepo::Cran, &info, "4.5");
+        assert_eq!(
+            url,
+            "https://packagemanager.posit.co/cran/__linux__/jammy/latest/src/contrib/PACKAGES.gz"
+        );
+    }
+
+    #[test]
+    fn linux_package_url_drops_r_minor_segment() {
+        let info = linux_info("bookworm");
+        let url = package_url(&P3MRepo::Cran, &info, "4.5", "ggplot2", "3.5.1");
+        assert_eq!(
+            url,
+            "https://packagemanager.posit.co/cran/__linux__/bookworm/latest/src/contrib/ggplot2_3.5.1.tar.gz"
+        );
+    }
+
+    #[test]
+    fn parse_index_linux_yields_linux_url() {
+        let text = "Package: jsonlite\nVersion: 1.8.8\n\n";
+        let info = linux_info("jammy");
+        let index = parse_index(text, "4.5", &info, &P3MRepo::Cran);
+        let url = index.binary_url("jsonlite", "1.8.8").unwrap();
+        assert!(url.contains("/__linux__/jammy/"));
+        assert!(url.ends_with("jsonlite_1.8.8.tar.gz"));
+    }
+
+    #[test]
+    fn ppm_codename_mapping_known_distros() {
+        assert_eq!(ppm_linux_codename("ubuntu-2204"), Some("jammy"));
+        assert_eq!(ppm_linux_codename("ubuntu-2404"), Some("noble"));
+        assert_eq!(ppm_linux_codename("debian-12"), Some("bookworm"));
+        assert_eq!(ppm_linux_codename("rhel-9"), Some("rhel9"));
+        assert_eq!(ppm_linux_codename("opensuse-155"), Some("opensuse155"));
+        assert!(ppm_linux_codename("alpine-3.21").is_none());
     }
 
     #[test]

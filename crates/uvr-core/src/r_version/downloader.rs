@@ -189,7 +189,7 @@ pub fn set_posit_distro_override(slug: String) {
 ///
 /// Returns strings like `"ubuntu-2204"`, `"ubuntu-2404"`, `"debian-12"`,
 /// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`. Falls back to `"ubuntu-2204"`.
-fn detect_posit_distro_slug() -> String {
+pub fn detect_posit_distro_slug() -> String {
     if let Some(override_slug) = DISTRO_OVERRIDE.get() {
         return override_slug.clone();
     }

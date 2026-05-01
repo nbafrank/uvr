@@ -54,25 +54,37 @@ fn check_platform() {
 
     match Platform::detect() {
         Ok(p) => {
-            let has_binaries = p.is_macos() || p.is_windows();
-            if has_binaries {
-                ui::check(
-                    true,
-                    "P3M binary packages",
-                    palette::success("available"),
-                    LABEL_W,
-                );
+            // macOS and Windows always have P3M binaries. Linux has them
+            // when the distro is one PPM publishes (#55) — translate the
+            // slug to a PPM codename to know.
+            let label = "P3M binary packages";
+            if p.is_macos() || p.is_windows() {
+                ui::check(true, label, palette::success("available"), LABEL_W);
             } else {
-                ui::check(
-                    true,
-                    "P3M binary packages",
-                    format!(
-                        "{} {}",
-                        palette::warn("unavailable"),
-                        palette::dim("(source-only)")
-                    ),
-                    LABEL_W,
-                );
+                let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
+                if let Some(codename) = uvr_core::registry::p3m::ppm_linux_codename(&slug) {
+                    ui::check(
+                        true,
+                        label,
+                        format!(
+                            "{} {}",
+                            palette::success("available"),
+                            palette::dim(format!("(Linux {codename})"))
+                        ),
+                        LABEL_W,
+                    );
+                } else {
+                    ui::check(
+                        true,
+                        label,
+                        format!(
+                            "{} {}",
+                            palette::warn("unavailable"),
+                            palette::dim(format!("(distro {slug} not on PPM — source-only)"))
+                        ),
+                        LABEL_W,
+                    );
+                }
             }
         }
         Err(_) => {

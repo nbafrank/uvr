@@ -5,7 +5,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
-Pure tracking section — fixes and small features land here between tags.
+### Features
+- **Linux PPM binary packages (#55)**: `uvr sync` now fetches pre-compiled
+  binary packages from Posit Package Manager on supported Linux distros
+  (Ubuntu 20.04 / 22.04 / 24.04, Debian 11 / 12, RHEL/CentOS 7 / 8 / 9,
+  openSUSE 15.4 / 15.5). Same `__linux__/<codename>/latest` URL space the
+  R `install.packages()` setup wizard recommends; uvr injects the User-Agent
+  PPM uses to route binary vs. source. Falls back to source for distros
+  not on PPM (Alpine, Arch, NixOS, etc.). `uvr doctor` now reports the
+  detected codename instead of the prior "source-only" line, and the
+  README platform-support table reflects the new coverage.
 
 ## v0.3.1 (2026-04-30)
 

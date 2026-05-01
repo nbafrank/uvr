@@ -423,10 +423,27 @@ pub async fn install_from_lockfile(
 
     let plans: Vec<PkgPlan> = if !cache_misses.is_empty() {
         let p3m = match Platform::detect() {
-            Ok(
-                platform @ (Platform::MacOsArm64 | Platform::MacOsX86_64 | Platform::WindowsX86_64),
-            ) => P3MBinaryIndex::fetch(&client, &r_minor_str, platform, bioc_release).await,
-            _ => P3MBinaryIndex::empty(),
+            Ok(platform) => {
+                // #55: Linux gets binaries via PPM's `__linux__/<codename>` URL
+                // space, gated by a User-Agent the registry sets internally.
+                // The slug is the same string we use for R install URLs;
+                // platform_info() inside p3m.rs translates it to PPM's
+                // codename system. None for non-Linux platforms.
+                let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
+                    Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
+                } else {
+                    None
+                };
+                P3MBinaryIndex::fetch(
+                    &client,
+                    &r_minor_str,
+                    platform,
+                    bioc_release,
+                    slug.as_deref(),
+                )
+                .await
+            }
+            Err(_) => P3MBinaryIndex::empty(),
         };
 
         cache_misses
