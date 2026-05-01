@@ -5,6 +5,13 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
+Pure tracking section — fixes and small features land here between tags.
+
+## v0.3.2 (2026-04-30)
+
+Linux gets pre-built binary packages. The platform-support table no
+longer shows "-" for the Linux rows.
+
 ### Features
 - **Linux PPM binary packages (#55)**: `uvr sync` now fetches pre-compiled
   binary packages from Posit Package Manager on supported Linux distros
