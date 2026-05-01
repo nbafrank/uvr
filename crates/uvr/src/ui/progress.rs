@@ -12,13 +12,55 @@
 
 use super::{glyph, palette};
 use console::Term;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-fn progress_enabled() -> bool {
+#[derive(Copy, Clone, PartialEq)]
+enum ProgressMode {
+    /// Hidden (no draws, no env-var noise — pipes/CI/explicitly-off).
+    Off,
+    /// Auto: stderr is a real TTY; let indicatif use its default target.
+    Auto,
+    /// Forced on via `UVR_PROGRESS=always`. We must use an explicit
+    /// `term()` draw target — indicatif's default `stderr()` target does
+    /// *its own* `is_terminal` check and silently drops draws on non-TTYs
+    /// (notably Positron's SSH terminal, which reports not-a-TTY despite
+    /// rendering ANSI fine — see #48). `term()` writes through `Term`
+    /// unconditionally.
+    ForceOn,
+}
+
+fn progress_mode() -> ProgressMode {
     match std::env::var("UVR_PROGRESS").ok().as_deref() {
-        Some("always") | Some("1") | Some("true") => true,
-        Some("never") | Some("0") | Some("false") => false,
-        _ => Term::stderr().is_term(),
+        Some("always") | Some("1") | Some("true") => {
+            // If stderr happens to be a real TTY, prefer Auto so indicatif's
+            // own TTY-aware code path manages refresh rate and shutdown.
+            // Only use ForceOn (with explicit term() target) when we'd
+            // otherwise be hidden — that's the case the env var exists for.
+            if Term::stderr().is_term() {
+                ProgressMode::Auto
+            } else {
+                ProgressMode::ForceOn
+            }
+        }
+        Some("never") | Some("0") | Some("false") => ProgressMode::Off,
+        _ => {
+            if Term::stderr().is_term() {
+                ProgressMode::Auto
+            } else {
+                ProgressMode::Off
+            }
+        }
+    }
+}
+
+/// Apply the right draw target for the current mode. Caller owns the bar.
+fn apply_draw_target(pb: &ProgressBar, mode: ProgressMode) {
+    if mode == ProgressMode::ForceOn {
+        // 12 Hz matches indicatif's default refresh rate. Term::stderr()
+        // writes through console even on non-TTY pipes, so the spinner
+        // renders in environments where the default stderr target would
+        // bail out at the is_terminal check.
+        pb.set_draw_target(ProgressDrawTarget::term(Term::stderr(), 12));
     }
 }
 
@@ -30,10 +72,12 @@ fn progress_enabled() -> bool {
 /// Styling: amber-bold spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) against cyan message
 /// text — the spinner is the focal point; the message is secondary.
 pub fn make_spinner(msg: &str) -> ProgressBar {
-    if !progress_enabled() {
+    let mode = progress_mode();
+    if mode == ProgressMode::Off {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new_spinner();
+    apply_draw_target(&pb, mode);
     pb.set_style(
         // `{spinner:.cyan.bold}` renders the tick frames bold cyan, matching
         // the info-role accent in `palette.rs`. `{msg:.dim}` keeps the hint
@@ -50,10 +94,12 @@ pub fn make_spinner(msg: &str) -> ProgressBar {
 /// Aggregate progress bar that shows `{bar} {pos}/{len} · {msg}`.
 /// Use when installing a known number of packages.
 pub fn make_aggregate_bar(total: u64) -> ProgressBar {
-    if !progress_enabled() {
+    let mode = progress_mode();
+    if mode == ProgressMode::Off {
         return ProgressBar::hidden();
     }
     let pb = ProgressBar::new(total);
+    apply_draw_target(&pb, mode);
     let tmpl = format!(
         "  {{bar:28.cyan/blue.dim}} {{pos:>3}}/{{len}} {sep} {{msg:.dim}}",
         sep = glyph::bullet(),

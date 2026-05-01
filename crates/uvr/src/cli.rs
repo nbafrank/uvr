@@ -267,8 +267,15 @@ pub struct ExportArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// Path to renv.lock file (defaults to ./renv.lock)
+    /// Path to renv.lock file (defaults to ./renv.lock).
+    /// Equivalent to `--input` / `-i`; mirrors `uvr export -o <FILE>` (#71).
     pub path: Option<String>,
+
+    /// Alternative way to spell the input path — for symmetry with
+    /// `uvr export --output <FILE>` (#71). Mutually exclusive with the
+    /// positional `path` argument.
+    #[arg(long, short = 'i', value_name = "FILE", conflicts_with = "path")]
+    pub input: Option<String>,
 
     /// Resolve and install packages after import
     #[arg(long)]
@@ -324,6 +331,13 @@ pub enum RCommands {
 pub struct RInstallArgs {
     /// R version to install, e.g. "4.3.2"
     pub version: String,
+
+    /// Override the autodetected Linux distribution for the Posit CDN URL
+    /// (e.g. `ubuntu-2204`, `debian-12`, `rhel-9`). Useful on Ubuntu / Debian
+    /// derivatives that aren't matched by `/etc/os-release` autodetection
+    /// — PopOS, Manjaro, etc. (#54). Ignored on macOS / Windows.
+    #[arg(long, value_name = "SLUG")]
+    pub distribution: Option<String>,
 }
 
 #[derive(Debug, Args)]

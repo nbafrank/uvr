@@ -6,8 +6,23 @@ use uvr_core::r_version::manager::RManager;
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run(version: String) -> Result<()> {
+pub async fn run(version: String, distribution: Option<String>) -> Result<()> {
     let platform = Platform::detect().context("Unsupported platform")?;
+
+    // #54: when `--distribution` is set, override the Posit CDN slug used
+    // by the Linux URL builder. No-op on macOS / Windows since they don't
+    // hit the Posit CDN.
+    if let Some(slug) = distribution {
+        let slug = slug.trim().to_string();
+        if !slug.is_empty() {
+            ui::bullet_dim(format!(
+                "Using distribution override: {}",
+                palette::info(&slug)
+            ));
+            uvr_core::r_version::downloader::set_posit_distro_override(slug);
+        }
+    }
+
     ui::info(format!(
         "Installing R {} for {:?}",
         palette::info(&version),

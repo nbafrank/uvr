@@ -118,7 +118,10 @@ async fn run() -> Result<()> {
             commands::export::run(args.format, args.output)?;
         }
         Commands::Import(args) => {
-            commands::import::run(args.path, args.lock, args.jobs).await?;
+            // #71: --input/-i is an alternative spelling of the positional path.
+            // clap's `conflicts_with` already rejects passing both.
+            let path = args.input.or(args.path);
+            commands::import::run(path, args.lock, args.jobs).await?;
         }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
@@ -131,7 +134,7 @@ async fn run() -> Result<()> {
         }
         Commands::R(r_args) => match r_args.command {
             Some(RCommands::Install(args)) => {
-                commands::r_cmd::install::run(args.version).await?;
+                commands::r_cmd::install::run(args.version, args.distribution).await?;
             }
             Some(RCommands::Uninstall(args)) => {
                 commands::r_cmd::uninstall::run(args.version)?;

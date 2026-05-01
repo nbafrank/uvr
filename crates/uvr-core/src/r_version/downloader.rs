@@ -167,11 +167,27 @@ fn macos_x86_64_dir() -> &'static str {
     }
 }
 
-/// Detect the Posit CDN distro slug from `/etc/os-release`.
+/// Process-wide override for the Posit CDN distro slug. Set by
+/// `uvr r install --distribution <slug>` before invoking the downloader,
+/// for users on Linux distros uvr can't autodetect (e.g. PopOS, Manjaro,
+/// other Ubuntu/Arch derivatives — see #54).
+static DISTRO_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the Posit CDN distro slug for the rest of this process. No-op if
+/// already set. Slug examples: `"ubuntu-2204"`, `"debian-12"`, `"rhel-9"`.
+pub fn set_posit_distro_override(slug: String) {
+    let _ = DISTRO_OVERRIDE.set(slug);
+}
+
+/// Detect the Posit CDN distro slug from `/etc/os-release`, or use the
+/// override set by [`set_posit_distro_override`] if any.
 ///
 /// Returns strings like `"ubuntu-2204"`, `"ubuntu-2404"`, `"debian-12"`,
 /// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`. Falls back to `"ubuntu-2204"`.
 fn detect_posit_distro_slug() -> String {
+    if let Some(override_slug) = DISTRO_OVERRIDE.get() {
+        return override_slug.clone();
+    }
     // Read os-release; fall back to default if anything fails
     let content = match std::fs::read_to_string("/etc/os-release") {
         Ok(c) => c,
