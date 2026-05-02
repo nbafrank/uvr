@@ -36,7 +36,7 @@ pub fn effective_install_timeout(explicit: Option<Duration>) -> Duration {
     if let Some(d) = explicit {
         return d;
     }
-    if let Ok(env) = std::env::var("UVR_INSTALL_TIMEOUT") {
+    if let Some(env) = crate::config::install_timeout() {
         if let Some(d) = parse_install_timeout(&env) {
             return d;
         }

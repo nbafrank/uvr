@@ -8,7 +8,8 @@ pub fn run_clean() -> Result<()> {
     let base = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".uvr");
-    let cache_dir = base.join("cache");
+    let cache_dir = uvr_core::config::cache_dir()
+        .unwrap_or_else(|| base.join("cache"));
 
     let mut count = 0u64;
     let mut bytes = 0u64;
