@@ -132,12 +132,14 @@ pub async fn run(
     // see uvr-r #8). Fetch the DESCRIPTION up-front so the manifest entry
     // is keyed by the real package name and matches what the resolver
     // will produce in the lockfile.
-    if let Err(e) = resolve_github_pkg_names(&mut parsed).await {
-        // Don't bail — fall through with the URL-derived names if the
-        // network is unreachable. The user can edit uvr.toml manually.
-        ui::warn(format!(
-            "Could not resolve GitHub package names from DESCRIPTION ({e}). Using repo basenames; you may need to edit uvr.toml if the package name differs."
-        ));
+    //
+    // Skipped under `--no-lock`: that flag's stated semantics are "write
+    // uvr.toml only, no network work" — making an HTTP fetch here would
+    // violate that contract and break offline scripted workflows. With
+    // `--no-lock`, the manifest entry uses the URL-derived basename and
+    // the user can edit it later if it diverges from the actual Package.
+    if !no_lock {
+        resolve_github_pkg_names(&mut parsed).await;
     }
 
     // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
@@ -216,10 +218,13 @@ pub async fn run(
 
 /// For each GitHub-sourced dep in `parsed`, fetch the remote DESCRIPTION
 /// and replace the URL-derived name with the actual `Package:` field
-/// (uvr-r #8). Mutates in place. Best-effort — if any individual fetch
-/// fails, that entry keeps its URL-derived name and we warn at the call
-/// site.
-async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Result<()> {
+/// (uvr-r #8). Mutates in place. Best-effort — every failure path
+/// (transport error, missing DESCRIPTION, malformed file) is logged
+/// internally and the URL-derived name is kept. If *every* GitHub spec
+/// in the batch fails, surface a single user-facing warn so an offline
+/// user knows manifest names may need a manual touch-up. Returns no
+/// error: callers don't need to handle one.
+async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
     use uvr_core::registry::github::parse_github_spec;
 
     let needs_resolve: Vec<usize> = parsed
@@ -231,10 +236,20 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Re
         })
         .collect();
     if needs_resolve.is_empty() {
-        return Ok(());
+        return;
     }
 
-    let client = crate::commands::util::build_client()?;
+    let client = match crate::commands::util::build_client() {
+        Ok(c) => c,
+        Err(e) => {
+            ui::warn(format!(
+                "Could not build HTTP client for DESCRIPTION lookup ({e}); using repo basenames as package names. Edit uvr.toml manually if names differ."
+            ));
+            return;
+        }
+    };
+    let total = needs_resolve.len();
+    let mut fetch_failures = 0usize;
     for idx in needs_resolve {
         let (provisional_name, spec) = &parsed[idx];
         let DependencySpec::Detailed(d) = spec else {
@@ -280,10 +295,18 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Re
                 tracing::warn!(
                     "DESCRIPTION fetch failed for {git}@{resolved_ref}: {e}; using {provisional_name} as the package name"
                 );
+                fetch_failures += 1;
             }
         }
     }
-    Ok(())
+    // Surface a single user-facing warn when the network was completely
+    // unreachable (offline / behind a proxy). Per-spec failures already
+    // logged via tracing::warn — surface to user only when 100% failed.
+    if fetch_failures == total {
+        ui::warn(
+            "Could not reach GitHub to look up DESCRIPTION fields; package names default to repo basenames. Edit uvr.toml if a name differs.",
+        );
+    }
 }
 
 fn format_spec(spec: &DependencySpec) -> String {

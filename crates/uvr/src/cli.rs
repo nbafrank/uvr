@@ -148,8 +148,9 @@ pub struct AddArgs {
     #[arg(long)]
     pub no_lock: bool,
 
-    /// Update uvr.toml and lockfile, but don't install. Run `uvr sync`
-    /// later to install. Implies `--no-lock` is unset (#76).
+    /// Update uvr.toml and lockfile, but skip install. Run `uvr sync`
+    /// to install later. (Note: `--no-lock` already implies this since
+    /// there's no fresh lockfile to install from.) (#76)
     #[arg(long)]
     pub no_install: bool,
 }

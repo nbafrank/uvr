@@ -340,15 +340,21 @@ async fn version_not_found_error(
     ))
 }
 
-/// True when `s` looks like a real R version string (`X.Y` or `X.Y.Z`
-/// with all-digit components). Rejects directory-listing artefacts like
-/// `..` (parent-dir link) and `.` that pass a naive digits-and-dots
-/// check. Used by both the directory-listing scraper in `fetch_available_versions`
-/// (uvr-r #9) and `scan_versions_from_listing` to keep the version
-/// surface clean.
+/// True when `s` looks like a real R version string (`X.Y.Z` with
+/// all-digit components, optionally with a fourth `.W` for build
+/// numbers). Rejects directory-listing artefacts like `..` (parent-dir
+/// link) and `.` that pass a naive digits-and-dots check. Used by both
+/// the directory-listing scraper in `fetch_available_versions` (uvr-r
+/// #9) and `scan_versions_from_listing` to keep the version surface
+/// clean.
+///
+/// Three-component minimum: CRAN's R 4+ has never been published as
+/// `X.Y` only — every release is `X.Y.Z`. Tightening the lower bound
+/// catches false-accepts that the prior 2-component allowance let
+/// through.
 fn is_real_r_version(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() < 2 || parts.len() > 4 {
+    if parts.len() < 3 || parts.len() > 4 {
         return false;
     }
     parts
@@ -1201,7 +1207,6 @@ mod tests {
     #[test]
     fn is_real_r_version_accepts_versions() {
         assert!(is_real_r_version("4.5.3"));
-        assert!(is_real_r_version("4.6"));
         assert!(is_real_r_version("3.6.3"));
         assert!(is_real_r_version("4.5.3.0")); // 4 components, rare but valid
     }
@@ -1221,6 +1226,10 @@ mod tests {
         assert!(!is_real_r_version("4..5"));
         assert!(!is_real_r_version("v4.5.3"));
         assert!(!is_real_r_version("4.5.3-rc"));
+        // CRAN's R 4+ doesn't ship 2-component releases. Reject so any
+        // future scrape changes that produce 2-part strings flag
+        // visibly rather than slipping into the list.
+        assert!(!is_real_r_version("4.6"));
     }
 
     #[test]
