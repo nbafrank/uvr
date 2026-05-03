@@ -141,6 +141,18 @@ pub struct AddArgs {
     /// (override via `UVR_INSTALL_TIMEOUT`).
     #[arg(long, value_name = "DURATION")]
     pub timeout: Option<String>,
+
+    /// Update uvr.toml only — skip lockfile resolution and install.
+    /// Useful when scripting multiple `uvr add` calls and running
+    /// `uvr lock` + `uvr sync` once at the end (#76).
+    #[arg(long)]
+    pub no_lock: bool,
+
+    /// Update uvr.toml and lockfile, but skip install. Run `uvr sync`
+    /// to install later. (Note: `--no-lock` already implies this since
+    /// there's no fresh lockfile to install from.) (#76)
+    #[arg(long)]
+    pub no_install: bool,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -276,6 +288,12 @@ pub struct ImportArgs {
     /// positional `path` argument.
     #[arg(long, short = 'i', value_name = "FILE", conflicts_with = "path")]
     pub input: Option<String>,
+
+    /// Override the project name written to `uvr.toml`. Defaults to the
+    /// current directory's basename (or, in merge mode, preserves the
+    /// existing project name unless `--name` is given) (#77).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 
     /// Resolve and install packages after import
     #[arg(long)]

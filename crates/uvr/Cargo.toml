@@ -34,6 +34,15 @@ semver.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+# Embed a Win32 application manifest declaring `supportedOS` GUIDs from
+# Windows 7 through Windows 11. Without this, recent Windows 11 builds
+# reject the unmanifested binary at exec time with "This version of …
+# uvr.exe is not compatible with the version of Windows you're running."
+# (See #74 — confirmed via PE-header inspection of the v0.3.3 release
+# artifact: no resource directory, no manifest at all.)
+embed-manifest = "1.4"
+
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true

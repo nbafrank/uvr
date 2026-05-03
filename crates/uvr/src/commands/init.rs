@@ -340,14 +340,23 @@ fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
     }
 
     // No pin (or pin not yet installed) — fall through to whatever uvr
-    // would find on the system. Surface the fallback so users notice the
-    // IDE config is bound to whatever happened to be on PATH rather than
-    // a project-pinned R.
+    // would find on the system. Surface the fallback ONLY when it
+    // resolves to a non-uvr-managed R (e.g. system R on PATH) — that's
+    // the case worth nagging about, since system R can be removed or
+    // upgraded out from under the IDE config. When the fallback is a
+    // uvr-managed install, the binding is sound and the prior nag was
+    // a false-positive that fired on every fresh `uvr init` (#75).
     let fallback = find_r_binary(None).ok()?;
-    ui::bullet_dim(format!(
-        "No .r-version pin — IDE config bound to {}. Re-run `uvr init --here` after pinning a project R version.",
-        fallback.display()
-    ));
+    let managed_root = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
+    let is_managed = managed_root
+        .as_ref()
+        .is_some_and(|root| fallback.starts_with(root));
+    if !is_managed {
+        ui::bullet_dim(format!(
+            "No .r-version pin — IDE config bound to system R at {}. Run `uvr r install <ver>` then `uvr r pin <ver>` for project-pinned R.",
+            fallback.display()
+        ));
+    }
     Some(fallback)
 }
 

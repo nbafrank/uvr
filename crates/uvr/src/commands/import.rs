@@ -4,13 +4,58 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// Validate a `--name <NAME>` value for `uvr import` (#77 follow-up to
+/// the v0.3.4-batch review). CRAN's R-package convention: starts with a
+/// letter, followed by letters / digits / dots only, length ≥ 2.
+/// Rejecting up-front prevents silent corruption of `[project] name` in
+/// uvr.toml when the user passes whitespace or TOML-special chars.
+fn validate_project_name(s: &str) -> Result<()> {
+    if s.len() < 2 {
+        anyhow::bail!(
+            "Invalid project name {:?}: must be at least 2 characters",
+            s
+        );
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() {
+        anyhow::bail!(
+            "Invalid project name {:?}: must start with an ASCII letter",
+            s
+        );
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+            anyhow::bail!(
+                "Invalid project name {:?}: only letters, digits, '.', '_', '-' allowed (offending char: {:?})",
+                s,
+                c
+            );
+        }
+    }
+    Ok(())
+}
+
 use uvr_core::manifest::{DependencySpec, DetailedDep, Manifest, PackageSource};
 use uvr_core::project::{Project, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
 
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
+pub async fn run(
+    path: Option<String>,
+    name: Option<String>,
+    lock: bool,
+    jobs: usize,
+) -> Result<()> {
+    // Validate `--name` before we touch any files. R package / project
+    // names follow CRAN's rule: start with a letter, then letters /
+    // digits / dots only (≥ 2 chars total). Empty or whitespace-laden
+    // names slip silently into `[project]` name and corrupt downstream
+    // TOML consumers — reject loudly.
+    if let Some(n) = name.as_deref() {
+        validate_project_name(n)?;
+    }
     // Find the renv.lock file
     let renv_path = path.unwrap_or_else(|| "renv.lock".to_string());
     let renv_path = Path::new(&renv_path);
@@ -42,14 +87,23 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
         let manifest_path = cwd.join(MANIFEST_FILE);
         let existing =
             std::fs::read_to_string(&manifest_path).context("Failed to read existing uvr.toml")?;
-        existing
+        let mut m = existing
             .parse::<Manifest>()
-            .context("Failed to parse existing uvr.toml")?
+            .context("Failed to parse existing uvr.toml")?;
+        // #77 — `--name` overrides the existing manifest's project name
+        // when merging. Without this, `uvr import --name foo` against a
+        // pre-existing uvr.toml silently kept the old name.
+        if let Some(n) = &name {
+            m.project.name = n.clone();
+        }
+        m
     } else {
-        let project_name = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "imported-project".to_string());
+        // Project name: explicit `--name` (#77) wins over the cwd basename.
+        let project_name = name.clone().unwrap_or_else(|| {
+            cwd.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "imported-project".to_string())
+        });
         Manifest::new(&project_name, r_version.clone())
     };
 
@@ -250,4 +304,36 @@ struct RenvPackage {
     remote_ref: Option<String>,
     #[serde(rename = "RemoteSha")]
     remote_sha: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_project_name;
+
+    #[test]
+    fn validate_project_name_accepts_cran_style() {
+        validate_project_name("ggplot2").unwrap();
+        validate_project_name("data.table").unwrap();
+        validate_project_name("Hmisc").unwrap();
+        validate_project_name("a_b").unwrap();
+        validate_project_name("my-project").unwrap();
+        validate_project_name("R6").unwrap();
+    }
+
+    #[test]
+    fn validate_project_name_rejects_invalid() {
+        // Empty / whitespace
+        assert!(validate_project_name("").is_err());
+        assert!(validate_project_name(" ").is_err());
+        assert!(validate_project_name("a").is_err()); // too short
+        assert!(validate_project_name("foo bar").is_err()); // space mid
+                                                            // Leading non-letter
+        assert!(validate_project_name("1foo").is_err());
+        assert!(validate_project_name(".foo").is_err());
+        assert!(validate_project_name("_foo").is_err());
+        // TOML-special / shell-special chars
+        assert!(validate_project_name("foo=bar").is_err());
+        assert!(validate_project_name("foo\"bar").is_err());
+        assert!(validate_project_name("foo\nbar").is_err());
+    }
 }

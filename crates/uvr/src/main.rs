@@ -92,6 +92,8 @@ async fn run() -> Result<()> {
                 args.source,
                 args.jobs,
                 timeout,
+                args.no_lock,
+                args.no_install,
             )
             .await?;
         }
@@ -121,7 +123,7 @@ async fn run() -> Result<()> {
             // #71: --input/-i is an alternative spelling of the positional path.
             // clap's `conflicts_with` already rejects passing both.
             let path = args.input.or(args.path);
-            commands::import::run(path, args.lock, args.jobs).await?;
+            commands::import::run(path, args.name, args.lock, args.jobs).await?;
         }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
