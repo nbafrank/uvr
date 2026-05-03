@@ -340,6 +340,22 @@ async fn version_not_found_error(
     ))
 }
 
+/// True when `s` looks like a real R version string (`X.Y` or `X.Y.Z`
+/// with all-digit components). Rejects directory-listing artefacts like
+/// `..` (parent-dir link) and `.` that pass a naive digits-and-dots
+/// check. Used by both the directory-listing scraper in `fetch_available_versions`
+/// (uvr-r #9) and `scan_versions_from_listing` to keep the version
+/// surface clean.
+fn is_real_r_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 2 || parts.len() > 4 {
+        return false;
+    }
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Pull `R-X.Y.Z` version strings out of an HTML directory listing.
 fn scan_versions_from_listing(body: &str) -> Vec<String> {
     use regex::Regex;
@@ -1087,8 +1103,7 @@ pub async fn fetch_available_versions(
         .filter_map(|chunk| {
             let end = chunk.find(suffix)?;
             let ver = &chunk[..end];
-            // Sanity check: must be X.Y or X.Y.Z (digits and dots only).
-            if ver.chars().all(|c| c.is_ascii_digit() || c == '.') && ver.contains('.') {
+            if is_real_r_version(ver) {
                 Some(ver.to_string())
             } else {
                 None
@@ -1106,12 +1121,18 @@ pub async fn fetch_available_versions(
             .and_then(|r| r.error_for_status())
         {
             if let Ok(text) = old_html.text().await {
-                // Old directory lists subdirectories like href="4.4.2/"
+                // Old directory lists subdirectories like href="4.4.2/".
+                // It also lists `href="../"` (parent dir) — that one
+                // satisfies the prior digits-and-dots sanity check (`..`
+                // is two dots, no digits) and was getting picked up as a
+                // bogus "version", surfacing as a `..` row in `uvr r
+                // list --all` and `uvr::r_list(all = TRUE)` (uvr-r #9).
+                // `is_real_r_version` requires at least one digit per
+                // component.
                 for chunk in text.split("href=\"").skip(1) {
                     if let Some(end) = chunk.find('/') {
                         let ver = &chunk[..end];
-                        if ver.chars().all(|c| c.is_ascii_digit() || c == '.') && ver.contains('.')
-                        {
+                        if is_real_r_version(ver) {
                             versions.push(ver.to_string());
                         }
                     }
@@ -1175,6 +1196,31 @@ mod tests {
             url.contains("/sonoma-arm64/") || url.contains("/big-sur-arm64/"),
             "unexpected dir in {url}"
         );
+    }
+
+    #[test]
+    fn is_real_r_version_accepts_versions() {
+        assert!(is_real_r_version("4.5.3"));
+        assert!(is_real_r_version("4.6"));
+        assert!(is_real_r_version("3.6.3"));
+        assert!(is_real_r_version("4.5.3.0")); // 4 components, rare but valid
+    }
+
+    #[test]
+    fn is_real_r_version_rejects_directory_listing_noise() {
+        // Reproduces uvr-r #9 — the Windows `/base/old/` directory listing
+        // includes `href="../"` (parent dir). Without this guard the `..`
+        // string passed the all-digits-and-dots check and ended up in the
+        // version list, surfacing as a `..` row in `uvr r list --all` and
+        // `uvr::r_list(all = TRUE)`.
+        assert!(!is_real_r_version(".."));
+        assert!(!is_real_r_version("."));
+        assert!(!is_real_r_version(""));
+        assert!(!is_real_r_version("4."));
+        assert!(!is_real_r_version(".4.5"));
+        assert!(!is_real_r_version("4..5"));
+        assert!(!is_real_r_version("v4.5.3"));
+        assert!(!is_real_r_version("4.5.3-rc"));
     }
 
     #[test]

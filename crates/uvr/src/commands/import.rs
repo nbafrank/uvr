@@ -10,7 +10,12 @@ use uvr_core::project::{Project, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
+pub async fn run(
+    path: Option<String>,
+    name: Option<String>,
+    lock: bool,
+    jobs: usize,
+) -> Result<()> {
     // Find the renv.lock file
     let renv_path = path.unwrap_or_else(|| "renv.lock".to_string());
     let renv_path = Path::new(&renv_path);
@@ -42,14 +47,23 @@ pub async fn run(path: Option<String>, lock: bool, jobs: usize) -> Result<()> {
         let manifest_path = cwd.join(MANIFEST_FILE);
         let existing =
             std::fs::read_to_string(&manifest_path).context("Failed to read existing uvr.toml")?;
-        existing
+        let mut m = existing
             .parse::<Manifest>()
-            .context("Failed to parse existing uvr.toml")?
+            .context("Failed to parse existing uvr.toml")?;
+        // #77 — `--name` overrides the existing manifest's project name
+        // when merging. Without this, `uvr import --name foo` against a
+        // pre-existing uvr.toml silently kept the old name.
+        if let Some(n) = &name {
+            m.project.name = n.clone();
+        }
+        m
     } else {
-        let project_name = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "imported-project".to_string());
+        // Project name: explicit `--name` (#77) wins over the cwd basename.
+        let project_name = name.clone().unwrap_or_else(|| {
+            cwd.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "imported-project".to_string())
+        });
         Manifest::new(&project_name, r_version.clone())
     };
 

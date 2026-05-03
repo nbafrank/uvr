@@ -92,6 +92,12 @@ pub async fn run(
     cmd.arg("--no-environ");
 
     if let Some(script_path) = &script {
+        // Script mode — suppress the R session intro banner. Without
+        // --quiet, every `uvr run script.R` dumps the "R version 4.6.0
+        // (2026-…) -- 'Because it was There'" preamble to stdout before
+        // the script starts (#81). --quiet keeps prompts visible (so
+        // interactive `browser()` still works) while dropping the banner.
+        cmd.arg("--quiet");
         cmd.arg("--no-save");
         cmd.arg("--no-restore");
         cmd.arg(format!("--file={script_path}"));
@@ -100,6 +106,9 @@ pub async fn run(
             cmd.args(&args);
         }
     } else {
+        // Interactive mode — keep the banner. It's part of the REPL
+        // experience and a user typing `uvr run` (no script) expects
+        // R's normal startup output.
         cmd.arg("--no-save");
     }
 

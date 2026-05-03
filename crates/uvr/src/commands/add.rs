@@ -75,6 +75,7 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     Ok((name, spec))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     packages: Vec<String>,
     dev: bool,
@@ -82,6 +83,8 @@ pub async fn run(
     source: Option<String>,
     jobs: usize,
     timeout: Option<std::time::Duration>,
+    no_lock: bool,
+    no_install: bool,
 ) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
@@ -117,10 +120,25 @@ pub async fn run(
         }
     }
 
-    let parsed: Vec<(String, DependencySpec)> = packages
+    let mut parsed: Vec<(String, DependencySpec)> = packages
         .iter()
         .map(|p| parse_add_spec(p, bioc))
         .collect::<Result<Vec<_>>>()?;
+
+    // For GitHub specs (`user/repo@ref`), the URL-derived basename is only a
+    // provisional package name. R's actual package name lives in the
+    // remote's DESCRIPTION's `Package:` field — and for some packages
+    // those don't match (the `nbafrank/uvr-r` repo ships package `uvr`,
+    // see uvr-r #8). Fetch the DESCRIPTION up-front so the manifest entry
+    // is keyed by the real package name and matches what the resolver
+    // will produce in the lockfile.
+    if let Err(e) = resolve_github_pkg_names(&mut parsed).await {
+        // Don't bail — fall through with the URL-derived names if the
+        // network is unreachable. The user can edit uvr.toml manually.
+        ui::warn(format!(
+            "Could not resolve GitHub package names from DESCRIPTION ({e}). Using repo basenames; you may need to edit uvr.toml if the package name differs."
+        ));
+    }
 
     // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
     for (name, _) in &parsed {
@@ -160,7 +178,19 @@ pub async fn run(
         .save_manifest()
         .context("Failed to write uvr.toml")?;
 
-    // Re-resolve → update lockfile → install new packages
+    // #76 — `--no-lock` short-circuits before resolution; useful for
+    // building uvr.toml programmatically (e.g. from a script generating
+    // multiple `uvr add` calls in a row, then a single explicit
+    // `uvr lock` + `uvr sync` at the end). `--no-install` keeps the
+    // resolution but skips the install — same use case at a coarser
+    // grain. `--no-lock` implies `--no-install` since there's no
+    // lockfile to install from.
+    if no_lock {
+        ui::bullet_dim("Skipped lock + install (--no-lock).");
+        return Ok(());
+    }
+
+    // Re-resolve → update lockfile (and roll back manifest on failure).
     let resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
     if let Err(e) = resolve_result {
         // Roll back the manifest to its original state
@@ -172,10 +202,87 @@ pub async fn run(
     }
     let lockfile = resolve_result.unwrap();
 
+    if no_install {
+        ui::bullet_dim("Skipped install (--no-install). Run `uvr sync` to install.");
+        return Ok(());
+    }
+
     crate::commands::sync::install_from_lockfile(&project, &lockfile, jobs, None, timeout)
         .await
         .context("Failed to install packages after add")?;
 
+    Ok(())
+}
+
+/// For each GitHub-sourced dep in `parsed`, fetch the remote DESCRIPTION
+/// and replace the URL-derived name with the actual `Package:` field
+/// (uvr-r #8). Mutates in place. Best-effort — if any individual fetch
+/// fails, that entry keeps its URL-derived name and we warn at the call
+/// site.
+async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Result<()> {
+    use uvr_core::registry::github::parse_github_spec;
+
+    let needs_resolve: Vec<usize> = parsed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, spec))| match spec {
+            DependencySpec::Detailed(d) if d.git.is_some() => Some(i),
+            _ => None,
+        })
+        .collect();
+    if needs_resolve.is_empty() {
+        return Ok(());
+    }
+
+    let client = crate::commands::util::build_client()?;
+    for idx in needs_resolve {
+        let (provisional_name, spec) = &parsed[idx];
+        let DependencySpec::Detailed(d) = spec else {
+            continue;
+        };
+        let Some(git) = d.git.as_deref() else {
+            continue;
+        };
+        let git_ref = d.rev.as_deref().unwrap_or("HEAD").to_string();
+        let spec_str = format!("{git}@{git_ref}");
+        let Some((user, repo, resolved_ref)) = parse_github_spec(&spec_str) else {
+            continue;
+        };
+        // Cheap path: hit raw.githubusercontent.com directly for the
+        // DESCRIPTION at the requested ref. Avoids the commit-resolution
+        // round-trip that the full resolver does — we only need the
+        // Package: field.
+        let url =
+            format!("https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION");
+        match client
+            .get(&url)
+            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => {
+                let text = resp.text().await.unwrap_or_default();
+                let fields = uvr_core::dcf::parse_dcf_fields(&text);
+                if let Some(actual) = fields.get("Package") {
+                    let actual = actual.trim().to_string();
+                    if !actual.is_empty() && actual != *provisional_name {
+                        ui::bullet_dim(format!(
+                            "{} → {} (Package: field in DESCRIPTION)",
+                            palette::dim(provisional_name),
+                            palette::pkg(&actual)
+                        ));
+                        parsed[idx].0 = actual;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "DESCRIPTION fetch failed for {git}@{resolved_ref}: {e}; using {provisional_name} as the package name"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
