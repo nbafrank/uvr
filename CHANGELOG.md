@@ -7,6 +7,32 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.4 (2026-05-03)
+
+Hotfix for #74: Windows 11 users running the v0.3.3 release artifact saw
+"This version of … uvr.exe is not compatible with the version of Windows
+you're running." Building from source via cargo worked; the released
+artifact didn't.
+
+Diagnosis: PE-header inspection of the v0.3.3 artifact showed no
+embedded resource directory and no Win32 application manifest at all.
+Recent Windows 11 builds reject naked MSVC binaries — without a
+manifest declaring `supportedOS` GUIDs, the OS treats the exe as
+"compatibility unknown" and refuses to run it. The default Cargo build
+on `windows-latest` (now Win Server 2025 + VS 17.14, linker 14.44)
+doesn't embed a manifest by itself.
+
+### Fixes
+- **Windows binary now embeds a Win32 application manifest (#74)** via
+  the `embed-manifest` build-dep. Manifest declares `supportedOS` GUIDs
+  for Windows 7 through Windows 11 and `asInvoker` execution level.
+  Build-dep is gated under `[target.'cfg(windows)'.build-dependencies]`
+  so non-Windows targets are unaffected.
+
+Per the batched-cadence rule (#69), this tag is allowed under the
+install-blocking-bug exception — every Windows user trying to install
+v0.3.3 currently has a broken binary.
+
 ## v0.3.3 (2026-04-30)
 
 Hotfix for v0.3.2's Linux PPM binaries — the feature was end-to-end
