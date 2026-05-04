@@ -8,7 +8,7 @@ use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
-use uvr_core::registry::github::{parse_github_spec, resolve_github_package};
+use uvr_core::registry::github::{parse_github_spec, resolve_github_package_with_remotes};
 use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
 
@@ -189,21 +189,44 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
     }
 }
 
-/// Collect all GitHub dependencies from the manifest and resolve them via the
-/// GitHub API. Returns a map from package name → PackageInfo that the resolver
-/// can inject without going through the registry chain.
+/// Collect all GitHub dependencies from the manifest, resolve them via the
+/// GitHub API, and recursively walk any `Remotes:` declared in their
+/// DESCRIPTIONs. Returns a map from package name → PackageInfo that the
+/// resolver can inject without going through the registry chain (#84).
+///
+/// BFS: seed the queue from manifest direct + dev github deps, pop one,
+/// resolve via github API (which also returns its `Remotes:` chain), and
+/// push each unseen remote back onto the queue. Dedupe on `"user/repo@ref"`
+/// so a diamond doesn't cause two HTTP fetches.
+///
+/// **Failure policy.** Manifest-direct specs hard-error on any github
+/// failure — those are user-declared deps and silent skips would let
+/// `uvr lock` produce a lockfile that's missing what the user asked for.
+/// Transitive specs (discovered via another package's `Remotes:`) are
+/// best-effort: a warn is logged and resolution falls through to the
+/// registry chain. Reasoning: a typo or transient 404 in a third-party
+/// DESCRIPTION shouldn't block a project lock the user can't fix.
+///
+/// **Manifest-direct-wins ordering.** The queue is seeded with manifest
+/// entries first, so on a (rare) Package-name collision between a
+/// manifest-direct spec and a transitive `Remotes:` spec, the manifest
+/// version is what lands in `pre_resolved`. We log a warn on collision so
+/// the user can see the discarded transitive pin. Any future
+/// parallelisation of this loop must preserve the manifest-first ordering
+/// or replace it with an explicit priority flag.
 async fn resolve_github_deps(
     client: &reqwest::Client,
     manifest: &uvr_core::manifest::Manifest,
 ) -> Result<HashMap<String, PackageInfo>> {
-    let mut github_specs: Vec<(String, String)> = Vec::new(); // (name, git_spec)
+    use std::collections::{HashSet, VecDeque};
 
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut direct_specs: HashSet<String> = HashSet::new();
     let all_deps = manifest
         .dependencies
         .iter()
         .chain(manifest.dev_dependencies.iter());
-
-    for (name, spec) in all_deps {
+    for (_name, spec) in all_deps {
         if let DependencySpec::Detailed(d) = spec {
             if let Some(ref git) = d.git {
                 let full_spec = if let Some(ref rev) = d.rev {
@@ -211,18 +234,56 @@ async fn resolve_github_deps(
                 } else {
                     git.clone()
                 };
-                github_specs.push((name.clone(), full_spec));
+                direct_specs.insert(full_spec.clone());
+                queue.push_back(full_spec);
             }
         }
     }
 
-    let mut pre_resolved = HashMap::new();
-    for (_name, spec) in &github_specs {
-        if let Some((user, repo, git_ref)) = parse_github_spec(spec) {
-            let info = resolve_github_package(client, &user, &repo, &git_ref)
-                .await
-                .with_context(|| format!("Failed to resolve GitHub package {spec}"))?;
+    let mut pre_resolved: HashMap<String, PackageInfo> = HashMap::new();
+    let mut visited_specs: HashSet<String> = HashSet::new();
+
+    while let Some(spec) = queue.pop_front() {
+        if !visited_specs.insert(spec.clone()) {
+            continue;
+        }
+        let Some((user, repo, git_ref)) = parse_github_spec(&spec) else {
+            continue;
+        };
+        let is_direct = direct_specs.contains(&spec);
+        let resolved = resolve_github_package_with_remotes(client, &user, &repo, &git_ref).await;
+        let (info, remotes) = match resolved {
+            Ok(pair) => pair,
+            Err(e) if is_direct => {
+                return Err(e).with_context(|| format!("Failed to resolve GitHub package {spec}"));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch GitHub Remote {spec} ({e}); falling back to registry resolution"
+                );
+                continue;
+            }
+        };
+
+        if let Some(existing) = pre_resolved.get(&info.name) {
+            tracing::warn!(
+                "GitHub package {} already resolved from a different spec ({}); discarding {}",
+                info.name,
+                existing.checksum.as_deref().unwrap_or("?"),
+                spec
+            );
+        } else {
             pre_resolved.insert(info.name.clone(), info);
+        }
+
+        for (_dep_name, repo_path, rev) in remotes {
+            let next_spec = match rev {
+                Some(r) => format!("{repo_path}@{r}"),
+                None => repo_path,
+            };
+            if !visited_specs.contains(&next_spec) {
+                queue.push_back(next_spec);
+            }
         }
     }
 

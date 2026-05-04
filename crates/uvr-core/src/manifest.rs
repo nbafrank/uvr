@@ -306,7 +306,12 @@ fn resolve_remote_pkg_name(
 /// Entries with unsupported prefixes (`gitlab::`, `bitbucket::`, `git::`,
 /// `url::`, `local::`, `bioc::`) are skipped for now — the caller keeps
 /// whatever version-based spec it already had from `Imports:`.
-fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
+///
+/// Visible to the github registry so it can walk transitive `Remotes:`
+/// chains during `uvr lock` (#84) — when a github-sourced package's
+/// DESCRIPTION declares another github dep via `Remotes:`, we follow
+/// the chain instead of falling back to CRAN and erroring.
+pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
     let mut result = Vec::new();
     for entry in field.split(',') {
         let entry = entry.trim();
