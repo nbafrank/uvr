@@ -149,7 +149,12 @@ local({
     }
   }
   if (dir.exists(lib)) {
-    .libPaths(lib)
+    # #17: `.libPaths(lib)` with a single new path causes R to drop the
+    # user's site library (e.g. ~/R/x86_64-pc-linux-gnu-library/4.4) —
+    # only the new path and the system library survive. Prepending via
+    # `unique(c(lib, .libPaths()))` keeps the project lib first (so it
+    # wins resolution) while preserving anything the user already had.
+    .libPaths(unique(c(lib, .libPaths())))
     n_locked <- count_locked(lock)
     installed <- list.dirs(lib, recursive = FALSE, full.names = FALSE)
     n_installed <- length(setdiff(installed, "uvr"))
