@@ -40,3 +40,4 @@ urlencoding = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = "2"
 regex = "1"
+ignore = "0.4"

@@ -69,6 +69,9 @@ pub enum Commands {
     /// Import packages from an renv.lock file
     Import(ImportArgs),
 
+    /// Scan project R/Rmd/Qmd files for package usage missing from uvr.toml
+    Scan(ScanArgs),
+
     /// Generate shell completions
     Completions(CompletionsArgs),
 
@@ -302,6 +305,18 @@ pub struct ImportArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
+}
+
+// ────────────────────────────────────────────────────────────
+//  scan
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct ScanArgs {
+    /// Report all detected package references, not just those missing
+    /// from uvr.toml.
+    #[arg(long)]
+    pub all: bool,
 }
 
 // ────────────────────────────────────────────────────────────
