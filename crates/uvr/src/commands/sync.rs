@@ -249,10 +249,26 @@ pub async fn install_from_lockfile(
             if !queries.is_empty() {
                 let check = sysreqs::check_system_deps(&client, &queries, &distro).await;
 
-                if check.unsupported_distro && check.missing.is_empty() {
+                // #30 follow-up: only fire the unsupported-distro warning
+                // when at least one package actually declares
+                // `SystemRequirements`. pat-s reported that on Alpine 3.23.x
+                // a binaries-only install of `cli/glue/rlang` (no sysreqs
+                // at all) still triggered the loud "System dependency check
+                // skipped" warning, which reads as a real problem when in
+                // fact nothing needed checking. Gate on the presence of
+                // sysreqs so the warning fires only when there's actually
+                // a check we couldn't perform.
+                let any_has_sysreqs = queries.iter().any(|q| {
+                    q.system_requirements
+                        .as_deref()
+                        .is_some_and(|s| !s.trim().is_empty())
+                });
+
+                if check.unsupported_distro && check.missing.is_empty() && any_has_sysreqs {
                     // PPM doesn't cover this distro AND the local fallback
-                    // found nothing (either no SystemRequirements present or
-                    // no rule matched). Tell the user we skipped the check
+                    // found nothing (either no rule matched any of the
+                    // declared SystemRequirements, or the local rules are
+                    // out of date). Tell the user we skipped the check
                     // rather than silently claiming everything is fine.
                     eprintln!();
                     ui::warn_block(
