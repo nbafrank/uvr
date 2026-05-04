@@ -70,6 +70,32 @@ jobs:
       - name: Build release binary
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p uvr
 
+      # Smoke test the freshly-built binary on the runners where we can —
+      # i.e. the target architecture matches the host. Catches regressions
+      # where the binary loads but won't actually run (broken manifest,
+      # wrong subsystem, missing imports). v0.3.3 + v0.3.4 both shipped
+      # Windows binaries that B-Nilson couldn't execute (#74); a single
+      # `--version` call on the runner would have flagged either release
+      # before tag.
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./target/${{ matrix.target }}/release/uvr.exe --version
+          ./target/${{ matrix.target }}/release/uvr.exe --help | Out-Null
+
+      - name: Smoke test (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          ./target/${{ matrix.target }}/release/uvr --version
+          ./target/${{ matrix.target }}/release/uvr --help > /dev/null
+
+      - name: Smoke test (macOS arm64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          ./target/${{ matrix.target }}/release/uvr --version
+          ./target/${{ matrix.target }}/release/uvr --help > /dev/null
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
