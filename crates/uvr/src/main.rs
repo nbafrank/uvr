@@ -125,6 +125,9 @@ async fn run() -> Result<()> {
             let path = args.input.or(args.path);
             commands::import::run(path, args.name, args.lock, args.jobs).await?;
         }
+        Commands::Scan(args) => {
+            commands::scan::run(args.all)?;
+        }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
         }

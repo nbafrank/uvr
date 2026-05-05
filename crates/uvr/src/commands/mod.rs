@@ -9,6 +9,7 @@ pub mod lock;
 pub mod r_cmd;
 pub mod remove;
 pub mod run;
+pub mod scan;
 pub mod self_update;
 pub mod sync;
 pub mod tree;

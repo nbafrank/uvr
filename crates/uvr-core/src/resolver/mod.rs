@@ -197,7 +197,26 @@ impl<'a> Resolver<'a> {
 
             // Use pre-resolved info (e.g. GitHub packages) if available,
             // otherwise fall back to the registry chain.
+            //
+            // The registry path (`resolve_package`) honours the version
+            // constraint via its own resolution logic; the pre_resolved
+            // path bypasses the registry, so the constraint check has to
+            // happen here too — otherwise a `Remotes:`-resolved github
+            // version could silently violate a parent's `Imports: foo
+            // (>= 1.0.0)` (#84 review).
             let info = if let Some(pi) = pre_resolved.get(&name) {
+                if let Some(c) = &constraint {
+                    if !c.is_empty() && c != "*" {
+                        let req = parse_version_req(c)?;
+                        if !version_matches_req(&pi.version, &req) {
+                            return Err(UvrError::VersionConflict {
+                                package: name.clone(),
+                                required: c.clone(),
+                                conflicting: pi.version.to_string(),
+                            });
+                        }
+                    }
+                }
                 pi.clone()
             } else {
                 self.registry
@@ -630,6 +649,102 @@ mod tests {
 
         let result = resolver.resolve(&manifest, None, HashMap::new());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pre_resolved_constraint_violation_errors() {
+        // #84 review: a Remotes-resolved github package must still satisfy
+        // the parent's `Imports:` constraint. Without the pre_resolved
+        // constraint check, a github `handyr 0.0.0` would silently install
+        // even when the parent declares `Imports: handyr (>= 1.0.0)`.
+        let registry = MockRegistry {
+            packages: HashMap::from([make_pkg(
+                "airquality",
+                "0.1.0",
+                vec![("handyr", Some(">=1.0.0"))],
+            )]),
+        };
+        let resolver = Resolver::new(&registry);
+
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep(
+            "airquality".into(),
+            DependencySpec::Version("*".into()),
+            false,
+        );
+
+        // Pre-resolved handyr is too old.
+        let mut pre_resolved = HashMap::new();
+        pre_resolved.insert(
+            "handyr".to_string(),
+            PackageInfo {
+                name: "handyr".to_string(),
+                version: Version::parse("0.0.0").unwrap(),
+                source: PackageSource::GitHub,
+                checksum: None,
+                requires: vec![],
+                url: "https://api.github.com/...".to_string(),
+                raw_version: None,
+                system_requirements: None,
+            },
+        );
+
+        let result = resolver.resolve(&manifest, None, pre_resolved);
+        match result {
+            Err(UvrError::VersionConflict {
+                package,
+                required,
+                conflicting,
+            }) => {
+                assert_eq!(package, "handyr");
+                assert_eq!(required, ">=1.0.0");
+                assert_eq!(conflicting, "0.0.0");
+            }
+            other => panic!("expected VersionConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_resolved_constraint_satisfied_succeeds() {
+        // Same setup as above but pre_resolved handyr satisfies the
+        // constraint — resolve should succeed and use the github source.
+        let registry = MockRegistry {
+            packages: HashMap::from([make_pkg(
+                "airquality",
+                "0.1.0",
+                vec![("handyr", Some(">=1.0.0"))],
+            )]),
+        };
+        let resolver = Resolver::new(&registry);
+
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep(
+            "airquality".into(),
+            DependencySpec::Version("*".into()),
+            false,
+        );
+
+        let mut pre_resolved = HashMap::new();
+        pre_resolved.insert(
+            "handyr".to_string(),
+            PackageInfo {
+                name: "handyr".to_string(),
+                version: Version::parse("1.5.0").unwrap(),
+                source: PackageSource::GitHub,
+                checksum: None,
+                requires: vec![],
+                url: "https://api.github.com/...".to_string(),
+                raw_version: None,
+                system_requirements: None,
+            },
+        );
+
+        let lockfile = resolver
+            .resolve(&manifest, None, pre_resolved)
+            .expect("resolve should succeed when pre_resolved version satisfies");
+        let handyr = lockfile.get_package("handyr").unwrap();
+        assert_eq!(handyr.version, "1.5.0");
+        assert_eq!(handyr.source, PackageSource::GitHub);
     }
 
     #[test]

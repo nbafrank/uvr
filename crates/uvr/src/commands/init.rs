@@ -123,12 +123,38 @@ const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- file.path(getwd(), ".uvr", "library")
   lock <- file.path(getwd(), "uvr.lock")
+  rver_file <- file.path(getwd(), ".r-version")
   count_locked <- function(path) {
     if (!file.exists(path)) return(0L)
     length(grep("^\\[\\[package\\]\\]", readLines(path, warn = FALSE)))
   }
+  # #70 follow-up: warn when the active R session minor doesn't match
+  # the project's `.r-version` pin. The CLI's `uvr sync` already refuses
+  # to wipe-and-rebuild on a minor mismatch since v0.2.19, but a user
+  # who *just* opens R against the project (no sync yet) wouldn't see
+  # that warning and could be running scripts under the wrong R for
+  # ages. Surface it at session startup so the mismatch is visible
+  # immediately.
+  if (file.exists(rver_file)) {
+    pinned <- tryCatch(trimws(readLines(rver_file, warn = FALSE)[1]),
+                       error = function(e) "")
+    if (nzchar(pinned)) {
+      active <- as.character(getRversion())
+      pinned_minor <- paste(strsplit(pinned, "\\.")[[1]][1:2], collapse = ".")
+      active_minor <- paste(strsplit(active, "\\.")[[1]][1:2], collapse = ".")
+      if (pinned_minor != active_minor) {
+        message("uvr: R ", active, " active but .r-version pins ", pinned,
+                ". Restart R against the pinned version, or run uvr::r_pin() to change the pin.")
+      }
+    }
+  }
   if (dir.exists(lib)) {
-    .libPaths(lib)
+    # #17: `.libPaths(lib)` with a single new path causes R to drop the
+    # user's site library (e.g. ~/R/x86_64-pc-linux-gnu-library/4.4) —
+    # only the new path and the system library survive. Prepending via
+    # `unique(c(lib, .libPaths()))` keeps the project lib first (so it
+    # wins resolution) while preserving anything the user already had.
+    .libPaths(unique(c(lib, .libPaths())))
     n_locked <- count_locked(lock)
     installed <- list.dirs(lib, recursive = FALSE, full.names = FALSE)
     n_installed <- length(setdiff(installed, "uvr"))

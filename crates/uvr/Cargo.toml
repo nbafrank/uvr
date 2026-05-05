@@ -33,6 +33,8 @@ which.workspace = true
 semver.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
+regex.workspace = true
+ignore.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 # Embed a Win32 application manifest declaring `supportedOS` GUIDs from
