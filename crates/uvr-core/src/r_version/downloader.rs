@@ -236,10 +236,8 @@ pub async fn download_and_install_r(
     version: &str,
     platform: Platform,
 ) -> Result<PathBuf> {
-    let install_dir = dirs::home_dir()
-        .ok_or_else(|| UvrError::Other("Cannot determine home directory".into()))?
-        .join(".uvr")
-        .join("r-versions")
+    let install_dir = crate::config::r_versions_dir()
+        .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?
         .join(version);
 
     let r_binary_name = if platform.is_windows() { "R.exe" } else { "R" };

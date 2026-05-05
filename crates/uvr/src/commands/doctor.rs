@@ -324,10 +324,8 @@ fn check_project(issues: &mut Vec<String>) {
 }
 
 fn check_cache() {
-    let cache_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".uvr")
-        .join("cache");
+    let cache_dir = uvr_core::config::cache_dir()
+        .unwrap_or_default();
     if cache_dir.exists() {
         let (count, size) = dir_stats(&cache_dir);
         ui::check(

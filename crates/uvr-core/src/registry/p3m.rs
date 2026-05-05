@@ -370,10 +370,8 @@ pub fn ppm_linux_codename(posit_slug: &str) -> Option<&'static str> {
 
 fn cache_path(r_minor: &str, key: &str) -> PathBuf {
     let date = Local::now().format("%Y-%m-%d").to_string();
-    dirs::home_dir()
+    crate::config::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("cache")
         .join(format!("p3m-{r_minor}-{key}-{date}.txt"))
 }
 

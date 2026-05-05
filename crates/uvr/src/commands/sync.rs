@@ -28,7 +28,7 @@ pub async fn run(
 ) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     // CLI --library takes precedence, then UVR_LIBRARY env var.
-    let library = library.or_else(|| std::env::var("UVR_LIBRARY").ok().map(PathBuf::from));
+    let library = library.or_else(uvr_core::config::library);
     run_inner(&project, frozen, no_dev, jobs, library.as_deref(), timeout).await
 }
 
@@ -324,10 +324,8 @@ pub async fn install_from_lockfile(
             }
         }
     }
-    let cache_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("cache");
+    let cache_dir = uvr_core::config::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."));
 
     // Use the R binary resolved at the top of install_from_lockfile.
     let (r_binary, r_version_str) = r_info
@@ -693,10 +691,8 @@ pub fn ensure_companion_package(
         let _ = std::fs::remove_dir_all(library.join("uvr"));
     }
 
-    let cache_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("cache");
+    let cache_dir = uvr_core::config::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&cache_dir);
     let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
 

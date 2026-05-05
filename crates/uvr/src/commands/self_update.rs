@@ -93,9 +93,18 @@ pub async fn run(check_only: bool) -> Result<()> {
 
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
-    let bin_dir = current_exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine binary directory"))?;
+    
+    let bin_dir = uvr_core::config::install_dir().unwrap_or_else(|| {
+        current_exe
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    });
+
+    // Make sure bin_dir exists
+    if let Err(e) = std::fs::create_dir_all(&bin_dir) {
+        anyhow::bail!("Failed to create install directory {}: {e}", bin_dir.display());
+    }
 
     let bin_name = if cfg!(target_os = "windows") {
         "uvr.exe"
@@ -108,7 +117,7 @@ pub async fn run(check_only: bool) -> Result<()> {
     // Replace the current binary atomically:
     // 1. Write new binary to a temp file in the same directory (atomic within filesystem)
     // 2. Rename old → old.bak, new → current
-    let mut tmp_file = tempfile::NamedTempFile::new_in(bin_dir)
+    let mut tmp_file = tempfile::NamedTempFile::new_in(&bin_dir)
         .context("Failed to create temp file for new binary")?;
     std::io::Write::write_all(&mut tmp_file, &new_binary).context("Failed to write new binary")?;
     let tmp_path = tmp_file.into_temp_path();
@@ -119,16 +128,23 @@ pub async fn run(check_only: bool) -> Result<()> {
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
+    let target_exe = bin_dir.join(bin_name);
     let backup_path = bin_dir.join(format!("{bin_name}.bak"));
     // Remove old backup if exists
     let _ = std::fs::remove_file(&backup_path);
 
     // On Windows, a running binary can't be deleted but CAN be renamed.
-    // Move current → backup, then move new → current.
-    std::fs::rename(&current_exe, &backup_path).context("Failed to back up current binary")?;
-    if let Err(e) = tmp_path.persist(&current_exe) {
+    // If target_exe exists, back it up so we can overwrite it.
+    if target_exe.exists() {
+        std::fs::rename(&target_exe, &backup_path).context("Failed to back up current binary")?;
+    }
+
+    if let Err(e) = tmp_path.persist(&target_exe) {
         // Restore from backup on failure
-        let _ = std::fs::rename(&backup_path, &current_exe);
+        if target_exe.exists() { // it shouldn't, but just in case
+            let _ = std::fs::remove_file(&target_exe);
+        }
+        let _ = std::fs::rename(&backup_path, &target_exe);
         return Err(anyhow::Error::from(e).context("Failed to replace binary"));
     }
 
