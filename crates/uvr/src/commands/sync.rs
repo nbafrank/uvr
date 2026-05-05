@@ -170,12 +170,25 @@ pub async fn install_from_lockfile(
 
         if lockfile_mismatch || sentinel_mismatch {
             let from = sentinel_minor.unwrap_or(locked_minor);
+            // #85: clarify it's the *project* library being wiped (not the
+            // global cache); confirm before destructive actions when stdin
+            // is a TTY so a misdetected R version doesn't silently nuke
+            // hand-built packages (B-Nilson's case where Matrix and s2 had
+            // been custom-built per #52).
             ui::warn(format!(
-                "R version changed ({} {} {}) — wiping library and reinstalling",
+                "R version changed ({} {} {}) — about to wipe project library and reinstall",
                 palette::dim(&from),
                 palette::dim(ui::glyph::arrow()),
                 palette::info(&current_minor),
             ));
+            if !confirm_library_wipe(&library)? {
+                anyhow::bail!(
+                    "Aborted: not wiping project library. \
+                     If the R version detection is wrong, point uvr at the right R \
+                     (e.g. `uvr r pin {current_minor}` if your active R is {current_minor}.x) \
+                     and re-run `uvr sync`."
+                );
+            }
             if library.exists() {
                 std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
             }
@@ -894,6 +907,39 @@ fn r_minor(version: &str) -> String {
     } else {
         version.to_string()
     }
+}
+
+/// Prompt before wiping the project library — destructive action that
+/// nukes hand-built or pinned-version packages a user may have spent
+/// real time on (B-Nilson's case in #85, where Matrix + s2 were custom
+/// builds). Skipped when stdin is not a TTY so CI / scripts run as
+/// before. The non-interactive default if the user just hits Enter is
+/// "no" — losing work to a missed prompt is worse than asking twice.
+fn confirm_library_wipe(library: &std::path::Path) -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    let count = std::fs::read_dir(library)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.file_name() != ".uvr-r-version")
+                .count()
+        })
+        .unwrap_or(0);
+    eprint!(
+        "  Wipe project library at {} ({count} package(s))? [y/N] ",
+        library.display()
+    );
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Major.minor of the R session that invoked uvr, if any. Read from
