@@ -151,7 +151,7 @@ fn has_scannable_extension(path: &Path) -> bool {
     )
 }
 
-/// Compiled regexes for the four R-package name patterns.
+/// Compiled regexes for the R-package name patterns we recognise.
 ///
 /// Patterns are intentionally conservative — we want few false positives
 /// even at the cost of a few false negatives. Comment lines that contain
@@ -161,6 +161,7 @@ fn has_scannable_extension(path: &Path) -> bool {
 struct PackageDetector {
     library_or_require: Regex,
     namespace_op: Regex,
+    roxygen_import: Regex,
 }
 
 impl PackageDetector {
@@ -179,9 +180,18 @@ impl PackageDetector {
         let namespace_op =
             Regex::new(r"\b([A-Za-z][A-Za-z0-9._]*):{2,3}[A-Za-z._]").expect(":: regex compiles");
 
+        // roxygen2 `#' @import pkg` and `#' @importFrom pkg fn1 fn2`. Real
+        // package source trees often declare deps exclusively via these
+        // tags — without this, `uvr scan` returns "no references found"
+        // for any package that doesn't `library()` its own deps (post-
+        // bundle review).
+        let roxygen_import = Regex::new(r"#'\s*@import(?:From)?\s+([A-Za-z][A-Za-z0-9._]*)")
+            .expect("roxygen import regex compiles");
+
         Self {
             library_or_require,
             namespace_op,
+            roxygen_import,
         }
     }
 
@@ -193,6 +203,11 @@ impl PackageDetector {
             }
         }
         for cap in self.namespace_op.captures_iter(content) {
+            if let Some(name) = cap.get(1) {
+                found.insert(name.as_str().to_string());
+            }
+        }
+        for cap in self.roxygen_import.captures_iter(content) {
             if let Some(name) = cap.get(1) {
                 found.insert(name.as_str().to_string());
             }
@@ -248,6 +263,31 @@ mixed <- dplyr::filter(df) |> tidyr::pivot_longer()
         let src = "# some comment with :: in it\nx <- 1::5\n"; // R doesn't parse `1::5` as a pkg ref
         let found = detector.extract(src);
         assert!(found.is_empty(), "got {found:?}");
+    }
+
+    #[test]
+    fn extract_roxygen_imports() {
+        // Package source trees often declare deps purely via roxygen2
+        // tags, never calling library() in their own .R files. Without
+        // this regex, `uvr scan` reports nothing for those packages.
+        let detector = PackageDetector::new();
+        let src = "\
+#' @importFrom dplyr filter mutate
+#' @importFrom rlang .data
+#' @import ggplot2
+#' @importFrom stats predict
+my_fn <- function() NULL
+";
+        let found = detector.extract(src);
+        assert!(found.contains("dplyr"), "got {found:?}");
+        assert!(found.contains("rlang"), "got {found:?}");
+        assert!(found.contains("ggplot2"), "got {found:?}");
+        assert!(found.contains("stats"), "got {found:?}");
+        // The function names after `@importFrom <pkg>` must NOT be
+        // captured as packages.
+        assert!(!found.contains("filter"), "got {found:?}");
+        assert!(!found.contains("mutate"), "got {found:?}");
+        assert!(!found.contains("predict"), "got {found:?}");
     }
 
     #[test]

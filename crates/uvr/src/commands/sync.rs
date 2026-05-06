@@ -141,40 +141,56 @@ pub async fn install_from_lockfile(
         let current_minor = r_minor(current_r);
         let locked_minor = r_minor(&lockfile.r.version);
         let sentinel_minor = read_library_r_sentinel(&library);
-
-        // #70 guard — must fire BEFORE the wipe check, not inside it. A library
-        // already at `current_minor` (sentinel matches) skips the wipe but still
-        // installs new packages under the resolved R. From a calling R session
-        // on a different minor, those packages are unloadable in the live
-        // session. Bail unconditionally when the calling R differs from the
-        // R uvr would install for. Terminal-invoked uvr (R_HOME unset) returns
-        // None from calling_r_minor() and proceeds normally.
-        if let Some(calling_minor) = calling_r_minor() {
-            if calling_minor != current_minor {
-                anyhow::bail!(
-                    "Refusing to install: uvr is running inside R {calling} but the project pin/lockfile \
-                     resolves to R {target}. Packages built for R {target} would not load in this {calling} \
-                     session. Restart R against {target} (e.g. point your IDE at \
-                     ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
-                     then re-run `uvr sync`.",
-                    calling = calling_minor,
-                    target = current_minor,
-                    target_full = current_r,
-                );
-            }
-        }
+        let calling_minor_opt = calling_r_minor();
 
         let lockfile_mismatch =
             looks_like_version(&lockfile.r.version) && current_minor != locked_minor;
         let sentinel_mismatch = sentinel_minor.as_ref().is_some_and(|m| m != &current_minor);
+        let wipe_needed = lockfile_mismatch || sentinel_mismatch;
+        let calling_mismatch = calling_minor_opt
+            .as_ref()
+            .is_some_and(|c| c != &current_minor);
 
-        if lockfile_mismatch || sentinel_mismatch {
+        // Two destructive risks to surface:
+        //   - sentinel/lockfile mismatch → about to wipe the project library
+        //   - calling R minor != install target → rebuilt library would not
+        //     load in the calling R session (#70).
+        // Pre-#85, the calling-R bail fired before the wipe-confirm prompt,
+        // making the prompt unreachable in the most common pinned-R-mismatch
+        // case (post-bundle review). Combine both signals into a single
+        // message + confirm path so the user sees one clear story.
+        if wipe_needed && calling_mismatch {
+            let from = sentinel_minor.clone().unwrap_or(locked_minor.clone());
+            let calling = calling_minor_opt.as_deref().unwrap_or("?");
+            ui::warn(format!(
+                "R version changed ({} {} {}) — about to wipe project library and reinstall, \
+                 but uvr is running inside R {calling} so the rebuilt library would NOT load in this session",
+                palette::dim(&from),
+                palette::dim(ui::glyph::arrow()),
+                palette::info(&current_minor),
+            ));
+            if !confirm_library_wipe(&library)? {
+                anyhow::bail!(
+                    "Aborted: not wiping project library. Restart R against the install target \
+                     (e.g. point your IDE at ~/.uvr/r-versions/{current_r}/bin/R) and re-run \
+                     `uvr sync`, or update the pin so it matches this {calling} session."
+                );
+            }
+            // User explicitly accepted — proceed with wipe + reinstall, but
+            // bail with the calling-R explanation before installing into a
+            // mismatched session (the rebuilt library still won't load here).
+            anyhow::bail!(
+                "Refusing to install: uvr is running inside R {calling} but the lockfile resolves \
+                 to R {target}. Restart R against {target} (e.g. point your IDE at \
+                 ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
+                 then re-run `uvr sync`. (Project library left intact — accepted wipe will run \
+                 on the next sync from the matching R.)",
+                calling = calling,
+                target = current_minor,
+                target_full = current_r,
+            );
+        } else if wipe_needed {
             let from = sentinel_minor.unwrap_or(locked_minor);
-            // #85: clarify it's the *project* library being wiped (not the
-            // global cache); confirm before destructive actions when stdin
-            // is a TTY so a misdetected R version doesn't silently nuke
-            // hand-built packages (B-Nilson's case where Matrix and s2 had
-            // been custom-built per #52).
             ui::warn(format!(
                 "R version changed ({} {} {}) — about to wipe project library and reinstall",
                 palette::dim(&from),
@@ -193,6 +209,22 @@ pub async fn install_from_lockfile(
                 std::fs::remove_dir_all(&library).context("Failed to wipe project library")?;
             }
             std::fs::create_dir_all(&library).context("Failed to recreate library directory")?;
+        } else if calling_mismatch {
+            // #70 guard — pure-bail path when no wipe is needed (library is
+            // empty or sentinel matches current_minor). The bail is correct:
+            // installing new packages under R `current` would still produce
+            // artefacts unloadable in the calling `calling` session.
+            let calling = calling_minor_opt.as_deref().unwrap_or("?");
+            anyhow::bail!(
+                "Refusing to install: uvr is running inside R {calling} but the project pin/lockfile \
+                 resolves to R {target}. Packages built for R {target} would not load in this {calling} \
+                 session. Restart R against {target} (e.g. point your IDE at \
+                 ~/.uvr/r-versions/{target_full}/bin/R), or update the pin to match this session, \
+                 then re-run `uvr sync`.",
+                calling = calling,
+                target = current_minor,
+                target_full = current_r,
+            );
         }
     }
 
