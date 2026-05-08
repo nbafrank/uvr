@@ -30,7 +30,7 @@ enum ProgressMode {
 }
 
 fn progress_mode() -> ProgressMode {
-    match uvr_core::config::progress().as_deref() {
+    match uvr_core::env_vars::progress().as_deref() {
         Some("always") | Some("1") | Some("true") => {
             // If stderr happens to be a real TTY, prefer Auto so indicatif's
             // own TTY-aware code path manages refresh rate and shutdown.

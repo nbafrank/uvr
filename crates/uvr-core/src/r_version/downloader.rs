@@ -236,7 +236,7 @@ pub async fn download_and_install_r(
     version: &str,
     platform: Platform,
 ) -> Result<PathBuf> {
-    let install_dir = crate::config::r_versions_dir()
+    let install_dir = crate::env_vars::r_install_dir()
         .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?
         .join(version);
 

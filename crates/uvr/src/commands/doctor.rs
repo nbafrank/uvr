@@ -34,6 +34,9 @@ pub fn run() -> Result<()> {
     ui::section("Cache");
     check_cache();
 
+    ui::section("Environment");
+    check_env_vars();
+
     println!();
     if issues.is_empty() {
         ui::success("All checks passed — you're good to go.");
@@ -324,8 +327,7 @@ fn check_project(issues: &mut Vec<String>) {
 }
 
 fn check_cache() {
-    let cache_dir = uvr_core::config::cache_dir()
-        .unwrap_or_default();
+    let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_default();
     if cache_dir.exists() {
         let (count, size) = dir_stats(&cache_dir);
         ui::check(
@@ -384,4 +386,18 @@ fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
         }
     }
     (count, size)
+}
+
+fn check_env_vars() {
+    let print_env_path = |name: &str, val: Option<std::path::PathBuf>| {
+        let msg = match val {
+            Some(p) => palette::dim(p.display().to_string()).to_string(),
+            None => palette::dim("not set").to_string(),
+        };
+        ui::check(true, name, msg, LABEL_W);
+    };
+
+    print_env_path("UVR_INSTALL_DIR", uvr_core::env_vars::install_dir());
+    print_env_path("UVR_R_INSTALL_DIR", uvr_core::env_vars::r_install_dir());
+    print_env_path("UVR_CACHE_DIR", uvr_core::env_vars::cache_dir());
 }

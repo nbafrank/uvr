@@ -36,7 +36,7 @@ pub fn effective_install_timeout(explicit: Option<Duration>) -> Duration {
     if let Some(d) = explicit {
         return d;
     }
-    if let Some(env) = crate::config::install_timeout() {
+    if let Some(env) = crate::env_vars::install_timeout() {
         if let Some(d) = parse_install_timeout(&env) {
             return d;
         }

@@ -1,6 +1,6 @@
 pub mod checksum;
-pub mod config;
 pub mod dcf;
+pub mod env_vars;
 pub mod error;
 pub mod installer;
 pub mod lockfile;

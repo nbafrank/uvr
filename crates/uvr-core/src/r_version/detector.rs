@@ -24,7 +24,7 @@ pub fn find_all() -> Vec<RInstallation> {
     };
 
     // Managed installations in ~/.uvr/r-versions/
-    if let Some(versions_dir) = crate::config::r_versions_dir() {
+    if let Some(versions_dir) = crate::env_vars::r_install_dir() {
         if let Ok(entries) = std::fs::read_dir(&versions_dir) {
             for entry in entries.flatten() {
                 let bin = entry.path().join("bin").join(r_name);

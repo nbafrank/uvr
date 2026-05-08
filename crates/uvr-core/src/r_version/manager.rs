@@ -43,7 +43,7 @@ impl RManager {
         {
             return Err(UvrError::Other(format!("Invalid R version: {version:?}")));
         }
-        let install_dir = crate::config::r_versions_dir()
+        let install_dir = crate::env_vars::r_install_dir()
             .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?
             .join(version);
         if !install_dir.exists() {
