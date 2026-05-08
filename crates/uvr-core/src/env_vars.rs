@@ -60,8 +60,8 @@ pub fn library() -> Option<PathBuf> {
 ///
 /// Controls the visibility of progress bars and spinners in the terminal.
 /// Acceptable settings:
-/// - `always`, `1`, `true`: Forces progress to be drawn, bypassing TTY checks (useful for SSH).
-/// - `never`, `0`, `false`: Forces progress to be hidden (useful for CI logs).
+///     - `always`, `1`, `true`: Forces progress to be drawn, bypassing TTY checks (useful for SSH).
+///     - `never`, `0`, `false`: Forces progress to be hidden (useful for CI logs).
 /// Defaults to automatically detecting a TTY.
 pub fn progress() -> Option<String> {
     read_env_var("UVR_PROGRESS")
