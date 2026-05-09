@@ -196,6 +196,15 @@ pub struct SyncArgs {
     /// (override via `UVR_INSTALL_TIMEOUT`).
     #[arg(long, value_name = "DURATION")]
     pub timeout: Option<String>,
+
+    /// When missing system libraries are detected, run the platform's
+    /// package manager (`apk add` / `apt-get install` / `dnf install`)
+    /// to install them automatically (#30). Also enabled by setting
+    /// `UVR_INSTALL_SYSREQS=1`. Without this flag, uvr only prints a
+    /// hint with the install command. Interactive sessions are
+    /// prompted for confirmation; non-TTY runs (CI) proceed without.
+    #[arg(long)]
+    pub install_system_deps: bool,
 }
 
 // ────────────────────────────────────────────────────────────

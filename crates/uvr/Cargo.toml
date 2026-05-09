@@ -36,6 +36,9 @@ ureq.workspace = true
 regex.workspace = true
 ignore.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.build-dependencies]
 # Embed a Win32 application manifest declaring `supportedOS` GUIDs from
 # Windows 7 through Windows 11. Without this, recent Windows 11 builds

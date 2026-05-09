@@ -355,15 +355,69 @@ pub async fn install_from_lockfile(
                         ),
                         body,
                     );
-                    let install_cmd = if which::which("apk").is_ok() {
-                        format!("apk add {}", all_pkgs.join(" "))
-                    } else if which::which("dnf").is_ok() {
-                        format!("sudo dnf install -y {}", all_pkgs.join(" "))
-                    } else {
-                        format!("sudo apt-get install -y {}", all_pkgs.join(" "))
+                    // Pick the platform's installer (returns None when sudo
+                    // is needed but missing — reviewer-flagged regression
+                    // in minimal containers). For the display hint, fall
+                    // back to a manual command shape so the user still has
+                    // an actionable line even when uvr can't run it.
+                    let installer = pick_sysreqs_installer(&all_pkgs);
+                    let install_cmd_display = match &installer {
+                        Some((prog, args)) => format!("{} {}", prog, args.join(" ")),
+                        None => {
+                            if which::which("apk").is_ok() {
+                                format!("apk add {}", all_pkgs.join(" "))
+                            } else if which::which("dnf").is_ok() {
+                                format!("dnf install -y {}", all_pkgs.join(" "))
+                            } else {
+                                format!("apt-get install -y {}", all_pkgs.join(" "))
+                            }
+                        }
                     };
-                    ui::hint(format!("Install with: {install_cmd}"));
-                    ui::hint("Continuing — some packages may fail to compile without these.");
+
+                    let want_run = sysreqs_install_enabled();
+                    match (want_run, installer) {
+                        (true, None) => {
+                            ui::warn(
+                                "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
+                            );
+                            ui::hint(format!("Install manually: {install_cmd_display}"));
+                            ui::hint("Or run uvr as root in this container.");
+                        }
+                        (true, Some((install_program, install_args))) => {
+                            if confirm_sysreqs_install(&install_cmd_display)? {
+                                ui::info(format!("Running: {install_cmd_display}"));
+                                let status = std::process::Command::new(&install_program)
+                                    .args(&install_args)
+                                    .status()
+                                    .with_context(|| {
+                                        format!("Failed to spawn {install_program}")
+                                    })?;
+                                if !status.success() {
+                                    anyhow::bail!(
+                                        "System dependency install failed (exit {}). \
+                                         Re-run `{install_cmd_display}` manually or \
+                                         install the listed libraries before retrying `uvr sync`.",
+                                        status.code().unwrap_or(-1)
+                                    );
+                                }
+                                ui::success("System dependencies installed.");
+                            } else {
+                                ui::hint(format!("Install with: {install_cmd_display}"));
+                                ui::hint(
+                                    "Continuing — some packages may fail to compile without these.",
+                                );
+                            }
+                        }
+                        (false, _) => {
+                            ui::hint(format!("Install with: {install_cmd_display}"));
+                            ui::hint(
+                                "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
+                            );
+                            ui::hint(
+                                "Continuing — some packages may fail to compile without these.",
+                            );
+                        }
+                    }
                     eprintln!();
                 }
             }
@@ -941,6 +995,95 @@ fn r_minor(version: &str) -> String {
     }
 }
 
+/// `--install-system-deps` flag or `UVR_INSTALL_SYSREQS=1` env var
+/// (#30). Both opt-in — uvr never auto-runs the system package manager
+/// without explicit consent because that crosses a "writes outside the
+/// project tree" line. Linux-only because the system-deps install path
+/// itself is `cfg(linux)` — macOS uses brew (out of uvr's scope) and
+/// Windows source builds need a separate Rtools story.
+#[cfg(target_os = "linux")]
+fn sysreqs_install_enabled() -> bool {
+    matches!(
+        std::env::var("UVR_INSTALL_SYSREQS").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
+}
+
+/// True when the effective UID is 0 (root). Used to decide whether the
+/// system package manager invocation needs a `sudo` prefix.
+#[cfg(target_os = "linux")]
+fn is_effective_root() -> bool {
+    // SAFETY: geteuid() takes no arguments, has no side effects, and
+    // is always present on Linux.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Pick the platform's package manager + install args, gated on whether
+/// the elevation mechanism we'd need is actually available.
+///
+/// Returns `None` when the only path forward would hard-fail (e.g.,
+/// non-root user with no `sudo` on PATH — minimal containers, distroless
+/// images). The caller falls back to print-the-hint behaviour rather
+/// than spawning a process that's guaranteed to error with a confusing
+/// message (#30 review: missing-sudo regression).
+///
+/// `apk` (Alpine) historically didn't get a `sudo` prefix because Alpine
+/// is typically root-in-container. The reviewer-flagged footgun: non-
+/// container Alpine, rootless Docker, podman-rootless setups run apk as
+/// a non-root user, which fails with a permission error and no
+/// diagnostic. Same "sudo when not root" rule now applies across all
+/// three package managers.
+#[cfg(target_os = "linux")]
+fn pick_sysreqs_installer(packages: &[&str]) -> Option<(String, Vec<String>)> {
+    let pkgs: Vec<String> = packages.iter().map(|p| p.to_string()).collect();
+    let needs_sudo = !is_effective_root();
+    if needs_sudo && which::which("sudo").is_err() {
+        return None;
+    }
+
+    let (pkg_mgr, install_args): (&str, Vec<&str>) = if which::which("apk").is_ok() {
+        ("apk", vec!["add"])
+    } else if which::which("dnf").is_ok() {
+        ("dnf", vec!["install", "-y"])
+    } else {
+        ("apt-get", vec!["install", "-y"])
+    };
+
+    if needs_sudo {
+        let mut args = vec![pkg_mgr.to_string()];
+        args.extend(install_args.into_iter().map(|s| s.to_string()));
+        args.extend(pkgs);
+        Some(("sudo".to_string(), args))
+    } else {
+        let mut args: Vec<String> = install_args.into_iter().map(|s| s.to_string()).collect();
+        args.extend(pkgs);
+        Some((pkg_mgr.to_string(), args))
+    }
+}
+
+/// Prompt before invoking the system package manager. Same TTY-only
+/// pattern as `confirm_library_wipe` — non-interactive sessions
+/// (CI, scripts) proceed without prompting since the user opted in via
+/// `--install-system-deps` / env var. Default on missed input is "no"
+/// so a fat-finger doesn't run `sudo apt-get install` unattended.
+#[cfg(target_os = "linux")]
+fn confirm_sysreqs_install(cmd: &str) -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    eprint!("  Run `{cmd}`? [y/N] ");
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// Prompt before wiping the project library — destructive action that
 /// nukes hand-built or pinned-version packages a user may have spent
 /// real time on (B-Nilson's case in #85, where Matrix + s2 were custom
@@ -1046,6 +1189,59 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
 mod tests {
     use super::*;
     use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+    // Env-var manipulation must be serialised across the process — Rust
+    // tests run in parallel by default and `set_var` is global. Using a
+    // mutex per the standard idiom; one test for every accepted/rejected
+    // value to avoid the consolidated-test panic-leak issue from PR #79.
+    #[cfg(target_os = "linux")]
+    static SYSREQS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    fn with_sysreqs_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let _guard = SYSREQS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("UVR_INSTALL_SYSREQS").ok();
+        match value {
+            Some(v) => std::env::set_var("UVR_INSTALL_SYSREQS", v),
+            None => std::env::remove_var("UVR_INSTALL_SYSREQS"),
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match prev {
+            Some(v) => std::env::set_var("UVR_INSTALL_SYSREQS", v),
+            None => std::env::remove_var("UVR_INSTALL_SYSREQS"),
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sysreqs_install_enabled_accepts_truthy_values() {
+        for v in ["1", "true", "yes", "TRUE", "YES"] {
+            with_sysreqs_env(Some(v), || {
+                assert!(sysreqs_install_enabled(), "expected truthy for {v:?}");
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sysreqs_install_enabled_rejects_other_values() {
+        for v in ["", "0", "false", "no", "True", "off", "anything"] {
+            with_sysreqs_env(Some(v), || {
+                assert!(!sysreqs_install_enabled(), "expected falsy for {v:?}");
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sysreqs_install_enabled_default_is_false() {
+        with_sysreqs_env(None, || {
+            assert!(!sysreqs_install_enabled());
+        });
+    }
 
     #[test]
     fn r_minor_three_component() {
