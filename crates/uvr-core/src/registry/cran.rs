@@ -70,6 +70,44 @@ pub struct DepConstraint {
     pub req: Option<VersionReq>,
 }
 
+/// Parsed `Built:` field from a CRAN PACKAGES entry. Present on binary
+/// builds; absent on source-only entries.
+///
+/// Canonical format (semicolon-separated, four fields):
+///
+///     R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+///
+/// Extra fields beyond the fourth are ignored. The build date is stored
+/// raw and not validated — kept only for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltInfo {
+    pub r_version: String,
+    pub platform: String,
+    pub date: String,
+    pub os_family: String,
+}
+
+/// Parse a `Built:` field. Lenient: returns `None` on anything that doesn't
+/// look like a binary-build marker (missing `R` prefix, fewer than four
+/// fields, etc.). Treats unparseable as "not a binary".
+pub fn parse_built(s: &str) -> Option<BuiltInfo> {
+    let parts: Vec<&str> = s.split(';').map(|p| p.trim()).collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let r_field = parts[0];
+    let r_version = r_field.strip_prefix("R ")?.trim().to_string();
+    if r_version.is_empty() {
+        return None;
+    }
+    Some(BuiltInfo {
+        r_version,
+        platform: parts[1].to_string(),
+        date: parts[2].to_string(),
+        os_family: parts[3].to_string(),
+    })
+}
+
 /// In-memory CRAN index.
 #[derive(Debug, Default)]
 pub struct CranIndex {
@@ -545,5 +583,44 @@ MD5sum: def789
         let dcf2 = "Package: dplyr\nVersion: 1.1.4\nMD5sum: def\n";
         let entry2 = parse_dcf_block(dcf2).unwrap();
         assert!(entry2.system_requirements.is_none());
+    }
+
+    #[test]
+    fn parse_built_canonical() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix").unwrap();
+        assert_eq!(b.r_version, "4.5.0");
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
+        assert_eq!(b.date, "2025-01-15 12:00:00 UTC");
+        assert_eq!(b.os_family, "unix");
+    }
+
+    #[test]
+    fn parse_built_extra_fields_ignored() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix; extra; junk").unwrap();
+        assert_eq!(b.os_family, "unix");
+    }
+
+    #[test]
+    fn parse_built_too_few_fields_returns_none() {
+        assert!(parse_built("R 4.5.0; x86_64-pc-linux-musl").is_none());
+        assert!(parse_built("R 4.5.0; x86_64; 2025-01-15").is_none());
+    }
+
+    #[test]
+    fn parse_built_no_r_prefix_returns_none() {
+        assert!(parse_built("4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").is_none());
+    }
+
+    #[test]
+    fn parse_built_unparseable_returns_none() {
+        assert!(parse_built("garbage").is_none());
+        assert!(parse_built("").is_none());
+    }
+
+    #[test]
+    fn parse_built_with_whitespace_around_separators() {
+        let b = parse_built("R 4.5.0 ; x86_64-pc-linux-musl ; 2025-01-15 ; unix").unwrap();
+        assert_eq!(b.r_version, "4.5.0");
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
     }
 }
