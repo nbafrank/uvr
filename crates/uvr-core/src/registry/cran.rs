@@ -89,7 +89,9 @@ pub struct DepConstraint {
 ///
 /// Canonical format (semicolon-separated, four fields):
 ///
-///     R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+/// ```text
+/// R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+/// ```
 ///
 /// Extra fields beyond the fourth are ignored. The build date is stored
 /// raw and not validated — kept only for diagnostics.

@@ -368,12 +368,20 @@ pub fn host_info(r_version: &str) -> HostInfo {
     host_info_from_os_release(content.as_deref(), platform, r_version)
 }
 
-/// Construct a User-Agent string in the format recommended by cran.rpkgs.com:
-/// `R/<ver> (<distro>) (<triple> <arch> <os>-<abi>)`.
+/// Construct a User-Agent string matching what real R sends via
+/// `getOption("HTTPUserAgent")`:
 ///
-/// PPM's UA gating per the comment in `registry/p3m.rs` looks for an R-shaped
-/// prefix and a `linux-{abi}` substring. This format satisfies both, so it
-/// works for P3M and custom sources alike.
+/// ```text
+/// R (<ver> <triple> <arch> <os>-<abi>)
+/// ```
+///
+/// Examples:
+/// - Alpine: `R (4.5.0 x86_64-pc-linux-musl x86_64 linux-musl)`
+/// - Ubuntu: `R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)`
+///
+/// PPM's UA gating requires this exact `R (` prefix; see the test in
+/// `registry/p3m.rs`. cran.rpkgs.com uses the platform triple substring
+/// (`linux-musl` vs `linux-gnu`) to route requests to the right binary.
 pub fn user_agent(info: &HostInfo) -> String {
     let HostTriple {
         arch,
@@ -382,8 +390,8 @@ pub fn user_agent(info: &HostInfo) -> String {
         abi,
     } = &info.triple;
     format!(
-        "R/{} ({}) ({}-{}-{}-{} {} {}-{})",
-        info.r_version, info.distro_label, arch, vendor, os, abi, arch, os, abi
+        "R ({} {}-{}-{}-{} {} {}-{})",
+        info.r_version, arch, vendor, os, abi, arch, os, abi
     )
 }
 
@@ -1734,7 +1742,7 @@ VERSION_ID=3.23
     }
 
     #[test]
-    fn user_agent_alpine_format_matches_rpkgs_docs() {
+    fn user_agent_alpine_matches_real_r() {
         let info = HostInfo {
             triple: HostTriple {
                 arch: "x86_64".into(),
@@ -1747,12 +1755,12 @@ VERSION_ID=3.23
         };
         assert_eq!(
             user_agent(&info),
-            "R/4.5.0 (Alpine Linux 3.23.4) (x86_64-pc-linux-musl x86_64 linux-musl)"
+            "R (4.5.0 x86_64-pc-linux-musl x86_64 linux-musl)"
         );
     }
 
     #[test]
-    fn user_agent_ubuntu_format() {
+    fn user_agent_ubuntu_matches_real_r() {
         let info = HostInfo {
             triple: HostTriple {
                 arch: "x86_64".into(),
@@ -1765,8 +1773,28 @@ VERSION_ID=3.23
         };
         assert_eq!(
             user_agent(&info),
-            "R/4.5.0 (Ubuntu 22.04) (x86_64-pc-linux-gnu x86_64 linux-gnu)"
+            "R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)"
         );
+    }
+
+    #[test]
+    fn user_agent_satisfies_ppm_gating() {
+        // PPM's UA gating in registry/p3m.rs sniffs for the literal "R (" prefix.
+        // Regression guard: any future change to user_agent() that drops this
+        // prefix will silently break P3M binary downloads on Ubuntu/Debian.
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "gnu".into(),
+            },
+            distro_label: "Ubuntu 22.04".into(),
+            r_version: "4.5.0".into(),
+        };
+        let ua = user_agent(&info);
+        assert!(ua.starts_with("R ("), "PPM gating requires 'R (' prefix; got: {ua}");
+        assert!(ua.contains("linux-gnu"));
     }
 
     #[test]
