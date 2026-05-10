@@ -83,6 +83,37 @@ fn select_pkg_plan<'a>(
     }
 }
 
+/// Re-fetch each `[[sources]]` registry. Each is a `CranRegistry` against
+/// the source's `url` (HTTP-cached via ETag/Last-Modified). Network failures
+/// without a cache mark that source non-binary-capable; failures with a cache
+/// use the cached PACKAGES.gz.
+async fn fetch_custom_registries(
+    client: &reqwest::Client,
+    sources: &[uvr_core::manifest::PackageSource],
+) -> Vec<uvr_core::registry::cran::CranRegistry> {
+    let mut out = Vec::new();
+    for src in sources {
+        match uvr_core::registry::cran::CranRegistry::fetch_custom(
+            client,
+            &src.name,
+            &src.url,
+            /* force_refresh */ false,
+        )
+        .await
+        {
+            Ok(reg) => out.push(reg),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch custom source '{}' ({}): {e}; treating as non-binary-capable",
+                    src.name,
+                    src.url,
+                );
+            }
+        }
+    }
+    out
+}
+
 pub async fn run(
     frozen: bool,
     no_dev: bool,
@@ -614,58 +645,88 @@ pub async fn install_from_lockfile(
     // binary package — silent breakage). Built once and attached per-spec
     // below.
     let detected_platform = Platform::detect();
+
+    // Build HostInfo once — used for UA construction and Built: matching.
+    let host_info = uvr_core::r_version::downloader::host_info(&r_minor_str);
+    let user_agent = uvr_core::r_version::downloader::user_agent(&host_info);
+    // For backward compat with downstream code expecting Option<String>:
     let linux_ppm_user_agent: Option<String> = match detected_platform {
-        Ok(p) if matches!(p, Platform::LinuxX86_64 | Platform::LinuxArm64) => {
-            let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
-            uvr_core::registry::p3m::ppm_linux_codename(&slug).map(|_| {
-                let arch = if matches!(p, Platform::LinuxX86_64) {
-                    "x86_64"
-                } else {
-                    "aarch64"
-                };
-                // R version is the project's actual minor, not a hardcoded
-                // string — future-proofs the UA against PPM tightening its
-                // sniffing rules.
-                format!("R ({r_minor_str}.0 {arch}-pc-linux-gnu {arch} linux-gnu)")
-            })
-        }
+        Ok(Platform::LinuxX86_64 | Platform::LinuxArm64) => Some(user_agent.clone()),
         _ => None,
     };
 
     let plans: Vec<PkgPlan> = if !cache_misses.is_empty() {
-        let p3m = match detected_platform {
-            Ok(platform) => {
-                // #55: Linux gets binaries via PPM's `__linux__/<codename>` URL
-                // space, gated by a User-Agent the registry sets internally.
-                // The slug is the same string we use for R install URLs;
-                // platform_info() inside p3m.rs translates it to PPM's
-                // codename system. None for non-Linux platforms.
-                let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
-                    Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
-                } else {
-                    None
-                };
-                P3MBinaryIndex::fetch(
-                    &client,
-                    &r_minor_str,
-                    platform,
-                    bioc_release,
-                    slug.as_deref(),
-                )
-                .await
-            }
-            Err(_) => P3MBinaryIndex::empty(),
-        };
+        // Re-fetch each [[sources]] (HTTP-cached → 304 normally) and partition
+        // into binary-capable vs. source-only. A registry is "binary-capable"
+        // when at least one of its PACKAGES entries has a Built: line that
+        // matches the running host triple + R minor.
+        let custom_registries =
+            fetch_custom_registries(&client, &project.manifest.sources).await;
+        let custom_binary: Vec<&uvr_core::registry::cran::CranRegistry> = custom_registries
+            .iter()
+            .filter(|r| r.is_binary_capable(&host_info.triple, &r_minor_str))
+            .collect();
 
-        let host = uvr_core::r_version::downloader::host_triple();
+        // (C) decision: any binary-capable custom source fully replaces P3M
+        // for this sync. P3M is not consulted at all.
+        let p3m = if custom_binary.is_empty() {
+            match detected_platform {
+                Ok(platform) => {
+                    let slug =
+                        if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
+                            Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
+                        } else {
+                            None
+                        };
+                    Some(
+                        P3MBinaryIndex::fetch(
+                            &client,
+                            &r_minor_str,
+                            platform,
+                            bioc_release,
+                            slug.as_deref(),
+                        )
+                        .await,
+                    )
+                }
+                Err(_) => Some(P3MBinaryIndex::empty()),
+            }
+        } else {
+            tracing::info!(
+                "Using {} binary-capable custom source(s); P3M suppressed.",
+                custom_binary.len()
+            );
+            None
+        };
 
         cache_misses
             .iter()
-            .map(|p| select_pkg_plan(p, &[], Some(&p3m), &host, &r_minor_str, bioc_release))
+            .map(|p| {
+                select_pkg_plan(
+                    p,
+                    &custom_binary,
+                    p3m.as_ref(),
+                    &host_info.triple,
+                    &r_minor_str,
+                    bioc_release,
+                )
+            })
             .collect()
     } else {
         Vec::new()
     };
+
+    // If absolutely no source supplied a binary URL for any package, emit
+    // one info line so the user understands why everything is compiling.
+    let no_binaries = plans.iter().all(|p| !p.is_binary) && !plans.is_empty();
+    if no_binaries {
+        println!(
+            "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
+            host_info.distro_label,
+            r_minor_str,
+            plans.len()
+        );
+    }
 
     // Guard against packages with no download URL.
     for plan in &plans {
