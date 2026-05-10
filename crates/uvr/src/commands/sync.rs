@@ -87,9 +87,13 @@ fn select_pkg_plan<'a>(
 /// the source's `url` (HTTP-cached via ETag/Last-Modified). Network failures
 /// without a cache mark that source non-binary-capable; failures with a cache
 /// use the cached PACKAGES.gz.
+///
+/// `user_agent` is forwarded on each PACKAGES.gz request so hosts like
+/// cran.rpkgs.com can route to the correct binary flavour based on the UA.
 async fn fetch_custom_registries(
     client: &reqwest::Client,
     sources: &[uvr_core::manifest::PackageSource],
+    user_agent: Option<&str>,
 ) -> Vec<uvr_core::registry::cran::CranRegistry> {
     let mut out = Vec::new();
     for src in sources {
@@ -98,6 +102,7 @@ async fn fetch_custom_registries(
             &src.name,
             &src.url,
             /* force_refresh */ false,
+            user_agent,
         )
         .await
         {
@@ -661,7 +666,8 @@ pub async fn install_from_lockfile(
         // when at least one of its PACKAGES entries has a Built: line that
         // matches the running host triple + R minor.
         let custom_registries =
-            fetch_custom_registries(&client, &project.manifest.sources).await;
+            fetch_custom_registries(&client, &project.manifest.sources, Some(user_agent.as_str()))
+                .await;
         let custom_binary: Vec<&uvr_core::registry::cran::CranRegistry> = custom_registries
             .iter()
             .filter(|r| r.is_binary_capable(&host_info.triple, &r_minor_str))
@@ -774,10 +780,13 @@ pub async fn install_from_lockfile(
                 url: &p.url,
                 fallback_url: p.fallback_url.as_deref(),
                 is_binary: p.is_binary,
-                // Attach the R-shaped UA only for Linux PPM binary URLs so
-                // PPM serves the binary tarball, not source. macOS / Windows
-                // / source-fallback paths leave it None (default uvr UA).
-                user_agent: if p.is_binary && p.url.contains("/__linux__/") {
+                // Attach the host R UA on Linux for any binary URL — P3M needs
+                // it for tarball serving (not just index), and custom binary
+                // sources may use UA to route between musl and gnu builds.
+                // Source URLs go through CRAN which doesn't gate on UA.
+                // `linux_ppm_user_agent` is None on macOS/Windows so this
+                // is still effectively Linux-only.
+                user_agent: if p.is_binary {
                     linux_ppm_user_agent.as_deref()
                 } else {
                     None

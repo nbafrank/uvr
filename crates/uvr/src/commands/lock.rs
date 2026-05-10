@@ -122,11 +122,12 @@ async fn resolve_lockfile(
     let custom_fut = async {
         let mut regs = Vec::new();
         for source in &project.manifest.sources {
-            let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade)
-                .await
-                .with_context(|| {
-                    format!("Failed to fetch index for repository '{}'", source.name)
-                })?;
+            let reg =
+                CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade, None)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to fetch index for repository '{}'", source.name)
+                    })?;
             regs.push(reg);
         }
         Ok::<_, anyhow::Error>(regs)

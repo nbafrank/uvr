@@ -247,17 +247,23 @@ impl CranRegistry {
             CRAN_SRC_BASE,
             PackageSource::Cran,
             force_refresh,
+            None,
         )
         .await
     }
 
     /// Fetch a CRAN-like index from any repository that serves PACKAGES.gz.
     /// Used for custom repositories like r-multiverse, r-universe, etc.
+    ///
+    /// `user_agent` is forwarded on every HTTP request so hosts like
+    /// cran.rpkgs.com can route to the correct binary flavour (musl vs gnu)
+    /// based on the R-shaped UA. Pass `None` to use the default client UA.
     pub async fn fetch_custom(
         client: &reqwest::Client,
         repo_name: &str,
         base_url: &str,
         force_refresh: bool,
+        user_agent: Option<&str>,
     ) -> Result<Self> {
         let base_url = base_url.trim_end_matches('/');
         let packages_url = format!("{base_url}/src/contrib/PACKAGES.gz");
@@ -276,6 +282,7 @@ impl CranRegistry {
                 name: repo_name.to_string(),
             },
             force_refresh,
+            user_agent,
         )
         .await
     }
@@ -330,6 +337,7 @@ impl CranRegistry {
         src_base: &str,
         source: PackageSource,
         force_refresh: bool,
+        user_agent: Option<&str>,
     ) -> Result<Self> {
         let cache_path = cache_path_for(cache_key);
         let has_cache = cache_path.exists();
@@ -338,6 +346,9 @@ impl CranRegistry {
         if !force_refresh && has_cache {
             if let Some((etag, last_modified)) = read_cache_meta(cache_key) {
                 let mut req = client.get(packages_url);
+                if let Some(ua) = user_agent {
+                    req = req.header(reqwest::header::USER_AGENT, ua);
+                }
                 if let Some(ref e) = etag {
                     req = req.header("If-None-Match", e.as_str());
                 }
@@ -429,7 +440,11 @@ impl CranRegistry {
 
         // No cache or force refresh — full download
         debug!("Downloading {} PACKAGES.gz...", cache_key);
-        let resp = client.get(packages_url).send().await?;
+        let mut req = client.get(packages_url);
+        if let Some(ua) = user_agent {
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(UvrError::Other(format!(
                 "Failed to fetch package index from {packages_url} (HTTP {})",
