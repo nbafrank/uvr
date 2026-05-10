@@ -389,15 +389,22 @@ fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
 }
 
 fn check_env_vars() {
-    let print_env_path = |name: &str, val: Option<std::path::PathBuf>| {
-        let msg = match val {
-            Some(p) => palette::dim(p.display().to_string()).to_string(),
-            None => palette::dim("not set").to_string(),
-        };
-        ui::check(true, name, msg, LABEL_W);
+    let print_env_path = |name: &str| {
+        let val = std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        match val {
+            Some(v) => {
+                let p = std::path::PathBuf::from(v);
+                let ok = p.exists();
+                let msg = palette::dim(p.display().to_string()).to_string();
+                ui::check(ok, name, msg, LABEL_W);
+            }
+            None => {
+                ui::bullet_dim(format!("{name:<LABEL_W$} not set"));
+            }
+        }
     };
 
-    print_env_path("UVR_INSTALL_DIR", uvr_core::env_vars::install_dir());
-    print_env_path("UVR_R_INSTALL_DIR", uvr_core::env_vars::r_install_dir());
-    print_env_path("UVR_CACHE_DIR", uvr_core::env_vars::cache_dir());
+    print_env_path("UVR_INSTALL_DIR");
+    print_env_path("UVR_R_INSTALL_DIR");
+    print_env_path("UVR_CACHE_DIR");
 }
