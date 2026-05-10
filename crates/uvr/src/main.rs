@@ -102,6 +102,14 @@ async fn run() -> Result<()> {
         }
         Commands::Sync(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;
+            // #30: --install-system-deps and UVR_INSTALL_SYSREQS=1 are
+            // equivalent. Setting the env var here means downstream code
+            // (install_from_lockfile + any subprocess uvr might spawn)
+            // sees the flag without us needing to thread a bool through
+            // five call sites.
+            if args.install_system_deps {
+                std::env::set_var("UVR_INSTALL_SYSREQS", "1");
+            }
             commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout).await?;
         }
         Commands::Run(args) => {

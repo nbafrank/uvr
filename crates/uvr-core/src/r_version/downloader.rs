@@ -360,6 +360,28 @@ fn is_real_r_version(s: &str) -> bool {
         .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Extract R version strings from CRAN's Windows `old/` directory HTML.
+///
+/// The listing has entries like `<a href="4.6.0">R 4.6.0</a>` (no trailing
+/// slash on the href). An earlier "split on the next `/`" scraper matched
+/// the `/` inside `</a>` and captured `4.6.0">R 4.6.0<` as the version,
+/// which `is_real_r_version` rejected — so `r_list(all = TRUE)` surfaced
+/// only the current release from the main page (uvr-r #9, second wave).
+///
+/// Anchored regex `href="<version>"?/?"` handles both formats (with or
+/// without trailing slash), and the digit-only group means parent-dir
+/// links (`href=".."`) are filtered without needing `is_real_r_version`'s
+/// secondary check — kept the second pass anyway as a belt-and-braces
+/// guard against future page-shape drift.
+fn extract_windows_old_versions(html: &str) -> Vec<String> {
+    use regex::Regex;
+    let re = Regex::new(r#"href="(\d+\.\d+\.\d+)/?""#).expect("CRAN windows old/ regex compiles");
+    re.captures_iter(html)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .filter(|v| is_real_r_version(v))
+        .collect()
+}
+
 /// Pull `R-X.Y.Z` version strings out of an HTML directory listing.
 fn scan_versions_from_listing(body: &str) -> Vec<String> {
     use regex::Regex;
@@ -1125,22 +1147,7 @@ pub async fn fetch_available_versions(
             .and_then(|r| r.error_for_status())
         {
             if let Ok(text) = old_html.text().await {
-                // Old directory lists subdirectories like href="4.4.2/".
-                // It also lists `href="../"` (parent dir) — that one
-                // satisfies the prior digits-and-dots sanity check (`..`
-                // is two dots, no digits) and was getting picked up as a
-                // bogus "version", surfacing as a `..` row in `uvr r
-                // list --all` and `uvr::r_list(all = TRUE)` (uvr-r #9).
-                // `is_real_r_version` requires at least one digit per
-                // component.
-                for chunk in text.split("href=\"").skip(1) {
-                    if let Some(end) = chunk.find('/') {
-                        let ver = &chunk[..end];
-                        if is_real_r_version(ver) {
-                            versions.push(ver.to_string());
-                        }
-                    }
-                }
+                versions.extend(extract_windows_old_versions(&text));
             }
         }
     }
@@ -1228,6 +1235,51 @@ mod tests {
         // future scrape changes that produce 2-part strings flag
         // visibly rather than slipping into the list.
         assert!(!is_real_r_version("4.6"));
+    }
+
+    #[test]
+    fn extract_windows_old_versions_handles_no_trailing_slash() {
+        // Sample of CRAN's current `/bin/windows/base/old/` HTML — the
+        // `href` values do NOT have trailing slashes anymore. uvr-r #9
+        // second wave: previous scraper matched the `/` inside `</a>`
+        // and captured garbage, surfacing only the current release on
+        // `r_list(all = TRUE)`.
+        let html = r#"
+            <a href="..">here</a>.
+            <a href="4.6.0">R 4.6.0</a> (April, 2026)<br>
+            <a href="4.5.3">R 4.5.3</a> (March, 2026)<br>
+            <a href="4.5.2">R 4.5.2</a> (November, 2025)<br>
+            <a href="4.4.2">R 4.4.2</a> (November, 2024)<br>
+        "#;
+        let versions = extract_windows_old_versions(html);
+        assert!(versions.contains(&"4.6.0".to_string()));
+        assert!(versions.contains(&"4.5.3".to_string()));
+        assert!(versions.contains(&"4.5.2".to_string()));
+        assert!(versions.contains(&"4.4.2".to_string()));
+        // Parent-dir link must not show up.
+        assert!(!versions.contains(&"..".to_string()));
+        assert!(versions.len() == 4);
+    }
+
+    #[test]
+    fn extract_windows_old_versions_handles_trailing_slash() {
+        // Belt-and-braces: if CRAN ever brings the trailing slash back,
+        // the regex still matches.
+        let html = r#"<a href="4.6.0/">R 4.6.0</a><a href="4.5.3/">R 4.5.3</a>"#;
+        let versions = extract_windows_old_versions(html);
+        assert_eq!(versions, vec!["4.6.0", "4.5.3"]);
+    }
+
+    #[test]
+    fn extract_windows_old_versions_skips_non_versions() {
+        // Non-version hrefs in the page (parent dir, CSS, etc) shouldn't
+        // be matched as versions.
+        let html = r#"
+            <link rel="stylesheet" href="http://cran.r-project.org/R.css">
+            <a href="..">here</a>
+            <a href="https://cran.r-project.org">main</a>
+        "#;
+        assert!(extract_windows_old_versions(html).is_empty());
     }
 
     #[test]
