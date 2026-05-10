@@ -19,6 +19,70 @@ use uvr_core::resolver::topological_install_order;
 use crate::ui;
 use crate::ui::palette;
 
+/// Per-package install plan resolved at sync time.
+///
+/// `is_binary` determines whether `install_binary_package` is used (vs.
+/// `R CMD INSTALL`). `fallback_url` is consulted by the downloader when
+/// the primary URL fails — typically the binary URL falls back to the
+/// source URL recorded in the lockfile.
+struct PkgPlan<'a> {
+    pkg: &'a LockedPackage,
+    url: String,
+    fallback_url: Option<String>,
+    is_binary: bool,
+}
+
+/// Pure function: compute the install plan for one locked package given
+/// the available binary sources and the host. No I/O.
+///
+/// Precedence:
+/// 1. Try each `custom_binary` registry in declaration order. First hit wins.
+/// 2. Try `p3m` if provided (callers pass `None` to suppress P3M).
+/// 3. Fall back to the source URL from the lockfile entry.
+///
+/// When a binary source is selected, the lockfile's source URL becomes the
+/// `fallback_url` so a 404 on the binary tarball gracefully falls back to
+/// `R CMD INSTALL`.
+fn select_pkg_plan<'a>(
+    p: &'a LockedPackage,
+    custom_binary: &[&uvr_core::registry::cran::CranRegistry],
+    p3m: Option<&uvr_core::registry::p3m::P3MBinaryIndex>,
+    host: &uvr_core::r_version::downloader::HostTriple,
+    r_minor: &str,
+    bioc_release: Option<&str>,
+) -> PkgPlan<'a> {
+    let source_url_str = source_url(p, bioc_release);
+
+    for src in custom_binary {
+        if let Some(url) = src.binary_url_for(&p.name, &p.version, host, r_minor) {
+            return PkgPlan {
+                pkg: p,
+                url,
+                fallback_url: Some(source_url_str),
+                is_binary: true,
+            };
+        }
+    }
+
+    if let Some(p3m) = p3m {
+        if let Some(url) = p3m.binary_url(&p.name, &p.version) {
+            return PkgPlan {
+                pkg: p,
+                url: url.to_string(),
+                fallback_url: Some(source_url_str),
+                is_binary: true,
+            };
+        }
+    }
+
+    PkgPlan {
+        pkg: p,
+        url: source_url_str,
+        fallback_url: None,
+        is_binary: false,
+    }
+}
+
 pub async fn run(
     frozen: bool,
     no_dev: bool,
@@ -541,12 +605,6 @@ pub async fn install_from_lockfile(
 
     // ── Phase 2: download + install remaining packages ────────────────
     // Only fetch P3M binary index if there are packages to download.
-    struct PkgPlan<'a> {
-        pkg: &'a LockedPackage,
-        url: String,
-        fallback_url: Option<String>,
-        is_binary: bool,
-    }
 
     // Linux-specific UA. PPM serves source vs. binary at the same URL, gated
     // by the User-Agent. The index fetch in `P3MBinaryIndex::fetch` sets this
@@ -599,25 +657,11 @@ pub async fn install_from_lockfile(
             Err(_) => P3MBinaryIndex::empty(),
         };
 
+        let host = uvr_core::r_version::downloader::host_triple();
+
         cache_misses
             .iter()
-            .map(|p| {
-                if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
-                    PkgPlan {
-                        pkg: p,
-                        url: bin_url.to_string(),
-                        fallback_url: Some(source_url(p, bioc_release)),
-                        is_binary: true,
-                    }
-                } else {
-                    PkgPlan {
-                        pkg: p,
-                        url: source_url(p, bioc_release),
-                        fallback_url: None,
-                        is_binary: false,
-                    }
-                }
-            })
+            .map(|p| select_pkg_plan(p, &[], Some(&p3m), &host, &r_minor_str, bioc_release))
             .collect()
     } else {
         Vec::new()
@@ -1615,5 +1659,108 @@ mod tests {
             dev: false,
         };
         assert!(is_installed(&dash_pkg_no_raw, dir.path()));
+    }
+
+    use uvr_core::registry::cran::{parse_packages_gz, CranRegistry};
+    use uvr_core::r_version::downloader::HostTriple;
+
+    fn musl_host() -> HostTriple {
+        HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        }
+    }
+
+    fn locked_pkg(name: &str, version: &str, url: &str) -> LockedPackage {
+        LockedPackage {
+            name: name.into(),
+            version: version.into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: Some(url.into()),
+            system_requirements: None,
+            dev: false,
+        }
+    }
+
+    fn rlang_musl_packages() -> &'static str {
+        "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+"
+    }
+
+    #[test]
+    fn select_plan_uses_first_custom_binary_match() {
+        let pkg = locked_pkg(
+            "rlang",
+            "1.1.6",
+            "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz",
+        );
+        let reg = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://rpkgs.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(plan.is_binary);
+        assert_eq!(plan.url, "https://rpkgs.example.com/src/contrib/rlang_1.1.6.tar.gz");
+        assert_eq!(
+            plan.fallback_url.as_deref(),
+            Some("https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz")
+        );
+    }
+
+    #[test]
+    fn select_plan_falls_through_when_custom_has_no_binary() {
+        let pkg = locked_pkg(
+            "jsonlite",
+            "1.8.8",
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz",
+        );
+        // Custom registry has rlang but not jsonlite.
+        let reg = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://rpkgs.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        // Falls all the way through to source — P3M is None.
+        assert!(!plan.is_binary);
+        assert_eq!(
+            plan.url,
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
+        );
+        assert!(plan.fallback_url.is_none());
+    }
+
+    #[test]
+    fn select_plan_first_custom_wins_over_second() {
+        let pkg = locked_pkg("rlang", "1.1.6", "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz");
+        let reg_a = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://first.example.com/src/contrib".into(),
+        );
+        let reg_b = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://second.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg_a, &reg_b];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(plan.url.contains("first.example.com"), "got: {}", plan.url);
+    }
+
+    #[test]
+    fn select_plan_falls_through_to_source_when_nothing_matches() {
+        let pkg = locked_pkg("jsonlite", "1.8.8", "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz");
+        let custom: Vec<&CranRegistry> = vec![];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(!plan.is_binary);
+        assert_eq!(plan.url, "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz");
     }
 }
