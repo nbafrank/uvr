@@ -29,9 +29,7 @@ pub fn extra_libs() -> Option<String> {
 
 /// UVR_INSTALL_DIR
 ///
-/// Gets the directory where the `uvr` binary itself is installed.
-/// Used primarily by the `uvr self-update` command to determine where
-/// to place the newly downloaded executable.
+/// The directory in which to install `uvr` using the standalone installer.
 /// Expects a valid absolute or relative directory path.
 pub fn install_dir() -> Option<PathBuf> {
     read_env_var("UVR_INSTALL_DIR").map(PathBuf::from)
@@ -84,6 +82,32 @@ mod tests {
     use super::*;
     use std::env;
 
+    struct EnvGuard {
+        backups: std::collections::HashMap<&'static str, Option<String>>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[&'static str]) -> Self {
+            let mut backups = std::collections::HashMap::new();
+            for &v in vars {
+                backups.insert(v, env::var(v).ok());
+                env::remove_var(v);
+            }
+            Self { backups }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (var, val) in &self.backups {
+                match val {
+                    Some(v) => env::set_var(var, v),
+                    None => env::remove_var(var),
+                }
+            }
+        }
+    }
+
     // We run all env var checks in a single test to avoid race conditions
     // since environment variables are global per process.
     #[test]
@@ -99,13 +123,7 @@ mod tests {
             "UVR_R_INSTALL_DIR",
         ];
 
-        let mut backups = std::collections::HashMap::new();
-        for &var in &vars_to_test {
-            if let Ok(val) = env::var(var) {
-                backups.insert(var, val);
-            }
-            env::remove_var(var);
-        }
+        let _guard = EnvGuard::new(&vars_to_test);
 
         // 1. Defaults when unset
         let default_cache = cache_dir();
@@ -168,14 +186,5 @@ mod tests {
             env::set_var(var, "   ");
         }
         assert_eq!(extra_libs(), None);
-
-        // Restore original env vars
-        for &var in &vars_to_test {
-            if let Some(val) = backups.get(var) {
-                env::set_var(var, val);
-            } else {
-                env::remove_var(var);
-            }
-        }
     }
 }
