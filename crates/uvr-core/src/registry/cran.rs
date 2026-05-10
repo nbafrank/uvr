@@ -87,6 +87,46 @@ pub struct BuiltInfo {
     pub os_family: String,
 }
 
+impl BuiltInfo {
+    /// Returns true iff this binary build matches the given host:
+    /// - R `major.minor` equals `r_minor` (patch ignored)
+    /// - Platform triple equals `host` exactly (case-sensitive)
+    /// - OS family matches host's OS (linux/macos = "unix"; windows = "windows")
+    pub fn matches_host(
+        &self,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> bool {
+        // R version major.minor match (ignore patch).
+        let built_minor: String = self
+            .r_version
+            .split('.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".");
+        if built_minor != r_minor {
+            return false;
+        }
+
+        // Exact triple string match.
+        let host_triple_str = format!("{}-{}-{}-{}", host.arch, host.vendor, host.os, host.abi);
+        if self.platform != host_triple_str {
+            return false;
+        }
+
+        // OS family.
+        let expected_os_family = match host.os.as_str() {
+            "windows" => "windows",
+            _ => "unix",
+        };
+        if self.os_family != expected_os_family {
+            return false;
+        }
+
+        true
+    }
+}
+
 /// Parse a `Built:` field. Lenient: returns `None` on anything that doesn't
 /// look like a binary-build marker (missing `R` prefix, fewer than four
 /// fields, etc.). Treats unparseable as "not a binary".
@@ -622,5 +662,61 @@ MD5sum: def789
         let b = parse_built("R 4.5.0 ; x86_64-pc-linux-musl ; 2025-01-15 ; unix").unwrap();
         assert_eq!(b.r_version, "4.5.0");
         assert_eq!(b.platform, "x86_64-pc-linux-musl");
+    }
+
+    fn musl_alpine_host() -> crate::r_version::downloader::HostTriple {
+        crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        }
+    }
+
+    fn gnu_ubuntu_host() -> crate::r_version::downloader::HostTriple {
+        crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "gnu".into(),
+        }
+    }
+
+    #[test]
+    fn built_matches_host_exact_alpine() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_matches_host_r_minor_patch_ignored() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b.matches_host(&musl_alpine_host(), "4.5"));
+        let b2 = parse_built("R 4.5.3; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b2.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_r_minor() {
+        let b = parse_built("R 4.4.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_libc() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_arch() {
+        let b = parse_built("R 4.5.0; aarch64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_os_family_windows_on_linux() {
+        let b = parse_built("R 4.5.0; x86_64-w64-mingw32; 2025-01-15; windows").unwrap();
+        assert!(!b.matches_host(&gnu_ubuntu_host(), "4.5"));
     }
 }
