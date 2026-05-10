@@ -5,10 +5,8 @@ use uvr_core::installer::package_cache;
 use crate::ui;
 
 pub fn run_clean() -> Result<()> {
-    let base = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".uvr");
-    let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_else(|| base.join("cache"));
+    let cache_dir = uvr_core::env_vars::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".uvr").join("cache"));
 
     let mut count = 0u64;
     let mut bytes = 0u64;
