@@ -248,14 +248,15 @@ pub struct HostTriple {
 }
 
 /// Build a `HostTriple` from optional `/etc/os-release` content and the
-/// detected `Platform`. Public for testing; production callers go through
-/// [`host_triple()`].
+/// detected `Platform`. Module-private; the inline test module calls it
+/// directly. Production callers go through [`host_triple()`].
 fn host_triple_from_os_release(content: Option<&str>, platform: Platform) -> HostTriple {
     let mut id = String::new();
     if let Some(c) = content {
         for line in c.lines() {
             if let Some(val) = line.strip_prefix("ID=") {
                 id = val.trim_matches('"').to_lowercase();
+                break;
             }
         }
     }
@@ -1627,5 +1628,15 @@ VERSION_ID=3.23
         let triple = host_triple_from_os_release(None, Platform::MacOsArm64);
         assert_eq!(triple.vendor, "apple");
         assert_eq!(triple.os, "darwin");
+        assert_eq!(triple.abi, "darwin");
+    }
+
+    #[test]
+    fn host_triple_windows() {
+        let triple = host_triple_from_os_release(None, Platform::WindowsX86_64);
+        assert_eq!(triple.arch, "x86_64");
+        assert_eq!(triple.vendor, "pc");
+        assert_eq!(triple.os, "windows");
+        assert_eq!(triple.abi, "msvc");
     }
 }
