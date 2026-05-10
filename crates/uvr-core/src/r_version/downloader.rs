@@ -294,6 +294,82 @@ pub fn host_triple() -> HostTriple {
     host_triple_from_os_release(content.as_deref(), platform)
 }
 
+/// Host platform info plus pretty distro label and R version, suitable for
+/// constructing user-agent strings.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    pub triple: HostTriple,
+    /// Pretty distro label as it appears in the UA, e.g. `"Alpine Linux 3.23.4"`.
+    /// Defaults to `"unknown"` when `/etc/os-release` is missing or sparse.
+    pub distro_label: String,
+    /// R minor or patch version, e.g. `"4.5.0"`. Caller-supplied; not detected.
+    pub r_version: String,
+}
+
+/// Build a `HostInfo` from optional `/etc/os-release` content. Module-private;
+/// the inline test module calls it directly. Production callers go through
+/// [`host_info()`].
+fn host_info_from_os_release(
+    content: Option<&str>,
+    platform: Platform,
+    r_version: &str,
+) -> HostInfo {
+    let triple = host_triple_from_os_release(content, platform);
+
+    let mut name = String::new();
+    let mut version_id = String::new();
+    if let Some(c) = content {
+        for line in c.lines() {
+            if let Some(val) = line.strip_prefix("NAME=") {
+                name = val.trim_matches('"').to_string();
+            } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
+                version_id = val.trim_matches('"').to_string();
+            }
+        }
+    }
+
+    let distro_label = if name.is_empty() {
+        "unknown".to_string()
+    } else if version_id.is_empty() {
+        name
+    } else {
+        format!("{name} {version_id}")
+    };
+
+    HostInfo {
+        triple,
+        distro_label,
+        r_version: r_version.to_string(),
+    }
+}
+
+/// Detect the host info. `r_version` should be the R version in use for the
+/// project (caller-supplied because uvr knows the project R version).
+pub fn host_info(r_version: &str) -> HostInfo {
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    let platform = Platform::detect().unwrap_or(Platform::LinuxX86_64);
+    host_info_from_os_release(content.as_deref(), platform, r_version)
+}
+
+/// Construct a User-Agent string in the format recommended by cran.rpkgs.com:
+/// `R/<ver> (<distro>) (<triple> <arch> <os>-<abi>)`.
+///
+/// PPM's UA gating per the comment in `registry/p3m.rs` looks for an R-shaped
+/// prefix and a `linux-{abi}` substring. This format satisfies both, so it
+/// works for P3M and custom sources alike.
+pub fn user_agent(info: &HostInfo) -> String {
+    let HostTriple {
+        arch,
+        vendor,
+        os,
+        abi,
+    } = &info.triple;
+    format!(
+        "R/{} ({}) ({}-{}-{}-{} {} {}-{})",
+        info.r_version, info.distro_label, arch, vendor, os, abi, arch, os, abi
+    )
+}
+
 /// Download and extract R to `~/.uvr/r-versions/<version>/`.
 pub async fn download_and_install_r(
     client: &reqwest::Client,
@@ -1638,5 +1714,58 @@ VERSION_ID=3.23
         assert_eq!(triple.vendor, "pc");
         assert_eq!(triple.os, "windows");
         assert_eq!(triple.abi, "msvc");
+    }
+
+    #[test]
+    fn user_agent_alpine_format_matches_rpkgs_docs() {
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "musl".into(),
+            },
+            distro_label: "Alpine Linux 3.23.4".into(),
+            r_version: "4.5.0".into(),
+        };
+        assert_eq!(
+            user_agent(&info),
+            "R/4.5.0 (Alpine Linux 3.23.4) (x86_64-pc-linux-musl x86_64 linux-musl)"
+        );
+    }
+
+    #[test]
+    fn user_agent_ubuntu_format() {
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "gnu".into(),
+            },
+            distro_label: "Ubuntu 22.04".into(),
+            r_version: "4.5.0".into(),
+        };
+        assert_eq!(
+            user_agent(&info),
+            "R/4.5.0 (Ubuntu 22.04) (x86_64-pc-linux-gnu x86_64 linux-gnu)"
+        );
+    }
+
+    #[test]
+    fn host_info_uses_pretty_distro_label() {
+        let os_release = r#"NAME="Alpine Linux"
+ID=alpine
+VERSION_ID=3.23.4
+"#;
+        let info = host_info_from_os_release(Some(os_release), Platform::LinuxX86_64, "4.5.0");
+        assert_eq!(info.distro_label, "Alpine Linux 3.23.4");
+        assert_eq!(info.r_version, "4.5.0");
+    }
+
+    #[test]
+    fn host_info_unknown_distro_label() {
+        let info = host_info_from_os_release(None, Platform::LinuxX86_64, "4.5.0");
+        assert_eq!(info.distro_label, "unknown");
     }
 }
