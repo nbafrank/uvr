@@ -7,6 +7,42 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Fixes
+
+- **Alpine binary install (pat-s)**: `detect_posit_distro_slug()`
+  no longer rewrites alpine to `ubuntu-2204`. On alpine, uvr now produces
+  the slug `alpine-X.Y` which `ppm_linux_codename` cannot translate, so
+  `P3MBinaryIndex` returns empty. Sync falls through to source compile
+  (slow but correct) instead of silently downloading wrong-libc binaries
+  from P3M's Jammy index. Other unknown distros keep the legacy fallback.
+
+### Features
+
+- **Custom binary sources via `[[sources]]` (pat-s)**: any
+  CRAN-like repo declared in `[[sources]]` can now supply binaries
+  to uvr. Auto-detection: an entry's `Built:` field is matched
+  against the running host's triple + R minor. If at least one
+  source has host-matching `Built:` entries, P3M is suppressed and
+  custom sources are queried in declaration order. Source-only
+  custom repos (r-multiverse, r-universe) keep their existing
+  behavior — they coexist with P3M as today. The `Path:` field is
+  honored for non-default tarball locations, with traversal
+  hardening.
+
+  Example for alpine:
+
+  ```toml
+  [[sources]]
+  name = "rpkgs"
+  url  = "https://cran.rpkgs.com"
+  ```
+
+  uvr's User-Agent now matches what real R sends via
+  `getOption("HTTPUserAgent")`: `R (<ver> <triple> <arch> <os>-<abi>)`.
+  This satisfies PPM's existing gating and gives cran.rpkgs.com the
+  triple substring (`linux-musl` vs `linux-gnu`) it needs to route
+  requests to the right binary.
+
 ## v0.3.5 (2026-05-15)
 
 Largest batched release since v0.3.0. Two new commands, one new
