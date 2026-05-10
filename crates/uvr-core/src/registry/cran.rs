@@ -65,7 +65,16 @@ impl CranPackageEntry {
     }
 
     pub fn tarball_url_with_base(&self, base: &str) -> String {
-        format!("{}/{}_{}.tar.gz", base, self.name, self.raw_version)
+        let safe_path = self.path.as_deref().filter(|p| {
+            !p.is_empty()
+                && !p.starts_with('/')
+                && !p.split('/').any(|seg| seg == "..")
+        });
+        let dir = match safe_path {
+            Some(p) => format!("{}/{}", base, p),
+            None => base.to_string(),
+        };
+        format!("{}/{}_{}.tar.gz", dir, self.name, self.raw_version)
     }
 }
 
@@ -704,6 +713,67 @@ Version: 1.0
 Built: garbage-not-actually-built-format";
         let entry = parse_dcf_block(block).unwrap();
         assert!(entry.built.is_none(), "garbage Built: should be ignored");
+    }
+
+    fn entry_with_path(path: Option<&str>) -> CranPackageEntry {
+        CranPackageEntry {
+            name: "rlang".into(),
+            version: Version::parse("1.1.6").unwrap(),
+            raw_version: "1.1.6".into(),
+            depends: vec![],
+            imports: vec![],
+            linking_to: vec![],
+            md5sum: String::new(),
+            system_requirements: None,
+            path: path.map(|p| p.to_string()),
+            built: None,
+        }
+    }
+
+    #[test]
+    fn tarball_url_no_path_unchanged() {
+        let entry = entry_with_path(None);
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_with_path_appends_subdir() {
+        let entry = entry_with_path(Some("linux/musl-3.23"));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/linux/musl-3.23/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_rejects_path_traversal() {
+        let entry = entry_with_path(Some("../../../etc"));
+        // Falls back to default URL (path is dropped) — no traversal.
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_rejects_absolute_path() {
+        let entry = entry_with_path(Some("/usr/bin"));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_empty_path_treated_as_none() {
+        let entry = entry_with_path(Some(""));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
     }
 
     fn musl_alpine_host() -> crate::r_version::downloader::HostTriple {
