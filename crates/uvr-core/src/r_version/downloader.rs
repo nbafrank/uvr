@@ -193,10 +193,17 @@ pub fn detect_posit_distro_slug() -> String {
     if let Some(override_slug) = DISTRO_OVERRIDE.get() {
         return override_slug.clone();
     }
-    // Read os-release; fall back to default if anything fails
-    let content = match std::fs::read_to_string("/etc/os-release") {
-        Ok(c) => c,
-        Err(_) => return "ubuntu-2204".to_string(),
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    detect_posit_distro_slug_from_os_release(content.as_deref())
+}
+
+/// Testable helper: parse os-release content (or fall back) into a Posit
+/// CDN distro slug. Module-private; the inline test module calls it
+/// directly. Production callers go through [`detect_posit_distro_slug`].
+pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) -> String {
+    let content = match content {
+        Some(c) => c,
+        None => return "ubuntu-2204".to_string(),
     };
 
     let mut id = String::new();
@@ -218,13 +225,23 @@ pub fn detect_posit_distro_slug() -> String {
         "debian" => format!("debian-{version_id}"),
         "centos" => format!("centos-{version_id}"),
         "rhel" | "rocky" | "almalinux" => {
-            // Major version only
             let major = version_id.split('.').next().unwrap_or(&version_id);
             format!("rhel-{major}")
         }
         "opensuse-leap" | "sles" => {
             let ver = version_id.replace('.', "");
             format!("opensuse-{ver}")
+        }
+        "alpine" => {
+            // Truncate `3.23.4` → `3.23` to match the #30 sysreqs normalization
+            // and to make `ppm_linux_codename` return None (P3M is then skipped
+            // cleanly; sync falls through to source compile).
+            let minor = version_id
+                .split('.')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(".");
+            format!("alpine-{minor}")
         }
         _ => "ubuntu-2204".to_string(),
     }
@@ -1767,5 +1784,40 @@ VERSION_ID=3.23.4
     fn host_info_unknown_distro_label() {
         let info = host_info_from_os_release(None, Platform::LinuxX86_64, "4.5.0");
         assert_eq!(info.distro_label, "unknown");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_full_version() {
+        // Alpine 3.23.4 reports VERSION_ID="3.23.4"; we truncate to 3.23
+        // (matching the existing #30 sysreqs normalization).
+        let slug = detect_posit_distro_slug_from_os_release(Some(
+            "ID=alpine\nVERSION_ID=3.23.4\n",
+        ));
+        assert_eq!(slug, "alpine-3.23");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_minor_only() {
+        let slug = detect_posit_distro_slug_from_os_release(Some(
+            "ID=alpine\nVERSION_ID=3.21\n",
+        ));
+        assert_eq!(slug, "alpine-3.21");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_unknown_distro_still_falls_back() {
+        // Regression: Arch / NixOS / Gentoo / etc. keep the ubuntu-2204
+        // fallback (out of scope for this PR).
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=arch\n"));
+        assert_eq!(slug, "ubuntu-2204");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_skips_p3m() {
+        // Integration check: alpine slug must not resolve to a PPM codename,
+        // so P3MBinaryIndex returns empty for alpine and sync falls through
+        // to source compile.
+        assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.23").is_none());
+        assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.21").is_none());
     }
 }
