@@ -423,3 +423,109 @@ fn test_import_help() {
         .success()
         .stdout(predicate::str::contains("renv"));
 }
+
+// ─── sources / stub-server ─────────────────────────────────
+
+/// Spin up a tiny HTTP server in a thread that serves files from
+/// `tests/fixtures/rpkgs-stub/`. Returns the bound URL (`http://127.0.0.1:PORT`)
+/// and a join handle that the caller drops to shut the server down.
+fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+    let url = format!("http://{}", addr);
+
+    let fixtures_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("rpkgs-stub");
+
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking");
+
+    let handle = std::thread::spawn(move || {
+        // Tiny accept loop. Stops after 30s of no work to avoid leaking on test panic.
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > std::time::Duration::from_secs(30) {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .trim_start_matches('/');
+                    let safe_path = path
+                        .split('/')
+                        .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let file_path = fixtures_root.join(&safe_path);
+                    if let Ok(body) = std::fs::read(&file_path) {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = socket.write_all(header.as_bytes());
+                        let _ = socket.write_all(&body);
+                    } else {
+                        let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (url, handle)
+}
+
+#[test]
+fn lock_with_binary_capable_source_records_source_urls() {
+    let (server_url, _server) = spawn_rpkgs_stub();
+
+    let dir = init_project("stubproj");
+    // Append a [[sources]] entry pointing at the stub server.
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(&format!(
+        "\n[[sources]]\nname = \"rpkgs-stub\"\nurl = \"{}\"\n",
+        server_url
+    ));
+    fs::write(&toml_path, toml).unwrap();
+
+    // Add jsonlite (which the stub serves as a binary-capable entry).
+    // Use --no-install so we only exercise lock-time behaviour — the stub
+    // doesn't serve real tarballs, only PACKAGES.gz.
+    uvr_cmd()
+        .args(["add", "--no-install", "jsonlite"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Lockfile should record the source URL (binary upgrade happens at sync time).
+    let lock = fs::read_to_string(dir.path().join("uvr.lock")).unwrap();
+    assert!(
+        lock.contains("jsonlite"),
+        "lockfile should contain jsonlite: {lock}"
+    );
+    // The lockfile URL points at the stub's src/contrib (source URL),
+    // NOT the upgraded-at-sync-time binary URL.
+    assert!(
+        lock.contains(&format!("{}/src/contrib/jsonlite", server_url)),
+        "lockfile should record the source URL from rpkgs-stub: {lock}"
+    );
+}
