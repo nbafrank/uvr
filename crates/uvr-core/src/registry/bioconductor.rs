@@ -275,6 +275,8 @@ mod tests {
             linking_to: vec![],
             md5sum: md5.to_string(),
             system_requirements: None,
+            path: None,
+            built: None,
         }
     }
 

@@ -29,6 +29,11 @@ pub struct CranPackageEntry {
     pub md5sum: String,
     /// Raw `SystemRequirements` field from DESCRIPTION, if present.
     pub system_requirements: Option<String>,
+    /// `Path:` field — relative location of the tarball within the
+    /// repository, when not at the default `<base>/<name>_<version>.tar.gz`.
+    pub path: Option<String>,
+    /// `Built:` field, parsed. Present iff this entry is a binary build.
+    pub built: Option<BuiltInfo>,
 }
 
 impl CranPackageEntry {
@@ -503,6 +508,8 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         .unwrap_or_default();
     let md5sum = fields.get("MD5sum").cloned().unwrap_or_default();
     let system_requirements = fields.get("SystemRequirements").cloned();
+    let path = fields.get("Path").cloned().filter(|p| !p.is_empty());
+    let built = fields.get("Built").and_then(|s| parse_built(s));
 
     Some(CranPackageEntry {
         name,
@@ -513,6 +520,8 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         linking_to,
         md5sum,
         system_requirements,
+        path,
+        built,
     })
 }
 
@@ -662,6 +671,39 @@ MD5sum: def789
         let b = parse_built("R 4.5.0 ; x86_64-pc-linux-musl ; 2025-01-15 ; unix").unwrap();
         assert_eq!(b.r_version, "4.5.0");
         assert_eq!(b.platform, "x86_64-pc-linux-musl");
+    }
+
+    #[test]
+    fn parse_dcf_extracts_path_and_built() {
+        let block = "Package: rlang
+Version: 1.1.6
+Path: linux/musl-3.23
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+MD5sum: abc123";
+        let entry = parse_dcf_block(block).unwrap();
+        assert_eq!(entry.name, "rlang");
+        assert_eq!(entry.path.as_deref(), Some("linux/musl-3.23"));
+        let b = entry.built.as_ref().unwrap();
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
+    }
+
+    #[test]
+    fn parse_dcf_no_path_no_built_regression() {
+        let block = "Package: jsonlite
+Version: 1.8.8
+MD5sum: deadbeef";
+        let entry = parse_dcf_block(block).unwrap();
+        assert!(entry.path.is_none());
+        assert!(entry.built.is_none());
+    }
+
+    #[test]
+    fn parse_dcf_built_unparseable_yields_none() {
+        let block = "Package: foo
+Version: 1.0
+Built: garbage-not-actually-built-format";
+        let entry = parse_dcf_block(block).unwrap();
+        assert!(entry.built.is_none(), "garbage Built: should be ignored");
     }
 
     fn musl_alpine_host() -> crate::r_version::downloader::HostTriple {
