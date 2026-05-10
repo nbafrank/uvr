@@ -66,7 +66,7 @@ pub async fn run(
         Some(with_lib) => format!("{}{path_sep}{}", with_lib.display(), library.display()),
         None => library.to_string_lossy().into_owned(),
     };
-    if let Ok(extra) = std::env::var("UVR_EXTRA_LIBS") {
+    if let Some(extra) = uvr_core::env_vars::extra_libs() {
         let extra = extra.trim();
         if !extra.is_empty() {
             libs_user.push_str(path_sep);
@@ -136,10 +136,8 @@ async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf
     let hash = format!("{:x}", hasher.finalize());
     let short_hash = &hash[..12];
 
-    let cache_dir = dirs::home_dir()
+    let cache_dir = uvr_core::env_vars::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("cache")
         .join("with-envs")
         .join(short_hash);
 
