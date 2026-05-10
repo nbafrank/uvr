@@ -230,6 +230,69 @@ pub fn detect_posit_distro_slug() -> String {
     }
 }
 
+/// Parsed host platform triple, modeled after Rust target triples and
+/// R's `R.Version()$platform` reporting.
+///
+/// Used to construct user-agent strings and to match `Built:` fields in
+/// CRAN-like binary repositories (cran.rpkgs.com, P3M, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTriple {
+    /// CPU architecture: `"x86_64"` | `"aarch64"`.
+    pub arch: String,
+    /// Vendor: `"pc"` on Linux/Windows, `"apple"` on macOS.
+    pub vendor: String,
+    /// OS: `"linux"` | `"darwin"` | `"windows"`.
+    pub os: String,
+    /// ABI / libc: `"gnu"` | `"musl"` | `"darwin"` | `"msvc"`.
+    pub abi: String,
+}
+
+/// Build a `HostTriple` from optional `/etc/os-release` content and the
+/// detected `Platform`. Public for testing; production callers go through
+/// [`host_triple()`].
+fn host_triple_from_os_release(content: Option<&str>, platform: Platform) -> HostTriple {
+    let mut id = String::new();
+    if let Some(c) = content {
+        for line in c.lines() {
+            if let Some(val) = line.strip_prefix("ID=") {
+                id = val.trim_matches('"').to_lowercase();
+            }
+        }
+    }
+
+    let arch = match platform {
+        Platform::LinuxX86_64 | Platform::MacOsX86_64 | Platform::WindowsX86_64 => "x86_64",
+        Platform::LinuxArm64 | Platform::MacOsArm64 => "aarch64",
+    };
+
+    let (vendor, os, default_abi) = match platform {
+        Platform::LinuxX86_64 | Platform::LinuxArm64 => ("pc", "linux", "gnu"),
+        Platform::MacOsArm64 | Platform::MacOsX86_64 => ("apple", "darwin", "darwin"),
+        Platform::WindowsX86_64 => ("pc", "windows", "msvc"),
+    };
+
+    let abi = match (platform, id.as_str()) {
+        (Platform::LinuxX86_64 | Platform::LinuxArm64, "alpine") => "musl",
+        _ => default_abi,
+    };
+
+    HostTriple {
+        arch: arch.to_string(),
+        vendor: vendor.to_string(),
+        os: os.to_string(),
+        abi: abi.to_string(),
+    }
+}
+
+/// Detect the host triple by reading `/etc/os-release` and combining with
+/// `Platform::detect()`. Used at sync time to construct the UA and match
+/// `Built:` fields.
+pub fn host_triple() -> HostTriple {
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    let platform = Platform::detect().unwrap_or(Platform::LinuxX86_64);
+    host_triple_from_os_release(content.as_deref(), platform)
+}
+
 /// Download and extract R to `~/.uvr/r-versions/<version>/`.
 pub async fn download_and_install_r(
     client: &reqwest::Client,
@@ -1518,5 +1581,51 @@ mod tests {
         let content = std::fs::read(dir.path().join("binary.so")).unwrap();
         // Should be unchanged — binary files are skipped
         assert_eq!(content, data);
+    }
+
+    #[test]
+    fn host_triple_alpine_x86_64() {
+        let os_release = r#"NAME="Alpine Linux"
+ID=alpine
+VERSION_ID=3.23.4
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxX86_64);
+        assert_eq!(triple.arch, "x86_64");
+        assert_eq!(triple.vendor, "pc");
+        assert_eq!(triple.os, "linux");
+        assert_eq!(triple.abi, "musl");
+    }
+
+    #[test]
+    fn host_triple_ubuntu_x86_64() {
+        let os_release = r#"NAME="Ubuntu"
+ID=ubuntu
+VERSION_ID="22.04"
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxX86_64);
+        assert_eq!(triple.abi, "gnu");
+    }
+
+    #[test]
+    fn host_triple_alpine_aarch64() {
+        let os_release = r#"ID=alpine
+VERSION_ID=3.23
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxArm64);
+        assert_eq!(triple.arch, "aarch64");
+        assert_eq!(triple.abi, "musl");
+    }
+
+    #[test]
+    fn host_triple_no_os_release_falls_back_to_gnu() {
+        let triple = host_triple_from_os_release(None, Platform::LinuxX86_64);
+        assert_eq!(triple.abi, "gnu");
+    }
+
+    #[test]
+    fn host_triple_macos() {
+        let triple = host_triple_from_os_release(None, Platform::MacOsArm64);
+        assert_eq!(triple.vendor, "apple");
+        assert_eq!(triple.os, "darwin");
     }
 }
