@@ -236,11 +236,7 @@ pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) ->
             // Truncate `3.23.4` → `3.23` to match the #30 sysreqs normalization
             // and to make `ppm_linux_codename` return None (P3M is then skipped
             // cleanly; sync falls through to source compile).
-            let minor = version_id
-                .split('.')
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(".");
+            let minor = version_id.split('.').take(2).collect::<Vec<_>>().join(".");
             format!("alpine-{minor}")
         }
         _ => "ubuntu-2204".to_string(),
@@ -1793,7 +1789,10 @@ VERSION_ID=3.23
             r_version: "4.5.0".into(),
         };
         let ua = user_agent(&info);
-        assert!(ua.starts_with("R ("), "PPM gating requires 'R (' prefix; got: {ua}");
+        assert!(
+            ua.starts_with("R ("),
+            "PPM gating requires 'R (' prefix; got: {ua}"
+        );
         assert!(ua.contains("linux-gnu"));
     }
 
@@ -1818,17 +1817,13 @@ VERSION_ID=3.23.4
     fn detect_posit_distro_slug_alpine_full_version() {
         // Alpine 3.23.4 reports VERSION_ID="3.23.4"; we truncate to 3.23
         // (matching the existing #30 sysreqs normalization).
-        let slug = detect_posit_distro_slug_from_os_release(Some(
-            "ID=alpine\nVERSION_ID=3.23.4\n",
-        ));
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=alpine\nVERSION_ID=3.23.4\n"));
         assert_eq!(slug, "alpine-3.23");
     }
 
     #[test]
     fn detect_posit_distro_slug_alpine_minor_only() {
-        let slug = detect_posit_distro_slug_from_os_release(Some(
-            "ID=alpine\nVERSION_ID=3.21\n",
-        ));
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=alpine\nVERSION_ID=3.21\n"));
         assert_eq!(slug, "alpine-3.21");
     }
 

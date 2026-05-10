@@ -444,9 +444,7 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
         .join("fixtures")
         .join("rpkgs-stub");
 
-    listener
-        .set_nonblocking(true)
-        .expect("set_nonblocking");
+    listener.set_nonblocking(true).expect("set_nonblocking");
 
     let handle = std::thread::spawn(move || {
         // Tiny accept loop. Stops after 30s of no work to avoid leaking on test panic.
@@ -479,7 +477,8 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
                         let _ = socket.write_all(header.as_bytes());
                         let _ = socket.write_all(&body);
                     } else {
-                        let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {

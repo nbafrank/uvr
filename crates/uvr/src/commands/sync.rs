@@ -98,11 +98,7 @@ async fn fetch_custom_registries(
     let mut out = Vec::new();
     for src in sources {
         match uvr_core::registry::cran::CranRegistry::fetch_custom(
-            client,
-            &src.name,
-            &src.url,
-            /* force_refresh */ false,
-            user_agent,
+            client, &src.name, &src.url, /* force_refresh */ false, user_agent,
         )
         .await
         {
@@ -665,9 +661,12 @@ pub async fn install_from_lockfile(
         // into binary-capable vs. source-only. A registry is "binary-capable"
         // when at least one of its PACKAGES entries has a Built: line that
         // matches the running host triple + R minor.
-        let custom_registries =
-            fetch_custom_registries(&client, &project.manifest.sources, Some(user_agent.as_str()))
-                .await;
+        let custom_registries = fetch_custom_registries(
+            &client,
+            &project.manifest.sources,
+            Some(user_agent.as_str()),
+        )
+        .await;
         let custom_binary: Vec<&uvr_core::registry::cran::CranRegistry> = custom_registries
             .iter()
             .filter(|r| r.is_binary_capable(&host_info.triple, &r_minor_str))
@@ -678,12 +677,11 @@ pub async fn install_from_lockfile(
         let p3m = if custom_binary.is_empty() {
             match detected_platform {
                 Ok(platform) => {
-                    let slug =
-                        if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
-                            Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
-                        } else {
-                            None
-                        };
+                    let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
+                        Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
+                    } else {
+                        None
+                    };
                     Some(
                         P3MBinaryIndex::fetch(
                             &client,
@@ -1731,8 +1729,8 @@ mod tests {
         assert!(is_installed(&dash_pkg_no_raw, dir.path()));
     }
 
-    use uvr_core::registry::cran::{parse_packages_gz, CranRegistry};
     use uvr_core::r_version::downloader::HostTriple;
+    use uvr_core::registry::cran::{parse_packages_gz, CranRegistry};
 
     fn musl_host() -> HostTriple {
         HostTriple {
@@ -1779,7 +1777,10 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         let custom = vec![&reg];
         let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
         assert!(plan.is_binary);
-        assert_eq!(plan.url, "https://rpkgs.example.com/src/contrib/rlang_1.1.6.tar.gz");
+        assert_eq!(
+            plan.url,
+            "https://rpkgs.example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
         assert_eq!(
             plan.fallback_url.as_deref(),
             Some("https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz")
@@ -1811,7 +1812,11 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
 
     #[test]
     fn select_plan_first_custom_wins_over_second() {
-        let pkg = locked_pkg("rlang", "1.1.6", "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz");
+        let pkg = locked_pkg(
+            "rlang",
+            "1.1.6",
+            "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz",
+        );
         let reg_a = CranRegistry::for_test(
             parse_packages_gz(rlang_musl_packages()).unwrap(),
             "https://first.example.com/src/contrib".into(),
@@ -1827,10 +1832,17 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
 
     #[test]
     fn select_plan_falls_through_to_source_when_nothing_matches() {
-        let pkg = locked_pkg("jsonlite", "1.8.8", "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz");
+        let pkg = locked_pkg(
+            "jsonlite",
+            "1.8.8",
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz",
+        );
         let custom: Vec<&CranRegistry> = vec![];
         let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
         assert!(!plan.is_binary);
-        assert_eq!(plan.url, "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz");
+        assert_eq!(
+            plan.url,
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
+        );
     }
 }

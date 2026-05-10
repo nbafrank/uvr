@@ -66,9 +66,7 @@ impl CranPackageEntry {
 
     pub fn tarball_url_with_base(&self, base: &str) -> String {
         let safe_path = self.path.as_deref().filter(|p| {
-            !p.is_empty()
-                && !p.starts_with('/')
-                && !p.split('/').any(|seg| seg == "..")
+            !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|seg| seg == "..")
         });
         let dir = match safe_path {
             Some(p) => format!("{}/{}", base, p),
@@ -295,9 +293,11 @@ impl CranRegistry {
         host: &crate::r_version::downloader::HostTriple,
         r_minor: &str,
     ) -> bool {
-        self.index
-            .all_entries()
-            .any(|e| e.built.as_ref().is_some_and(|b| b.matches_host(host, r_minor)))
+        self.index.all_entries().any(|e| {
+            e.built
+                .as_ref()
+                .is_some_and(|b| b.matches_host(host, r_minor))
+        })
     }
 
     /// Returns the binary tarball URL for `(name, version)` only if the
@@ -721,7 +721,8 @@ MD5sum: def789
 
     #[test]
     fn parse_built_canonical() {
-        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix").unwrap();
+        let b =
+            parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix").unwrap();
         assert_eq!(b.r_version, "4.5.0");
         assert_eq!(b.platform, "x86_64-pc-linux-musl");
         assert_eq!(b.date, "2025-01-15 12:00:00 UTC");
@@ -970,7 +971,9 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
         assert_eq!(
             reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5"),
-            Some("https://example.com/src/contrib/x86_64/alpine-3.23/rlang_1.1.6.tar.gz".to_string())
+            Some(
+                "https://example.com/src/contrib/x86_64/alpine-3.23/rlang_1.1.6.tar.gz".to_string()
+            )
         );
     }
 
@@ -981,7 +984,9 @@ Version: 1.1.6
 
 ";
         let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
-        assert!(reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5").is_none());
+        assert!(reg
+            .binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5")
+            .is_none());
     }
 
     #[test]
