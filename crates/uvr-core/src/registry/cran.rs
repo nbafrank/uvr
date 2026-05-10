@@ -206,6 +206,22 @@ impl CranIndex {
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
+
+    /// Iterator over all entries (all versions of all packages).
+    pub fn all_entries(&self) -> impl Iterator<Item = &CranPackageEntry> {
+        self.packages.values().flat_map(|v| v.iter())
+    }
+
+    /// Find the entry for `(name, exact version)`. Compares the normalized
+    /// version (e.g. `1.1-3` → `1.1.3`).
+    pub fn find_exact(&self, name: &str, version: &str) -> Option<&CranPackageEntry> {
+        let want = normalize_version(version);
+        let parsed = Version::parse(&want).ok()?;
+        self.packages
+            .get(name)?
+            .iter()
+            .find(|e| e.version == parsed)
+    }
 }
 
 /// The CRAN registry — downloads and caches the package index.
@@ -260,6 +276,49 @@ impl CranRegistry {
             force_refresh,
         )
         .await
+    }
+
+    /// Returns true iff at least one entry in this registry has a `Built:`
+    /// line matching the host. Used at sync time to decide whether this
+    /// custom source contributes binaries.
+    pub fn is_binary_capable(
+        &self,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> bool {
+        self.index
+            .all_entries()
+            .any(|e| e.built.as_ref().is_some_and(|b| b.matches_host(host, r_minor)))
+    }
+
+    /// Returns the binary tarball URL for `(name, version)` only if the
+    /// matching entry exists, its version matches, and its `Built:` line
+    /// matches the host. Path traversal hardening is applied.
+    pub fn binary_url_for(
+        &self,
+        name: &str,
+        version: &str,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> Option<String> {
+        let entry = self.index.find_exact(name, version)?;
+        let built = entry.built.as_ref()?;
+        if !built.matches_host(host, r_minor) {
+            return None;
+        }
+        Some(entry.tarball_url_with_base(&self.src_base))
+    }
+
+    /// Test-only constructor.
+    #[doc(hidden)]
+    pub fn for_test(index: CranIndex, src_base: String) -> Self {
+        CranRegistry {
+            index,
+            src_base,
+            source: PackageSource::Custom {
+                name: "test".to_string(),
+            },
+        }
     }
 
     async fn fetch_from(
@@ -776,6 +835,11 @@ Built: garbage-not-actually-built-format";
         );
     }
 
+    fn registry_from_packages(text: &str, src_base: &str) -> CranRegistry {
+        let index = parse_packages_gz(text).unwrap();
+        CranRegistry::for_test(index, src_base.to_string())
+    }
+
     fn musl_alpine_host() -> crate::r_version::downloader::HostTriple {
         crate::r_version::downloader::HostTriple {
             arch: "x86_64".into(),
@@ -830,5 +894,89 @@ Built: garbage-not-actually-built-format";
     fn built_mismatches_os_family_windows_on_linux() {
         let b = parse_built("R 4.5.0; x86_64-w64-mingw32; 2025-01-15; windows").unwrap();
         assert!(!b.matches_host(&gnu_ubuntu_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_yes_with_musl_built() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_no_for_source_only() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(!reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_no_for_wrong_libc() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(!reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn binary_url_for_returns_url_when_match() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert_eq!(
+            reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5"),
+            Some("https://example.com/src/contrib/rlang_1.1.6.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn binary_url_for_honors_path() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Path: x86_64/alpine-3.23
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert_eq!(
+            reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5"),
+            Some("https://example.com/src/contrib/x86_64/alpine-3.23/rlang_1.1.6.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn binary_url_for_returns_none_when_no_match() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5").is_none());
+    }
+
+    #[test]
+    fn binary_url_for_returns_none_for_unknown_package() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg
+            .binary_url_for("nonexistent", "0.0.0", &musl_alpine_host(), "4.5")
+            .is_none());
     }
 }
