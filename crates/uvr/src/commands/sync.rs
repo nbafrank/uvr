@@ -754,7 +754,6 @@ pub async fn install_from_lockfile(
     }
 
     let mut runtime_binary = 0usize;
-    let mut runtime_pure_r = 0usize;
     let mut runtime_source = 0usize;
 
     if !plans.is_empty() {
@@ -819,28 +818,21 @@ pub async fn install_from_lockfile(
 
         runtime_binary = detected_per_plan
             .iter()
-            .filter(|k| **k == InstallKind::Binary)
-            .count();
-        runtime_pure_r = detected_per_plan
-            .iter()
-            .filter(|k| **k == InstallKind::PureR)
+            .filter(|k| matches!(**k, InstallKind::Binary | InstallKind::PureR))
             .count();
         runtime_source = detected_per_plan
             .iter()
             .filter(|k| **k == InstallKind::Source)
             .count();
 
-        // Compact plan line: "3 cached · 4 binary · 2 pure R · 1 from source"
-        if cache_hit_count > 0 || runtime_binary > 0 || runtime_pure_r > 0 || runtime_source > 0 {
+        // Compact plan line: "3 cached · 4 binary · 1 from source"
+        if cache_hit_count > 0 || runtime_binary > 0 || runtime_source > 0 {
             let mut parts = Vec::new();
             if cache_hit_count > 0 {
                 parts.push(format!("{cache_hit_count} cached"));
             }
             if runtime_binary > 0 {
                 parts.push(format!("{runtime_binary} binary"));
-            }
-            if runtime_pure_r > 0 {
-                parts.push(format!("{runtime_pure_r} pure R"));
             }
             if runtime_source > 0 {
                 parts.push(format!("{runtime_source} from source"));
@@ -962,9 +954,6 @@ pub async fn install_from_lockfile(
     }
     if runtime_binary > 0 {
         sub_parts.push(format!("{runtime_binary} binary"));
-    }
-    if runtime_pure_r > 0 {
-        sub_parts.push(format!("{runtime_pure_r} pure R"));
     }
     if runtime_source > 0 {
         sub_parts.push(format!("{runtime_source} from source"));
