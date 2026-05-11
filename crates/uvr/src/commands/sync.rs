@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use uvr_core::installer::binary_install::{
-    detect_built_from_tarball, install_binary_package, patch_installed_so_files,
+    inspect_tarball, install_binary_package, patch_installed_so_files,
 };
 use uvr_core::installer::download::{DownloadSpec, Downloader};
 use uvr_core::installer::package_cache;
@@ -32,6 +32,17 @@ struct PkgPlan<'a> {
     url: String,
     fallback_url: Option<String>,
     is_binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallKind {
+    /// Pre-built binary tarball with host-matching `Built:`. Fast-path extract.
+    Binary,
+    /// Pure-R package (`NeedsCompilation: no`). No compile, but R must do the
+    /// lazyload / install hooks, so we still use `R CMD INSTALL`.
+    PureR,
+    /// Real source build (NeedsCompilation absent or "yes" with no matching Built:).
+    Source,
 }
 
 /// Pure function: compute the install plan for one locked package given
@@ -743,6 +754,7 @@ pub async fn install_from_lockfile(
     }
 
     let mut runtime_binary = 0usize;
+    let mut runtime_pure_r = 0usize;
     let mut runtime_source = 0usize;
 
     if !plans.is_empty() {
@@ -779,27 +791,56 @@ pub async fn install_from_lockfile(
         // publish pre-built tarballs without advertising them in PACKAGES.gz,
         // this means users see the correct binary/source split throughout the
         // run, not just in the final summary.
-        let detected_per_plan: Vec<bool> = plans
+        let detected_per_plan: Vec<InstallKind> = plans
             .iter()
             .zip(results.iter())
             .map(|(plan, result)| {
-                result.used_binary
-                    || detect_built_from_tarball(&result.path, &plan.pkg.name)
-                        .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str))
+                if result.used_binary {
+                    return InstallKind::Binary;
+                }
+                match inspect_tarball(&result.path, &plan.pkg.name) {
+                    Some(meta) => {
+                        let host_matches = meta
+                            .built
+                            .as_ref()
+                            .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str));
+                        if host_matches {
+                            InstallKind::Binary
+                        } else if meta.pure_r {
+                            InstallKind::PureR
+                        } else {
+                            InstallKind::Source
+                        }
+                    }
+                    None => InstallKind::Source,
+                }
             })
             .collect();
 
-        runtime_binary = detected_per_plan.iter().filter(|&&b| b).count();
-        runtime_source = detected_per_plan.len() - runtime_binary;
+        runtime_binary = detected_per_plan
+            .iter()
+            .filter(|k| **k == InstallKind::Binary)
+            .count();
+        runtime_pure_r = detected_per_plan
+            .iter()
+            .filter(|k| **k == InstallKind::PureR)
+            .count();
+        runtime_source = detected_per_plan
+            .iter()
+            .filter(|k| **k == InstallKind::Source)
+            .count();
 
-        // Compact plan line: "3 cached · 4 binary · 1 from source"
-        if cache_hit_count > 0 || runtime_binary > 0 || runtime_source > 0 {
+        // Compact plan line: "3 cached · 4 binary · 2 pure R · 1 from source"
+        if cache_hit_count > 0 || runtime_binary > 0 || runtime_pure_r > 0 || runtime_source > 0 {
             let mut parts = Vec::new();
             if cache_hit_count > 0 {
                 parts.push(format!("{cache_hit_count} cached"));
             }
             if runtime_binary > 0 {
                 parts.push(format!("{runtime_binary} binary"));
+            }
+            if runtime_pure_r > 0 {
+                parts.push(format!("{runtime_pure_r} pure R"));
             }
             if runtime_source > 0 {
                 parts.push(format!("{runtime_source} from source"));
@@ -817,9 +858,10 @@ pub async fn install_from_lockfile(
             ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
         }
 
-        // "No binary repo" hint — only fires when truly no packages were
-        // reclassified as binary after tarball-sniff.
-        if runtime_source > 0 && runtime_binary == 0 && !plans.is_empty() {
+        // "No binary repo" hint — only fires when no packages were binary and at
+        // least one real source build (compilation) is needed. Pure-R alone doesn't
+        // indicate "no binaries available" — those packages simply have no binary form.
+        if runtime_binary == 0 && runtime_source > 0 && !plans.is_empty() {
             println!(
                 "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
                 host_info.distro_label, r_minor_str, runtime_source
@@ -831,57 +873,70 @@ pub async fn install_from_lockfile(
         // Aggregate progress bar — one line for the whole install phase.
         let total = plans.len() as u64;
         let pb = ui::make_aggregate_bar(total);
-        for ((plan, result), &detected_binary) in plans
+        for ((plan, result), &kind) in plans
             .iter()
             .zip(results.iter())
             .zip(detected_per_plan.iter())
         {
             tracing::debug!(
-                "install plan for {} {}: plan.is_binary={} used_binary={} detected_binary={}",
+                "install plan for {} {}: plan.is_binary={} used_binary={} kind={:?}",
                 plan.pkg.name,
                 plan.pkg.version,
                 plan.is_binary,
                 result.used_binary,
-                detected_binary,
+                kind,
             );
 
-            let verb = if detected_binary {
-                "installing"
-            } else {
-                "compiling"
+            let verb = match kind {
+                InstallKind::Binary => "installing",
+                InstallKind::PureR => "installing", // also fast — no compile
+                InstallKind::Source => "compiling",
             };
             pb.set_message(format!("{verb} {} {}", plan.pkg.name, plan.pkg.version));
 
-            if detected_binary {
-                install_binary_package(
-                    &result.path,
-                    &library,
-                    &plan.pkg.name,
-                    libr_path.as_deref(),
-                )
-                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
-            } else {
-                // For source compilation, surface the last build line as the bar message.
-                let name = plan.pkg.name.clone();
-                let version = plan.pkg.version.clone();
-                let pb_for_closure = pb.clone();
-                installer
-                    .install_streaming(&result.path, &library, &plan.pkg.name, timeout, |line| {
-                        let short: String = line.chars().take(50).collect();
-                        pb_for_closure.set_message(format!("compiling {name} {version} ({short})"));
-                    })
+            match kind {
+                InstallKind::Binary => {
+                    install_binary_package(
+                        &result.path,
+                        &library,
+                        &plan.pkg.name,
+                        libr_path.as_deref(),
+                    )
                     .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+                }
+                InstallKind::PureR | InstallKind::Source => {
+                    // R CMD INSTALL handles both: PureR is a fast no-compile install;
+                    // Source actually compiles. R detects which from DESCRIPTION.
+                    let name = plan.pkg.name.clone();
+                    let version = plan.pkg.version.clone();
+                    let pb_for_closure = pb.clone();
+                    installer
+                        .install_streaming(
+                            &result.path,
+                            &library,
+                            &plan.pkg.name,
+                            timeout,
+                            |line| {
+                                let short: String = line.chars().take(50).collect();
+                                pb_for_closure
+                                    .set_message(format!("compiling {name} {version} ({short})"));
+                            },
+                        )
+                        .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+                }
             }
 
             pb.inc(1);
 
             // Store the newly installed package in the global cache for future reuse.
+            // cache_key takes a bool — Binary is true; PureR + Source are false.
+            let cache_key_binary = matches!(kind, InstallKind::Binary);
             let key = package_cache::cache_key(
                 &plan.pkg.name,
                 &plan.pkg.version,
                 plan.pkg.checksum.as_deref(),
                 &r_minor_str,
-                detected_binary,
+                cache_key_binary,
                 libr_path.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);
@@ -907,6 +962,9 @@ pub async fn install_from_lockfile(
     }
     if runtime_binary > 0 {
         sub_parts.push(format!("{runtime_binary} binary"));
+    }
+    if runtime_pure_r > 0 {
+        sub_parts.push(format!("{runtime_pure_r} pure R"));
     }
     if runtime_source > 0 {
         sub_parts.push(format!("{runtime_source} from source"));

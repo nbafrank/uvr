@@ -9,6 +9,16 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
+- **Install summary distinguishes pure-R from source (pat-s)**:
+  packages with `NeedsCompilation: no` in their tarball DESCRIPTION
+  are now reported as "pure R" rather than lumped with "from source".
+  Three-way split: `N binary, M pure R, K from source`. Pure-R packages
+  still go through `R CMD INSTALL` for the lazyload / install hooks
+  (they don't need compilation but they do need R's post-install
+  processing). For a typical rcmdcheck install on cran.rpkgs.com, the
+  summary now reads `38 binary, 45 pure R, 0 from source` instead of
+  the previous `38 binary, 45 from source`.
+
 - **Pre-install and "no binary repo" messages reflect actual classification (pat-s)**:
   uvr now runs Task 13's tarball-sniff for every downloaded package
   before printing the pre-install summary. Both the upfront
