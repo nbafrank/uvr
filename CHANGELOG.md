@@ -9,14 +9,16 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
-- **Install summary reflects actual binary/source counts (pat-s)**:
-  The final "Installed N package(s) — X binary, Y from source" line now
-  uses runtime classification (after Task 13's tarball-sniff) instead of
-  the lock-time pre-estimate. For repos like cran.rpkgs.com that omit
-  `Built:` from PACKAGES, every tarball was previously counted as
-  "from source" even when extracted via the fast-path
-  `install_binary_package`. Also adds a `tracing::debug!` per package
-  showing the reclassification decision — surface with `RUST_LOG=debug`.
+- **Pre-install and "no binary repo" messages reflect actual classification (pat-s)**:
+  uvr now runs Task 13's tarball-sniff for every downloaded package
+  before printing the pre-install summary. Both the upfront
+  "Installing N package(s): X binary, Y from source" line and the
+  "No binary repo for X on R Y" hint now use runtime classification
+  instead of the lock-time pre-estimate. For cran.rpkgs.com (binaries
+  served behind a source-style PACKAGES), the upfront message now
+  correctly says "binary" for entries with a host-matching `Built:`
+  inside their tarball DESCRIPTION. The "no binary repo" hint only
+  fires when no package was reclassified.
 
 - **extract_tgz uses manual file extraction (pat-s)**: replaced
   `tar::Entry::unpack` (which performs metadata preservation, symlink

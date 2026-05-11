@@ -732,18 +732,6 @@ pub async fn install_from_lockfile(
         Vec::new()
     };
 
-    // If absolutely no source supplied a binary URL for any package, emit
-    // one info line so the user understands why everything is compiling.
-    let no_binaries = plans.iter().all(|p| !p.is_binary) && !plans.is_empty();
-    if no_binaries {
-        println!(
-            "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
-            host_info.distro_label,
-            r_minor_str,
-            plans.len()
-        );
-    }
-
     // Guard against packages with no download URL.
     for plan in &plans {
         if plan.url.is_empty() {
@@ -752,34 +740,6 @@ pub async fn install_from_lockfile(
                 plan.pkg.name
             );
         }
-    }
-
-    let binary_count = plans.iter().filter(|p| p.is_binary).count();
-    let source_count = plans.len() - binary_count;
-
-    // Compact plan line: "3 cached · 4 binary · 1 from source"
-    if cache_hit_count > 0 || binary_count > 0 || source_count > 0 {
-        let mut parts = Vec::new();
-        if cache_hit_count > 0 {
-            parts.push(format!("{cache_hit_count} cached"));
-        }
-        if binary_count > 0 {
-            parts.push(format!("{binary_count} binary"));
-        }
-        if source_count > 0 {
-            parts.push(format!("{source_count} from source"));
-        }
-        let sep = format!(" {} ", ui::glyph::bullet());
-        let action = match (new_count, upgrade_count) {
-            (n, 0) => format!("Installing {n} package(s)"),
-            (0, u) => format!("Upgrading {u} package(s)"),
-            (n, u) => format!("Installing {n}, upgrading {u}"),
-        };
-        // Colon between the action and the breakdown reads cleaner than a bullet,
-        // which visually duplicates the separators inside `parts` — especially in
-        // ASCII mode where `bullet()` renders as `.` and the line ends up looking
-        // like "Installing 116 package(s) . 111 binary . 5 from source".
-        ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
     }
 
     let mut runtime_binary = 0usize;
@@ -813,25 +773,69 @@ pub async fn install_from_lockfile(
             .await
             .context("Download failed")?;
 
+        // Phase: pre-sniff every downloaded tarball so the upfront message and
+        // "no binary repo" hint both reflect runtime classification rather than
+        // the lock-time pre-estimate.  For repos like cran.rpkgs.com that
+        // publish pre-built tarballs without advertising them in PACKAGES.gz,
+        // this means users see the correct binary/source split throughout the
+        // run, not just in the final summary.
+        let detected_per_plan: Vec<bool> = plans
+            .iter()
+            .zip(results.iter())
+            .map(|(plan, result)| {
+                result.used_binary
+                    || detect_built_from_tarball(&result.path, &plan.pkg.name)
+                        .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str))
+            })
+            .collect();
+
+        runtime_binary = detected_per_plan.iter().filter(|&&b| b).count();
+        runtime_source = detected_per_plan.len() - runtime_binary;
+
+        // Compact plan line: "3 cached · 4 binary · 1 from source"
+        if cache_hit_count > 0 || runtime_binary > 0 || runtime_source > 0 {
+            let mut parts = Vec::new();
+            if cache_hit_count > 0 {
+                parts.push(format!("{cache_hit_count} cached"));
+            }
+            if runtime_binary > 0 {
+                parts.push(format!("{runtime_binary} binary"));
+            }
+            if runtime_source > 0 {
+                parts.push(format!("{runtime_source} from source"));
+            }
+            let sep = format!(" {} ", ui::glyph::bullet());
+            let action = match (new_count, upgrade_count) {
+                (n, 0) => format!("Installing {n} package(s)"),
+                (0, u) => format!("Upgrading {u} package(s)"),
+                (n, u) => format!("Installing {n}, upgrading {u}"),
+            };
+            // Colon between the action and the breakdown reads cleaner than a bullet,
+            // which visually duplicates the separators inside `parts` — especially in
+            // ASCII mode where `bullet()` renders as `.` and the line ends up looking
+            // like "Installing 116 package(s) . 111 binary . 5 from source".
+            ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
+        }
+
+        // "No binary repo" hint — only fires when truly no packages were
+        // reclassified as binary after tarball-sniff.
+        if runtime_source > 0 && runtime_binary == 0 && !plans.is_empty() {
+            println!(
+                "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
+                host_info.distro_label, r_minor_str, runtime_source
+            );
+        }
+
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
         // Aggregate progress bar — one line for the whole install phase.
         let total = plans.len() as u64;
         let pb = ui::make_aggregate_bar(total);
-        for (plan, result) in plans.iter().zip(results.iter()) {
-            // If the lockfile/registry said source, but the downloaded tarball has
-            // a host-matching Built: in DESCRIPTION, treat it as a binary — gives us
-            // the fast-path extract and accurate progress accounting for repos like
-            // cran.rpkgs.com that publish binaries without advertising them in PACKAGES.
-            let detected_binary = result.used_binary
-                || detect_built_from_tarball(&result.path, &plan.pkg.name)
-                    .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str));
-
-            if detected_binary {
-                runtime_binary += 1;
-            } else {
-                runtime_source += 1;
-            }
+        for ((plan, result), &detected_binary) in plans
+            .iter()
+            .zip(results.iter())
+            .zip(detected_per_plan.iter())
+        {
             tracing::debug!(
                 "install plan for {} {}: plan.is_binary={} used_binary={} detected_binary={}",
                 plan.pkg.name,
