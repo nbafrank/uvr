@@ -663,12 +663,17 @@ pub async fn install_from_lockfile(
         // into binary-capable vs. source-only. A registry is "binary-capable"
         // when at least one of its PACKAGES entries has a Built: line that
         // matches the running host triple + R minor.
-        let custom_registries = fetch_custom_registries(
-            &client,
-            &project.manifest.sources,
-            Some(user_agent.as_str()),
-        )
-        .await;
+        let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
+        let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
+            .iter()
+            .map(|r| uvr_core::manifest::PackageSource {
+                name: r.name.clone(),
+                url: r.url.clone(),
+            })
+            .chain(project.manifest.sources.iter().cloned())
+            .collect();
+        let custom_registries =
+            fetch_custom_registries(&client, &combined_sources, Some(user_agent.as_str())).await;
         let custom_binary: Vec<&uvr_core::registry::cran::CranRegistry> = custom_registries
             .iter()
             .filter(|r| r.is_binary_capable(&host_info.triple, &r_minor_str))

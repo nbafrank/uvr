@@ -18,6 +18,16 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Features
 
+- **`UVR_REPOS` env var (pat-s)**: inject `[[sources]]` entries from
+  the environment instead of mutating `uvr.toml`. Comma-separated URLs;
+  source names auto-derived from the URL host. Env-injected repos take
+  priority over `uvr.toml` entries. Useful for CI workflows that want
+  to swap mirrors without committing to project config:
+
+  ```sh
+  UVR_REPOS=https://cran.rpkgs.com/arm64/alpine323/latest uvr sync
+  ```
+
 - **Custom binary sources via `[[sources]]` (pat-s)**: any
   CRAN-like repo declared in `[[sources]]` can now supply binaries
   to uvr. Auto-detection: an entry's `Built:` field is matched

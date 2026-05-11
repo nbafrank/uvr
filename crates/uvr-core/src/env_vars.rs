@@ -77,6 +77,64 @@ pub fn r_install_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"))
 }
 
+/// UVR_REPOS — comma-separated list of CRAN-like repository URLs to use
+/// in addition to (and at higher priority than) any `[[sources]]` in
+/// `uvr.toml`. Each URL becomes a `[[sources]]` entry whose name is
+/// auto-derived from the URL host. Used to inject repos via CI env
+/// instead of mutating `uvr.toml`:
+///
+/// ```sh
+/// UVR_REPOS=https://cran.rpkgs.com/arm64/alpine323/latest
+/// UVR_REPOS=https://repo1.example/cran,https://repo2.example/cran
+/// ```
+///
+/// Returns the parsed list, or `None` when the env var is unset / empty.
+pub fn repos() -> Option<Vec<EnvRepo>> {
+    let raw = read_env_var("UVR_REPOS")?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let out: Vec<EnvRepo> = trimmed
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|url| EnvRepo {
+            name: derive_name_from_url(url),
+            url: url.to_string(),
+        })
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvRepo {
+    pub name: String,
+    pub url: String,
+}
+
+/// Derive a stable, human-readable source name from a repo URL.
+/// Falls back to the URL if no host can be parsed. Strips any port
+/// and lowercases for predictability.
+fn derive_name_from_url(url: &str) -> String {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let host_with_port = &after_scheme[..host_end];
+    let host = host_with_port.split(':').next().unwrap_or(host_with_port);
+    if host.is_empty() {
+        url.to_string()
+    } else {
+        host.to_lowercase()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +179,7 @@ mod tests {
             "UVR_LIBRARY",
             "UVR_PROGRESS",
             "UVR_R_INSTALL_DIR",
+            "UVR_REPOS",
         ];
 
         let _guard = EnvGuard::new(&vars_to_test);
@@ -186,5 +245,38 @@ mod tests {
             env::set_var(var, "   ");
         }
         assert_eq!(extra_libs(), None);
+    }
+
+    // All repos() checks run in a single test to avoid race conditions with
+    // the parallel test runner mutating the same env var.
+    #[test]
+    fn test_env_repos() {
+        let _guard = EnvGuard::new(&["UVR_REPOS"]);
+
+        // unset → None
+        assert!(repos().is_none());
+
+        // single URL
+        env::set_var("UVR_REPOS", "https://cran.rpkgs.com/arm64/alpine323/latest");
+        let v = repos().expect("one repo");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "cran.rpkgs.com");
+        assert_eq!(v[0].url, "https://cran.rpkgs.com/arm64/alpine323/latest");
+
+        // multiple comma-separated URLs
+        env::set_var("UVR_REPOS", "https://a.example/cran,https://b.example/cran");
+        let v = repos().expect("two repos");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "a.example");
+        assert_eq!(v[1].name, "b.example");
+
+        // port stripped from name
+        env::set_var("UVR_REPOS", "http://localhost:8080/cran");
+        let v = repos().expect("one repo with port");
+        assert_eq!(v[0].name, "localhost");
+
+        // whitespace-only → None
+        env::set_var("UVR_REPOS", "  ");
+        assert!(repos().is_none());
     }
 }

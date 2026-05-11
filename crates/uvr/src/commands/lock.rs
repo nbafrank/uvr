@@ -120,8 +120,20 @@ async fn resolve_lockfile(
         }
     };
     let custom_fut = async {
+        // Collect sources: env-injected first (CI override priority), then
+        // manifest-declared. Each becomes a CranRegistry fetched in parallel.
+        let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
+        let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
+            .iter()
+            .map(|r| uvr_core::manifest::PackageSource {
+                name: r.name.clone(),
+                url: r.url.clone(),
+            })
+            .chain(project.manifest.sources.iter().cloned())
+            .collect();
+
         let mut regs = Vec::new();
-        for source in &project.manifest.sources {
+        for source in &combined_sources {
             let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade, None)
                 .await
                 .with_context(|| {
