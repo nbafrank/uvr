@@ -9,6 +9,14 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
+- **extract_tgz tolerates filesystem mtime-set failures (pat-s)**: uvr's
+  pure-Rust tar extraction (used by `install_binary_package`) previously
+  tried to preserve each file's mtime via `futimens()`. On some CI
+  filesystems (Drone runners, overlayfs setups) this syscall fails on
+  the first file, aborting extraction at `<pkg>/DESCRIPTION`. R packages
+  have no meaningful mtime to preserve, so the fix disables mtime,
+  permission, ownership, and xattr preservation entirely.
+
 - **Alpine binary install (pat-s)**: `detect_posit_distro_slug()`
   no longer rewrites alpine to `ubuntu-2204`. On alpine, uvr now produces
   the slug `alpine-X.Y` which `ppm_linux_codename` cannot translate, so

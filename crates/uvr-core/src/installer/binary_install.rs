@@ -211,6 +211,15 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
     let file = std::fs::File::open(tgz_path)?;
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
+    // Disable metadata preservation. R packages have no meaningful mtime
+    // (content + structure matter; the original build timestamp does not),
+    // and futimens()/utimensat() can fail on certain CI filesystems
+    // (overlayfs, FUSE-backed mounts, sandboxed runners). The previous
+    // default behavior caused first-entry extraction failures on Drone CI.
+    archive.set_preserve_mtime(false);
+    archive.set_preserve_permissions(false);
+    archive.set_unpack_xattrs(false);
+    archive.set_preserve_ownerships(false);
 
     // Extract into a staging directory, then atomically rename on success.
     let staging = tempfile::TempDir::new_in(library).map_err(|e| {
@@ -560,5 +569,62 @@ mod tests {
         let tarball = write_tarball_with_description("Package: rlang\nVersion: 1.2.0\n");
         // Wrong package name → DESCRIPTION not at "otherpkg/DESCRIPTION"
         assert!(detect_built_from_tarball(tarball.path(), "otherpkg").is_none());
+    }
+
+    #[test]
+    fn extract_tgz_disables_metadata_preservation() {
+        // Build a tarball whose entry has a deliberately weird mtime that
+        // would tickle metadata-preservation paths. Extract via extract_tgz
+        // and verify the file lands without error.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tempfile::TempDir;
+
+        let tarball = tempfile::NamedTempFile::new().unwrap();
+        let bytes = b"Package: t17pkg\nVersion: 1.0\n";
+        {
+            let mut enc = GzEncoder::new(
+                std::fs::File::create(tarball.path()).unwrap(),
+                Compression::default(),
+            );
+            {
+                let mut builder = tar::Builder::new(&mut enc);
+
+                // Directory entry first.
+                let mut dir_header = tar::Header::new_gnu();
+                dir_header.set_path("t17pkg/").unwrap();
+                dir_header.set_size(0);
+                dir_header.set_mode(0o755);
+                dir_header.set_entry_type(tar::EntryType::Directory);
+                // Deliberately weird mtime that some filesystems can't honor.
+                dir_header.set_mtime(0);
+                dir_header.set_cksum();
+                builder.append(&dir_header, std::io::empty()).unwrap();
+
+                // File entry.
+                let mut header = tar::Header::new_gnu();
+                header.set_path("t17pkg/DESCRIPTION").unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_mtime(0);
+                header.set_cksum();
+                builder.append(&header, &bytes[..]).unwrap();
+
+                builder.finish().unwrap();
+            }
+            enc.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        extract_tgz(tarball.path(), library.path(), "t17pkg")
+            .expect("extract_tgz should succeed with metadata preservation disabled");
+        let extracted = library.path().join("t17pkg").join("DESCRIPTION");
+        assert!(
+            extracted.exists(),
+            "DESCRIPTION should be at {}",
+            extracted.display()
+        );
+        let content = std::fs::read_to_string(&extracted).unwrap();
+        assert!(content.starts_with("Package: t17pkg"));
     }
 }
