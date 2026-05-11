@@ -67,9 +67,8 @@ async fn resolve_lockfile(
 ) -> Result<Lockfile> {
     // Query the actual running R version to pin in the lockfile.
     let r_constraint = project.manifest.project.r_version.as_deref();
-    let actual_r_version = find_r_binary(r_constraint)
-        .ok()
-        .and_then(|r| query_r_version(&r));
+    let r_binary_opt = find_r_binary(r_constraint).ok();
+    let actual_r_version = r_binary_opt.as_deref().and_then(query_r_version);
 
     let spinner = make_spinner("Resolving dependencies...");
 
@@ -121,14 +120,23 @@ async fn resolve_lockfile(
     };
     let custom_fut = async {
         // Collect sources: env-injected first (CI override priority), then
-        // manifest-declared. Each becomes a CranRegistry fetched in parallel.
+        // R's getOption("repos") (auto-discovered), then manifest-declared.
+        // Each becomes a CranRegistry fetched in parallel.
         let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
+        let r_repos = r_binary_opt
+            .as_deref()
+            .map(uvr_core::r_version::detector::discover_r_repos)
+            .unwrap_or_default();
         let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
             .iter()
             .map(|r| uvr_core::manifest::PackageSource {
                 name: r.name.clone(),
                 url: r.url.clone(),
             })
+            .chain(r_repos.iter().map(|r| uvr_core::manifest::PackageSource {
+                name: r.name.clone(),
+                url: r.url.clone(),
+            }))
             .chain(project.manifest.sources.iter().cloned())
             .collect();
 

@@ -664,12 +664,17 @@ pub async fn install_from_lockfile(
         // when at least one of its PACKAGES entries has a Built: line that
         // matches the running host triple + R minor.
         let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
+        let r_repos = uvr_core::r_version::detector::discover_r_repos(r_binary.as_path());
         let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
             .iter()
             .map(|r| uvr_core::manifest::PackageSource {
                 name: r.name.clone(),
                 url: r.url.clone(),
             })
+            .chain(r_repos.iter().map(|r| uvr_core::manifest::PackageSource {
+                name: r.name.clone(),
+                url: r.url.clone(),
+            }))
             .chain(project.manifest.sources.iter().cloned())
             .collect();
         let custom_registries =

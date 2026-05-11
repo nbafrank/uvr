@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::env_vars::EnvRepo;
 use crate::error::{Result, UvrError};
 use crate::project::read_r_version_pin_from;
 use crate::resolver::normalize_version;
@@ -229,6 +230,61 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     })
 }
 
+/// Read R's `getOption("repos")` to auto-discover CRAN-like repositories
+/// the user has already configured at the R level (typically in `Rprofile.site`).
+/// Returns `[]` on any subprocess error, malformed output, or when R has only
+/// the `@CRAN@` placeholder set.
+///
+/// Filters out:
+/// - The `@CRAN@` placeholder (means "ask the user")
+/// - Any `r-project.org` URL (cran, cloud, etc. — uvr uses these as its
+///   built-in CRAN registry; including them again would be redundant)
+/// - Bioconductor URLs (uvr handles Bioc separately via the lockfile's
+///   `bioc_version` field)
+///
+/// Output of the R subprocess is one tab-separated `name\turl` per line.
+pub fn discover_r_repos(r_binary: &Path) -> Vec<EnvRepo> {
+    let r_script =
+        "r <- getOption('repos'); for (n in names(r)) cat(n, '\\t', r[[n]], '\\n', sep='')";
+    let output = std::process::Command::new(r_binary)
+        .args(["--vanilla", "--slave", "-e", r_script])
+        .output();
+    let out = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_r_repos_output(&text)
+}
+
+/// Pure parser for the tab-separated `name\turl` output. Split out so it
+/// can be unit-tested without spawning R.
+pub(crate) fn parse_r_repos_output(text: &str) -> Vec<EnvRepo> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, url) = line.split_once('\t')?;
+            let name = name.trim();
+            let url = url.trim();
+            if name.is_empty() || url.is_empty() {
+                return None;
+            }
+            if url == "@CRAN@" {
+                return None;
+            }
+            if url.contains("r-project.org") {
+                return None;
+            }
+            if url.contains("bioconductor.org") {
+                return None;
+            }
+            Some(EnvRepo {
+                name: name.to_string(),
+                url: url.to_string(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +361,64 @@ mod tests {
         if !find_all().is_empty() {
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn parse_r_repos_typical_rpkgs_config() {
+        let text = "CRAN\thttps://cran.rpkgs.com/amd64/alpine323/latest\n";
+        let v = parse_r_repos_output(text);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "CRAN");
+        assert_eq!(v[0].url, "https://cran.rpkgs.com/amd64/alpine323/latest");
+    }
+
+    #[test]
+    fn parse_r_repos_skips_cran_default() {
+        let text = "CRAN\thttps://cran.r-project.org\n";
+        assert!(parse_r_repos_output(text).is_empty());
+    }
+
+    #[test]
+    fn parse_r_repos_skips_cloud_r_project() {
+        let text = "CRAN\thttps://cloud.r-project.org\n";
+        assert!(parse_r_repos_output(text).is_empty());
+    }
+
+    #[test]
+    fn parse_r_repos_skips_cran_placeholder() {
+        let text = "CRAN\t@CRAN@\n";
+        assert!(parse_r_repos_output(text).is_empty());
+    }
+
+    #[test]
+    fn parse_r_repos_skips_bioc() {
+        let text = "BioCsoft\thttps://bioconductor.org/packages/3.19/bioc\n";
+        assert!(parse_r_repos_output(text).is_empty());
+    }
+
+    #[test]
+    fn parse_r_repos_multiple_mixed() {
+        let text = "\
+CRAN\thttps://cran.rpkgs.com/amd64/alpine323/latest
+rpkgs\thttps://cran.rpkgs.com/arm64/alpine323/latest
+BioCsoft\thttps://bioconductor.org/packages/3.19/bioc
+default\thttps://cran.r-project.org
+";
+        let v = parse_r_repos_output(text);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].name, "CRAN");
+        assert_eq!(v[1].name, "rpkgs");
+    }
+
+    #[test]
+    fn parse_r_repos_empty_returns_empty() {
+        assert!(parse_r_repos_output("").is_empty());
+        assert!(parse_r_repos_output("\n\n").is_empty());
+    }
+
+    #[test]
+    fn parse_r_repos_malformed_lines_ignored() {
+        let text = "no-tab-here\nname\t\n\tonly-url\n";
+        assert!(parse_r_repos_output(text).is_empty());
     }
 }

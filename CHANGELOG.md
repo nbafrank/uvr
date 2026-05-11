@@ -18,6 +18,14 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Features
 
+- **Auto-discover repos from R's `getOption("repos")` (pat-s)**: uvr now
+  reads R's repos config at lock/sync time and treats non-CRAN entries
+  as auto-injected `[[sources]]`. Matches how install.packages(), pak,
+  and renv pick up `Rprofile.site` configurations. No user-side
+  `UVR_REPOS` or `[[sources]]` entry needed when R already knows where
+  the mirror lives. All `r-project.org` URLs (cran, cloud, etc.) and
+  `bioconductor.org` URLs are filtered out (uvr handles those internally).
+
 - **`UVR_REPOS` env var (pat-s)**: inject `[[sources]]` entries from
   the environment instead of mutating `uvr.toml`. Comma-separated URLs;
   source names auto-derived from the URL host. Env-injected repos take
