@@ -104,7 +104,9 @@ pub struct BuiltInfo {
 impl BuiltInfo {
     /// Returns true iff this binary build matches the given host:
     /// - R `major.minor` equals `r_minor` (patch ignored)
-    /// - Platform triple equals `host` exactly (case-sensitive)
+    /// - Platform triple matches `host` vendor-relaxed: arch, OS, and ABI must
+    ///   match exactly, but the vendor segment is ignored (Alpine reports
+    ///   `unknown`; Ubuntu/Debian report `pc`; uvr always emits `pc`)
     /// - OS family matches host's OS (linux/macos = "unix"; windows = "windows")
     pub fn matches_host(
         &self,
@@ -122,9 +124,12 @@ impl BuiltInfo {
             return false;
         }
 
-        // Exact triple string match.
-        let host_triple_str = format!("{}-{}-{}-{}", host.arch, host.vendor, host.os, host.abi);
-        if self.platform != host_triple_str {
+        // Triple match, vendor-relaxed: R reports `unknown` on Alpine
+        // but `pc` on Ubuntu/Debian, while uvr's host_triple unconditionally
+        // emits `pc` on Linux. Normalize both sides by dropping the
+        // vendor segment (the 2nd of 4) before comparing.
+        let host_normalized = format!("{}-{}-{}", host.arch, host.os, host.abi);
+        if normalize_triple_drop_vendor(&self.platform) != host_normalized {
             return false;
         }
 
@@ -139,6 +144,30 @@ impl BuiltInfo {
 
         true
     }
+}
+
+/// Drop the vendor segment (2nd of typically 4) from a platform triple so
+/// vendor variants (Alpine's `unknown` vs Ubuntu's `pc` vs macOS's `apple`)
+/// don't cause false mismatches.
+///
+/// Examples:
+/// - `aarch64-unknown-linux-musl` → `aarch64-linux-musl`
+/// - `aarch64-pc-linux-musl`      → `aarch64-linux-musl`
+/// - `x86_64-w64-mingw32`         → `x86_64-mingw32`
+/// - `aarch64-apple-darwin20`     → `aarch64-darwin20`
+///
+/// If the input doesn't look like a 3+ segment triple, returns it
+/// unchanged.
+pub(crate) fn normalize_triple_drop_vendor(triple: &str) -> String {
+    // Split on the first dash to capture arch, then on the next dash to
+    // drop the vendor segment, then rejoin with the remainder.
+    let Some((arch, rest)) = triple.split_once('-') else {
+        return triple.to_string();
+    };
+    let Some((_vendor, tail)) = rest.split_once('-') else {
+        return triple.to_string();
+    };
+    format!("{arch}-{tail}")
 }
 
 /// Parse a `Built:` field. Lenient: returns `None` on anything that doesn't
@@ -1000,5 +1029,83 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         assert!(reg
             .binary_url_for("nonexistent", "0.0.0", &musl_alpine_host(), "4.5")
             .is_none());
+    }
+
+    #[test]
+    fn matches_host_ignores_vendor_alpine_r_reports_unknown() {
+        // R built on Alpine reports `aarch64-unknown-linux-musl`,
+        // but uvr's host_triple emits `aarch64-pc-linux-musl`.
+        // These must match anyway — vendor is decorative.
+        let b = parse_built("R 4.5.2; aarch64-unknown-linux-musl; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "aarch64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_ignores_vendor_inverse_direction() {
+        // Symmetry: Built: pc, host: unknown should also match.
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "unknown".into(),
+            os: "linux".into(),
+            abi: "gnu".into(),
+        };
+        assert!(b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_still_rejects_arch_mismatch() {
+        // Vendor-lenient does NOT mean wildly lenient. Arch must still match.
+        let b = parse_built("R 4.5.0; aarch64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(!b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_still_rejects_abi_mismatch_with_relaxed_vendor() {
+        // gnu Built: vs musl host — still mismatch.
+        let b = parse_built("R 4.5.0; x86_64-unknown-linux-gnu; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(!b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn normalize_triple_drop_vendor_examples() {
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-unknown-linux-musl"),
+            "aarch64-linux-musl"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-pc-linux-musl"),
+            "aarch64-linux-musl"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("x86_64-w64-mingw32"),
+            "x86_64-mingw32"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-apple-darwin20"),
+            "aarch64-darwin20"
+        );
+        // Degenerate inputs: returned as-is.
+        assert_eq!(normalize_triple_drop_vendor("aarch64"), "aarch64");
+        assert_eq!(normalize_triple_drop_vendor("aarch64-musl"), "aarch64-musl");
+        assert_eq!(normalize_triple_drop_vendor(""), "");
     }
 }
