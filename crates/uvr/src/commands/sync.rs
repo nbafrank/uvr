@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
+use uvr_core::installer::binary_install::{
+    detect_built_from_tarball, install_binary_package, patch_installed_so_files,
+};
 use uvr_core::installer::download::{DownloadSpec, Downloader};
 use uvr_core::installer::package_cache;
 use uvr_core::installer::r_cmd_install::RCmdInstall;
@@ -804,14 +806,22 @@ pub async fn install_from_lockfile(
         let total = plans.len() as u64;
         let pb = ui::make_aggregate_bar(total);
         for (plan, result) in plans.iter().zip(results.iter()) {
-            let verb = if result.used_binary {
+            // If the lockfile/registry said source, but the downloaded tarball has
+            // a host-matching Built: in DESCRIPTION, treat it as a binary — gives us
+            // the fast-path extract and accurate progress accounting for repos like
+            // cran.rpkgs.com that publish binaries without advertising them in PACKAGES.
+            let detected_binary = result.used_binary
+                || detect_built_from_tarball(&result.path, &plan.pkg.name)
+                    .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str));
+
+            let verb = if detected_binary {
                 "installing"
             } else {
                 "compiling"
             };
             pb.set_message(format!("{verb} {} {}", plan.pkg.name, plan.pkg.version));
 
-            if result.used_binary {
+            if detected_binary {
                 install_binary_package(
                     &result.path,
                     &library,
@@ -840,7 +850,7 @@ pub async fn install_from_lockfile(
                 &plan.pkg.version,
                 plan.pkg.checksum.as_deref(),
                 &r_minor_str,
-                result.used_binary,
+                detected_binary,
                 libr_path.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);

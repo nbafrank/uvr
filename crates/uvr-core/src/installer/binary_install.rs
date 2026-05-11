@@ -300,6 +300,41 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
     Ok(())
 }
 
+/// Inspect a downloaded `.tar.gz` for a `Built:` line in its DESCRIPTION.
+/// Returns `Some(BuiltInfo)` if found and parseable. Used to auto-detect
+/// pre-built binary tarballs from repositories whose PACKAGES.gz omits
+/// the `Built:` field (e.g. cran.rpkgs.com).
+///
+/// The check is cheap: DESCRIPTION is the first file in a well-formed R
+/// package tarball, and is read up to a 32 KiB cap.
+pub fn detect_built_from_tarball(
+    tarball_path: &Path,
+    package_name: &str,
+) -> Option<crate::registry::cran::BuiltInfo> {
+    use std::io::Read;
+    let file = std::fs::File::open(tarball_path).ok()?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let want = format!("{package_name}/DESCRIPTION");
+    for entry in archive.entries().ok()?.flatten() {
+        let path_owned = entry.path().ok()?.into_owned();
+        let path_str = path_owned.to_string_lossy();
+        if path_str == want.as_str() {
+            let mut buf = String::new();
+            let mut limited = entry.take(32 * 1024);
+            // Best-effort read; partial content is fine if Built: appears early.
+            let _ = limited.read_to_string(&mut buf);
+            for line in buf.lines() {
+                if let Some(value) = line.strip_prefix("Built:") {
+                    return crate::registry::cran::parse_built(value.trim());
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// Public entry-point for retroactively patching already-installed packages.
 /// Called by `uvr sync` to fix packages that were extracted before patching
 /// support was added. Idempotent: no-op if the `.so` already points to `libr_path`.
@@ -477,5 +512,53 @@ mod tests {
         let fake_libr = dir.path().join("lib").join("libR.dylib");
         // Should be a no-op
         patch_installed_so_files(dir.path(), &fake_libr);
+    }
+
+    fn write_tarball_with_description(content: &str) -> tempfile::NamedTempFile {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut enc = GzEncoder::new(
+            std::fs::File::create(file.path()).unwrap(),
+            Compression::default(),
+        );
+        {
+            let mut builder = tar::Builder::new(&mut enc);
+            let bytes = content.as_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_path("rlang/DESCRIPTION").unwrap();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append(&header, bytes).unwrap();
+            builder.finish().unwrap();
+        }
+        enc.finish().unwrap();
+        file
+    }
+
+    #[test]
+    fn detect_built_from_tarball_with_built() {
+        let tarball = write_tarball_with_description(
+            "Package: rlang\nVersion: 1.2.0\nBuilt: R 4.5.2; aarch64-unknown-linux-musl; 2025-01-15 12:00:00 UTC; unix\n",
+        );
+        let built = detect_built_from_tarball(tarball.path(), "rlang").unwrap();
+        assert_eq!(built.r_version, "4.5.2");
+        assert_eq!(built.platform, "aarch64-unknown-linux-musl");
+        assert_eq!(built.os_family, "unix");
+    }
+
+    #[test]
+    fn detect_built_from_tarball_no_built_returns_none() {
+        let tarball = write_tarball_with_description("Package: rlang\nVersion: 1.2.0\n");
+        assert!(detect_built_from_tarball(tarball.path(), "rlang").is_none());
+    }
+
+    #[test]
+    fn detect_built_from_tarball_missing_package_returns_none() {
+        let tarball = write_tarball_with_description("Package: rlang\nVersion: 1.2.0\n");
+        // Wrong package name → DESCRIPTION not at "otherpkg/DESCRIPTION"
+        assert!(detect_built_from_tarball(tarball.path(), "otherpkg").is_none());
     }
 }
