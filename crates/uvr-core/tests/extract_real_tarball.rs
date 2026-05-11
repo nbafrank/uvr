@@ -33,7 +33,11 @@ async fn fetch_tarball(name: &str, version: &str) -> Vec<u8> {
         .send()
         .await
         .expect("send");
-    assert!(resp.status().is_success(), "fetch {url} -> {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "fetch {url} -> {}",
+        resp.status()
+    );
     resp.bytes().await.expect("bytes").to_vec()
 }
 
@@ -67,7 +71,10 @@ async fn run_extract(name: &str, version: &str) {
                 content.contains("Package:"),
                 "DESCRIPTION should have Package: field"
             );
-            eprintln!("[extract] DESCRIPTION first line: {}", content.lines().next().unwrap_or(""));
+            eprintln!(
+                "[extract] DESCRIPTION first line: {}",
+                content.lines().next().unwrap_or("")
+            );
         }
         Err(e) => {
             panic!("install_binary_package failed: {e}");

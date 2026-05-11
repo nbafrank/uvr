@@ -782,6 +782,9 @@ pub async fn install_from_lockfile(
         ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
     }
 
+    let mut runtime_binary = 0usize;
+    let mut runtime_source = 0usize;
+
     if !plans.is_empty() {
         let specs: Vec<DownloadSpec> = plans
             .iter()
@@ -823,6 +826,20 @@ pub async fn install_from_lockfile(
             let detected_binary = result.used_binary
                 || detect_built_from_tarball(&result.path, &plan.pkg.name)
                     .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str));
+
+            if detected_binary {
+                runtime_binary += 1;
+            } else {
+                runtime_source += 1;
+            }
+            tracing::debug!(
+                "install plan for {} {}: plan.is_binary={} used_binary={} detected_binary={}",
+                plan.pkg.name,
+                plan.pkg.version,
+                plan.is_binary,
+                result.used_binary,
+                detected_binary,
+            );
 
             let verb = if detected_binary {
                 "installing"
@@ -884,11 +901,11 @@ pub async fn install_from_lockfile(
         let hit_pct = (cache_hit_count as f64 / total_count as f64 * 100.0).round() as u64;
         sub_parts.push(format!("{hit_pct}% cache hit"));
     }
-    if binary_count > 0 {
-        sub_parts.push(format!("{binary_count} binary"));
+    if runtime_binary > 0 {
+        sub_parts.push(format!("{runtime_binary} binary"));
     }
-    if source_count > 0 {
-        sub_parts.push(format!("{source_count} from source"));
+    if runtime_source > 0 {
+        sub_parts.push(format!("{runtime_source} from source"));
     }
     let sep = format!(" {} ", ui::glyph::bullet());
     ui::summary(headline, sub_parts.join(&sep));

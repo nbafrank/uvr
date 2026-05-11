@@ -9,6 +9,15 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
+- **Install summary reflects actual binary/source counts (pat-s)**:
+  The final "Installed N package(s) — X binary, Y from source" line now
+  uses runtime classification (after Task 13's tarball-sniff) instead of
+  the lock-time pre-estimate. For repos like cran.rpkgs.com that omit
+  `Built:` from PACKAGES, every tarball was previously counted as
+  "from source" even when extracted via the fast-path
+  `install_binary_package`. Also adds a `tracing::debug!` per package
+  showing the reclassification decision — surface with `RUST_LOG=debug`.
+
 - **extract_tgz uses manual file extraction (pat-s)**: replaced
   `tar::Entry::unpack` (which performs metadata preservation, symlink
   validation, and a remove-then-recreate dance) with explicit
