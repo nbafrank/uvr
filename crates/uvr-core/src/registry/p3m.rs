@@ -262,7 +262,7 @@ fn parse_index(
 
 /// Platform-specific info for P3M URL construction.
 struct PlatformInfo {
-    /// URL segment after `/bin/` (e.g. `macosx/big-sur-arm64`, `windows`).
+    /// URL segment after `/bin/` (e.g. `macosx/sonoma-arm64`, `windows`).
     /// Empty for Linux (URLs use `src/contrib/` instead, with a codename
     /// in the prefix).
     url_segment: String,
@@ -295,8 +295,19 @@ fn platform_info(
     r_minor: &str,
 ) -> Option<PlatformInfo> {
     match platform {
+        // #72 / #53: P3M's `macosx/big-sur-arm64` URL was serving
+        // x86_64 .tgz binaries — confirmed by downloading
+        // `bin/macosx/big-sur-arm64/contrib/4.6/rlang_1.2.0.tgz` and
+        // running `file rlang/libs/rlang.so`: it reported `x86_64`.
+        // The actual arm64 binaries live at `macosx/sonoma-arm64`.
+        // Apple Silicon users on R 4.6 (built for Sonoma SDK) got
+        // unloadable libraries until this routing fix.
+        // x86_64 macOS keeps `big-sur-x86_64` since that path actually
+        // serves x86_64 binaries; both `sonoma-x86_64` and
+        // `big-sur-x86_64` exist but `big-sur-x86_64` is the broader
+        // back-compat target.
         Platform::MacOsArm64 => Some(PlatformInfo {
-            url_segment: "macosx/big-sur-arm64".to_string(),
+            url_segment: "macosx/sonoma-arm64".to_string(),
             cache_key: "macos-arm64".to_string(),
             pkg_ext: "tgz",
             is_linux: false,
@@ -381,7 +392,7 @@ mod tests {
 
     fn macos_arm64_info() -> PlatformInfo {
         PlatformInfo {
-            url_segment: "macosx/big-sur-arm64".to_string(),
+            url_segment: "macosx/sonoma-arm64".to_string(),
             cache_key: "macos-arm64".to_string(),
             pkg_ext: "tgz",
             is_linux: false,
@@ -428,7 +439,7 @@ Version: 1.1.4
 
         let url = index.binary_url("ggplot2", "3.5.1").unwrap();
         assert!(url.contains("ggplot2_3.5.1.tgz"));
-        assert!(url.contains("big-sur-arm64"));
+        assert!(url.contains("sonoma-arm64"));
         assert!(url.contains("4.4"));
 
         let url = index.binary_url("dplyr", "1.1.4").unwrap();
@@ -486,7 +497,7 @@ Version: 1.1.4
     #[test]
     fn platform_info_macos_arm64() {
         let info = platform_info(Platform::MacOsArm64, None, "4.5").unwrap();
-        assert_eq!(info.url_segment, "macosx/big-sur-arm64");
+        assert_eq!(info.url_segment, "macosx/sonoma-arm64");
         assert_eq!(info.pkg_ext, "tgz");
         assert!(!info.is_linux);
     }
