@@ -269,13 +269,22 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
         // Package: field.
         let url =
             format!("https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION");
-        match client
+        let mut req = client
             .get(&url)
-            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
+            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
+        // #95: attach a GitHub token when available so CI runners
+        // walking renv.lock imports don't hit the 60 req/hr shared
+        // unauthenticated rate limit.
+        for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
+            if let Ok(tok) = std::env::var(var) {
+                let t = tok.trim();
+                if !t.is_empty() {
+                    req = req.bearer_auth(t);
+                    break;
+                }
+            }
+        }
+        match req.send().await.and_then(|r| r.error_for_status()) {
             Ok(resp) => {
                 let text = resp.text().await.unwrap_or_default();
                 let fields = uvr_core::dcf::parse_dcf_fields(&text);

@@ -61,11 +61,13 @@ pub async fn resolve_github_package_with_remotes(
 
     let desc_url =
         format!("https://raw.githubusercontent.com/{user}/{repo}/{commit_sha}/DESCRIPTION");
-    let desc_resp = client
+    let mut desc_req = client
         .get(&desc_url)
-        .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
-        .send()
-        .await?;
+        .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
+    if let Some(tok) = github_token() {
+        desc_req = desc_req.bearer_auth(tok);
+    }
+    let desc_resp = desc_req.send().await?;
     if !desc_resp.status().is_success() {
         return Err(UvrError::Other(format!(
             "Failed to fetch DESCRIPTION for {user}/{repo}@{commit_sha} (HTTP {}). \
@@ -140,12 +142,14 @@ async fn fetch_commit_sha(
     git_ref: &str,
 ) -> Result<String> {
     let url = format!("https://api.github.com/repos/{user}/{repo}/commits/{git_ref}");
-    let resp = client
+    let mut req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
-        .header("Accept", "application/vnd.github.sha")
-        .send()
-        .await?;
+        .header("Accept", "application/vnd.github.sha");
+    if let Some(tok) = github_token() {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await?;
 
     if !resp.status().is_success() {
         return Err(UvrError::Other(format!(
@@ -156,6 +160,24 @@ async fn fetch_commit_sha(
 
     let sha = resp.text().await?;
     Ok(sha.trim().trim_matches('"').to_string())
+}
+
+/// Look up a GitHub API token to attach to requests. Reads `GITHUB_PAT`
+/// first (renv/devtools convention) and falls back to `GITHUB_TOKEN`
+/// (Actions / generic CI convention). Without a token GitHub's
+/// unauthenticated rate limit is 60 req/hr shared by everyone behind
+/// the same egress IP — easy to exhaust on a CI runner walking an
+/// `renv.lock` with several github deps (#95).
+fn github_token() -> Option<String> {
+    for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
+        if let Ok(v) = std::env::var(var) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Parse `Imports` and `Depends` from parsed DESCRIPTION fields into `Dep` values.

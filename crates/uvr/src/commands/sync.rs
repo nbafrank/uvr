@@ -494,10 +494,25 @@ pub async fn install_from_lockfile(
     // (CoW on APFS, recursive copy elsewhere) — no download or extraction.
     // This runs BEFORE the P3M index fetch so a fully-cached sync skips
     // the ~1s network round-trip entirely.
+    //
+    // `--ignore-cache` / `UVR_IGNORE_CACHE=1` (#93) forces every package
+    // to re-download, useful when troubleshooting a broken cached entry
+    // for a single package without wiping the entire cache (which would
+    // force every other project to rebuild). The flag suppresses the
+    // lookup; the cache is still written to on successful install so
+    // future syncs benefit again.
     let mut cache_misses: Vec<&LockedPackage> = Vec::new();
     let mut cache_hit_count = 0usize;
+    let ignore_cache = cache_lookup_disabled();
+    if ignore_cache {
+        ui::bullet_dim("Ignoring package cache (--ignore-cache / UVR_IGNORE_CACHE).");
+    }
 
     for pkg in &to_install {
+        if ignore_cache {
+            cache_misses.push(pkg);
+            continue;
+        }
         if let Some(cached_dir) = package_cache::lookup_any(
             &pkg.name,
             &pkg.version,
@@ -987,6 +1002,17 @@ fn r_minor(version: &str) -> String {
     } else {
         version.to_string()
     }
+}
+
+/// `--ignore-cache` flag or `UVR_IGNORE_CACHE=1` env var (#93).
+/// Force re-download instead of cache lookup — useful for
+/// troubleshooting a single corrupted cached package without nuking
+/// the whole cache (which would force every other project to rebuild).
+fn cache_lookup_disabled() -> bool {
+    matches!(
+        std::env::var("UVR_IGNORE_CACHE").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
 }
 
 /// `--install-system-deps` flag or `UVR_INSTALL_SYSREQS=1` env var

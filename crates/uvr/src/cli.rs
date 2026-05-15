@@ -205,6 +205,16 @@ pub struct SyncArgs {
     /// prompted for confirmation; non-TTY runs (CI) proceed without.
     #[arg(long)]
     pub install_system_deps: bool,
+
+    /// Skip the global package cache lookup — force every package to
+    /// be re-downloaded and re-extracted (#93). Useful for
+    /// troubleshooting a single broken cached package without wiping
+    /// the entire cache (which would force every other project to
+    /// rebuild). Also enabled by setting `UVR_IGNORE_CACHE=1`. The
+    /// cache is still written to on successful install, so subsequent
+    /// syncs benefit again.
+    #[arg(long)]
+    pub ignore_cache: bool,
 }
 
 // ────────────────────────────────────────────────────────────
