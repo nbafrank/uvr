@@ -7,6 +7,153 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.5 (2026-05-15)
+
+Largest batched release since v0.3.0. Two new commands, one new
+contributor PR merged, one critical bug fix for Apple Silicon, plus
+roughly a dozen smaller fixes and developer-experience improvements.
+
+### Features
+
+- **`uvr scan` (#82)** — new subcommand that walks `.R`, `.Rmd`, and
+  `.Qmd` files in the project (honouring `.gitignore` and a new
+  `.uvrignore`) and reports packages used via `library()`, `require()`,
+  `requireNamespace()`, `loadNamespace()`, `pkg::fn`, `pkg:::fn`, and
+  roxygen2 `@import` / `@importFrom` tags that aren't declared in
+  `uvr.toml`. `--all` reports every reference with `(declared)` /
+  `(missing)` markers; default mode reports only the missing set with a
+  copy-paste `uvr add ...` hint. Base R packages are filtered out.
+
+- **`uvr sync --install-system-deps` / `UVR_INSTALL_SYSREQS=1` (#30)**
+  — opt-in flag that runs the platform's package manager
+  (`apk add` / `sudo apt-get install` / `sudo dnf install`) to install
+  missing system libraries instead of just printing the hint. Effective
+  UID checked via `geteuid()`; sudo applied uniformly when not root
+  (including on Alpine). Falls back gracefully when sudo is needed but
+  missing on PATH (no hard-bail in minimal containers). Interactive
+  TTY gets a `[y/N]` confirm with N default; non-TTY runs (CI)
+  proceed since the user opted in.
+
+- **`uvr sync --ignore-cache` / `UVR_IGNORE_CACHE=1` (#93)** — force
+  re-download instead of cache lookup. Useful for troubleshooting a
+  single corrupted cached package without wiping the entire cache.
+  Cache is still written on successful install, so subsequent syncs
+  benefit again.
+
+- **Environment-variable customisation of paths (#79, contributed by
+  @bsirak)** — `UVR_CACHE_DIR`, `UVR_R_INSTALL_DIR`, and
+  `UVR_INSTALL_DIR` now override the default `~/.uvr/{cache,r-versions}`
+  and standalone-installer target directories. Joins existing
+  `UVR_LIBRARY`, `UVR_EXTRA_LIBS`, `UVR_INSTALL_TIMEOUT`,
+  `UVR_PROGRESS`. All reads centralised through a new
+  `crates/uvr-core/src/env_vars.rs` module with consistent
+  whitespace / empty-string handling. `uvr doctor` now reports the
+  effective values, with green / red glyphs that validate path
+  existence so misconfigured paths flag visibly.
+
+- **`GITHUB_PAT` / `GITHUB_TOKEN` honoured by github API calls (#95)** —
+  authenticated rate limit (5000 req/hr) replaces the unauthenticated
+  60 req/hr default. Eliminates sporadic 403s on CI runners importing
+  `renv.lock` files with several github deps. Reads `GITHUB_PAT` first
+  (renv / devtools convention), falls back to `GITHUB_TOKEN` (Actions
+  / generic CI). Attached to commit-SHA lookup, DESCRIPTION raw fetch
+  in the resolver, and the cheap-path DESCRIPTION fetch in `uvr add`'s
+  package-name resolution.
+
+### Fixes
+
+- **Apple Silicon binary architecture mismatch (#72 / #53)** — P3M's
+  `macosx/big-sur-arm64` URL was serving x86_64 binaries despite the
+  path. Verified by downloading `rlang.tgz` from that URL and running
+  `file rlang/libs/rlang.so` → `Mach-O 64-bit … x86_64`. The actual
+  arm64 binaries live at `macosx/sonoma-arm64`. `Platform::MacOsArm64`
+  now points there. Every Apple Silicon user installing R packages
+  via uvr was affected; they would have hit
+  "incompatible architecture (have 'x86_64', need 'arm64')" on
+  `library()`.
+
+- **Resolver walks transitive `Remotes:` chains (#84)** — when a
+  github-sourced package's DESCRIPTION declares another github dep via
+  `Remotes:` (e.g. `B-Nilson/airquality` → `B-Nilson/handyr`), the
+  resolver previously fell through to CRAN for the sub-dep and bailed
+  with "Package not found". `resolve_github_deps` now BFS-walks the
+  `Remotes:` field. Manifest-direct specs hard-error on fetch failure;
+  transitive specs warn and fall back to the registry chain so a typo
+  in a third-party DESCRIPTION doesn't brick the lock. The resolver's
+  `pre_resolved` branch now also validates the parent's `Imports:`
+  constraint — was bypassed before, allowing silent wrong-version
+  installs.
+
+- **Windows binary compatibility (#74)** — v0.3.4 embedded a Win32
+  manifest but `embed_manifest::new_manifest()` includes a default
+  `<dependency>` on `Microsoft.Windows.Common-Controls v6` (a SxS
+  assembly for visual styles in GUI apps). On machines where SxS
+  activation fails for any reason — corrupt SxS cache, AppLocker /
+  WDAC policy, AV interference — Windows refused to load the binary
+  with `ERROR_BAD_EXE_FORMAT`. Strip the dep so the manifest only
+  carries `supportedOS` GUIDs, `asInvoker`, long-path-aware, UTF-8
+  codepage, and DPI awareness.
+
+- **Release-workflow smoke tests** — `release.yml` now runs
+  `./uvr --version` and `./uvr --help` on every native target
+  (Windows, Linux x86_64, macOS arm64) after `cargo build` and before
+  publishing. Catches regressions where the binary loads but won't
+  run.
+
+- **`.Rprofile` r-version mismatch warning (#70 follow-up)** — the
+  uvr-managed block now reads `.r-version` at session startup and
+  warns if the active R minor doesn't match the pin. CLI already
+  refused destructive sync on minor mismatch since v0.2.19; this
+  surfaces the same signal to users who open R against the project
+  without running sync.
+
+- **`.Rprofile` preserves the user's site library (#17)** — switched
+  from `.libPaths(lib)` (which dropped the user's site lib) to
+  `.libPaths(unique(c(lib, .libPaths())))`. Project library still
+  wins resolution, user's existing paths stay accessible.
+
+- **Wipe-confirm prompt before destructive library rebuild (#85)** —
+  on R-version-change detected mismatch, sync now prompts
+  "Wipe project library at .uvr/library (N package(s))? [y/N]" with N
+  default. CI / non-TTY proceeds without prompting. Avoids silently
+  nuking hand-built or pinned packages on a misdetected R version
+  change. Combined with the calling-R-session guard from #70 phase 1
+  so users always see one clear story instead of two competing
+  guards.
+
+- **Sysreqs warning gated on actual SystemRequirements (#30)** —
+  binaries-only installs on unsupported distros no longer fire the
+  loud "System dependency check skipped" warning. Fires only when at
+  least one package in the install set actually declares sysreqs.
+
+- **`uvr-r#9` Windows `r_list(all = TRUE)` archive scraping** — CRAN
+  dropped trailing slashes on `/bin/windows/base/old/` index entries.
+  Replaced the split-on-slash scraper with a regex
+  (`href="<version>"?/?"`) robust to either format. Previously only
+  the current release surfaced.
+
+- **`.Rprofile` block now noticeably less verbose (#90)** — design-
+  rationale comments stripped from the user-facing snippet. Net −22
+  LOC per project's `.Rprofile`.
+
+### Smaller fixes shipped earlier in the v0.3.5 window
+
+- **B-Nilson batch — #75 (init doesn't require an R pin), #76 (`uvr
+  add --no-lock` / `--no-install`), #77 (`uvr import --name`), #81
+  (`uvr run --quiet` to suppress R session banner), uvr-r#8 (`uvr add
+  user/repo` now uses DESCRIPTION's Package: field as manifest key),
+  uvr-r#9 (`r_list` no longer surfaces `..` parent-dir as a version).**
+
+### Contributors
+
+@bsirak (env-var customisation, PR #79). Thank you.
+
+### Upgrading
+
+No migration steps. Apple Silicon users running R 4.6+ should
+`uvr cache clean` once to drop any cached x86_64 binaries from the
+pre-v0.3.5 P3M routing bug.
+
 ## v0.3.4 (2026-05-03)
 
 Hotfix for #74: Windows 11 users running the v0.3.3 release artifact saw
