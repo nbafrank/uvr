@@ -674,18 +674,18 @@ pub async fn install_from_lockfile(
         // into binary-capable vs. source-only. A registry is "binary-capable"
         // when at least one of its PACKAGES entries has a Built: line that
         // matches the running host triple + R minor.
+        // Sync-time only: UVR_REPOS env-injected sources are added here so a
+        // CI runner can swap binary mirrors at install time without changing
+        // uvr.toml or contaminating uvr.lock. Lock-time (lock.rs) only sees
+        // uvr.toml's [[sources]], so the lockfile stays reproducible across
+        // environments.
         let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
-        let r_repos = uvr_core::r_version::detector::discover_r_repos(r_binary.as_path());
         let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
             .iter()
             .map(|r| uvr_core::manifest::PackageSource {
                 name: r.name.clone(),
                 url: r.url.clone(),
             })
-            .chain(r_repos.iter().map(|r| uvr_core::manifest::PackageSource {
-                name: r.name.clone(),
-                url: r.url.clone(),
-            }))
             .chain(project.manifest.sources.iter().cloned())
             .collect();
         let custom_registries =

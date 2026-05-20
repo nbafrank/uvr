@@ -119,29 +119,13 @@ async fn resolve_lockfile(
         }
     };
     let custom_fut = async {
-        // Collect sources: env-injected first (CI override priority), then
-        // R's getOption("repos") (auto-discovered), then manifest-declared.
-        // Each becomes a CranRegistry fetched in parallel.
-        let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
-        let r_repos = r_binary_opt
-            .as_deref()
-            .map(uvr_core::r_version::detector::discover_r_repos)
-            .unwrap_or_default();
-        let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
-            .iter()
-            .map(|r| uvr_core::manifest::PackageSource {
-                name: r.name.clone(),
-                url: r.url.clone(),
-            })
-            .chain(r_repos.iter().map(|r| uvr_core::manifest::PackageSource {
-                name: r.name.clone(),
-                url: r.url.clone(),
-            }))
-            .chain(project.manifest.sources.iter().cloned())
-            .collect();
-
+        // Lock time only sees `uvr.toml`-declared sources. UVR_REPOS is a
+        // sync-time concern (alternate binary mirrors), not a lock-time one
+        // — keeping it out of lock means the lockfile stays reproducible
+        // across environments with different env vars (matches #31's
+        // reasoning).
         let mut regs = Vec::new();
-        for source in &combined_sources {
+        for source in &project.manifest.sources {
             let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade, None)
                 .await
                 .with_context(|| {
