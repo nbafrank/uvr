@@ -462,6 +462,16 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
             }
             match listener.accept() {
                 Ok((mut socket, _)) => {
+                    // The accepted socket can inherit the listener's non-blocking
+                    // flag on macOS (observed in CI). Force it back to blocking and
+                    // attach a short read timeout so we never hang on a malformed
+                    // request; without this, read() returns WouldBlock immediately
+                    // and we end up sending 404 + closing the connection before
+                    // reqwest finishes its GET, surfacing as
+                    // "received unexpected message from connection".
+                    let _ = socket.set_nonblocking(false);
+                    let _ = socket
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)));
                     let mut buf = [0u8; 4096];
                     let n = socket.read(&mut buf).unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
@@ -477,16 +487,20 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
                         .join("/");
                     let file_path = fixtures_root.join(&safe_path);
                     if let Ok(body) = std::fs::read(&file_path) {
+                        // `Connection: close` tells reqwest not to keep-alive
+                        // against our one-shot per-connection handler.
                         let header = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         let _ = socket.write_all(header.as_bytes());
                         let _ = socket.write_all(&body);
                     } else {
-                        let _ = socket
-                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                        let _ = socket.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
                     }
+                    let _ = socket.shutdown(std::net::Shutdown::Write);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
