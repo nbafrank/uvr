@@ -28,7 +28,12 @@ ARG R_VERSION=4.5.3
 # Builds against musl so the resulting binary is portable across Linux
 # distros and matches what we ship as
 # `uvr-x86_64-unknown-linux-musl.tar.gz` in release artifacts.
-FROM rust:1.83.0-slim-bookworm AS builder
+#
+# Bumped 1.83 → 1.86 in May 2026: transitive deps (notably `time`
+# 0.3.47+) now require the stabilised `edition2024` feature which
+# landed in Cargo 1.85. Pin tracks current stable rather than MSRV
+# because the bench image is rebuilt on every release.
+FROM rust:1.86.0-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config musl-tools \
