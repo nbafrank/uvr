@@ -470,8 +470,7 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
                     // reqwest finishes its GET, surfacing as
                     // "received unexpected message from connection".
                     let _ = socket.set_nonblocking(false);
-                    let _ = socket
-                        .set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                     let mut buf = [0u8; 4096];
                     let n = socket.read(&mut buf).unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
