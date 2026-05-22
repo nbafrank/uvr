@@ -243,8 +243,28 @@ pub async fn download_and_install_r(
     let r_binary_name = if platform.is_windows() { "R.exe" } else { "R" };
     let r_binary = install_dir.join("bin").join(r_binary_name);
     if r_binary.exists() {
-        info!("R {version} already installed at {}", install_dir.display());
-        return Ok(install_dir);
+        // Validate the existing install actually works before short-
+        // circuiting. The previous existence-only check let half-patched
+        // installs (e.g. mvuorre's #99 on macOS 26.x) sit forever
+        // because `uvr r install` skipped the reinstall, and downstream
+        // checks treated `R --version`-returns-nothing as "not
+        // installed" and looped the user back here. Now: if `R
+        // --version` succeeds we trust it; if it fails we nuke the dir
+        // and reinstall fresh.
+        if crate::r_version::detector::query_r_version(&r_binary).is_some() {
+            info!("R {version} already installed at {}", install_dir.display());
+            return Ok(install_dir);
+        }
+        info!(
+            "R {version} install at {} is broken (no version response); reinstalling",
+            install_dir.display()
+        );
+        std::fs::remove_dir_all(&install_dir).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to remove broken install at {}: {e}",
+                install_dir.display()
+            ))
+        })?;
     }
 
     let url = platform.download_url(version);

@@ -74,21 +74,41 @@ pub fn warn_r_pin_mismatch() {
             warn_calling_r_mismatch(&pinned, pin_label, &active_ver);
         }
         Err(_) => {
-            // find_r_binary errors when the pinned version isn't installed.
-            // Tell the user what's wrong instead of letting the command fall
-            // through to a generic "R not found" later.
-            let installed = find_all()
-                .into_iter()
-                .map(|i| i.version)
-                .collect::<Vec<_>>();
-            let installed_msg = if installed.is_empty() {
-                "no R installations detected".to_string()
+            // find_r_binary errors when the pinned version isn't installed
+            // OR when an install exists at the expected location but
+            // doesn't respond to `R --version` (mvuorre's #99 — a half-
+            // patched macOS R 4.6 install kept showing up in find_all
+            // because find_all uses file-existence detection, while
+            // find_r_binary validates via query_r_version). Distinguish
+            // the two cases so the warning + suggested fix actually
+            // matches the user's situation.
+            let installations = find_all();
+            let pin_matches: Vec<&str> = installations
+                .iter()
+                .filter(|i| i.version == pinned)
+                .map(|i| i.binary.to_str().unwrap_or(""))
+                .collect();
+            if !pin_matches.is_empty() {
+                // Directory + binary file exist at the pinned version,
+                // but `R --version` failed → broken install.
+                let bin = pin_matches[0];
+                crate::ui::warn(format!(
+                    "R {pinned} pinned via {pin_label} appears installed at {bin} but is broken (no version response from `R --version`). Run `uvr r install {pinned}` — uvr now detects broken installs and replaces them."
+                ));
             } else {
-                format!("installed: {}", installed.join(", "))
-            };
-            crate::ui::warn(format!(
-                "R {pinned} pinned via {pin_label} but not installed ({installed_msg}). Run `uvr r install {pinned}`."
-            ));
+                let installed = installations
+                    .iter()
+                    .map(|i| i.version.clone())
+                    .collect::<Vec<_>>();
+                let installed_msg = if installed.is_empty() {
+                    "no R installations detected".to_string()
+                } else {
+                    format!("installed: {}", installed.join(", "))
+                };
+                crate::ui::warn(format!(
+                    "R {pinned} pinned via {pin_label} but not installed ({installed_msg}). Run `uvr r install {pinned}`."
+                ));
+            }
         }
     }
 }
