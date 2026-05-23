@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use uvr_core::installer::binary_install::{install_binary_package, patch_installed_so_files};
+use uvr_core::installer::binary_install::{
+    inspect_tarball, install_binary_package, patch_installed_so_files,
+};
 use uvr_core::installer::download::{DownloadSpec, Downloader};
 use uvr_core::installer::package_cache;
 use uvr_core::installer::r_cmd_install::RCmdInstall;
@@ -18,6 +20,113 @@ use uvr_core::resolver::topological_install_order;
 
 use crate::ui;
 use crate::ui::palette;
+
+/// Per-package install plan resolved at sync time.
+///
+/// `is_binary` determines whether `install_binary_package` is used (vs.
+/// `R CMD INSTALL`). `fallback_url` is consulted by the downloader when
+/// the primary URL fails — typically the binary URL falls back to the
+/// source URL recorded in the lockfile.
+struct PkgPlan<'a> {
+    pkg: &'a LockedPackage,
+    url: String,
+    fallback_url: Option<String>,
+    is_binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallKind {
+    /// Pre-built binary tarball with host-matching `Built:`. Fast-path extract.
+    Binary,
+    /// Pure-R package (`NeedsCompilation: no`). No compile, but R must do the
+    /// lazyload / install hooks, so we still use `R CMD INSTALL`.
+    PureR,
+    /// Real source build (NeedsCompilation absent or "yes" with no matching Built:).
+    Source,
+}
+
+/// Pure function: compute the install plan for one locked package given
+/// the available binary sources and the host. No I/O.
+///
+/// Precedence:
+/// 1. Try each `custom_binary` registry in declaration order. First hit wins.
+/// 2. Try `p3m` if provided (callers pass `None` to suppress P3M).
+/// 3. Fall back to the source URL from the lockfile entry.
+///
+/// When a binary source is selected, the lockfile's source URL becomes the
+/// `fallback_url` so a 404 on the binary tarball gracefully falls back to
+/// `R CMD INSTALL`.
+fn select_pkg_plan<'a>(
+    p: &'a LockedPackage,
+    custom_binary: &[&uvr_core::registry::cran::CranRegistry],
+    p3m: Option<&uvr_core::registry::p3m::P3MBinaryIndex>,
+    host: &uvr_core::r_version::downloader::HostTriple,
+    r_minor: &str,
+    bioc_release: Option<&str>,
+) -> PkgPlan<'a> {
+    let source_url_str = source_url(p, bioc_release);
+
+    for src in custom_binary {
+        if let Some(url) = src.binary_url_for(&p.name, &p.version, host, r_minor) {
+            return PkgPlan {
+                pkg: p,
+                url,
+                fallback_url: Some(source_url_str),
+                is_binary: true,
+            };
+        }
+    }
+
+    if let Some(p3m) = p3m {
+        if let Some(url) = p3m.binary_url(&p.name, &p.version) {
+            return PkgPlan {
+                pkg: p,
+                url: url.to_string(),
+                fallback_url: Some(source_url_str),
+                is_binary: true,
+            };
+        }
+    }
+
+    PkgPlan {
+        pkg: p,
+        url: source_url_str,
+        fallback_url: None,
+        is_binary: false,
+    }
+}
+
+/// Re-fetch each `[[sources]]` registry. Each is a `CranRegistry` against
+/// the source's `url` (HTTP-cached via ETag/Last-Modified). Network failures
+/// without a cache mark that source non-binary-capable; failures with a cache
+/// use the cached PACKAGES.gz.
+///
+/// `user_agent` is forwarded on each PACKAGES.gz request so hosts like
+/// cran.rpkgs.com can route to the correct binary flavour based on the UA.
+async fn fetch_custom_registries(
+    client: &reqwest::Client,
+    sources: &[uvr_core::manifest::PackageSource],
+    user_agent: Option<&str>,
+) -> Vec<uvr_core::registry::cran::CranRegistry> {
+    let mut out = Vec::new();
+    for src in sources {
+        match uvr_core::registry::cran::CranRegistry::fetch_custom(
+            client, &src.name, &src.url, /* force_refresh */ false, user_agent,
+        )
+        .await
+        {
+            Ok(reg) => out.push(reg),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch custom source '{}' ({}): {e}; treating as non-binary-capable",
+                    src.name,
+                    src.url,
+                );
+            }
+        }
+    }
+    out
+}
 
 pub async fn run(
     frozen: bool,
@@ -541,12 +650,6 @@ pub async fn install_from_lockfile(
 
     // ── Phase 2: download + install remaining packages ────────────────
     // Only fetch P3M binary index if there are packages to download.
-    struct PkgPlan<'a> {
-        pkg: &'a LockedPackage,
-        url: String,
-        fallback_url: Option<String>,
-        is_binary: bool,
-    }
 
     // Linux-specific UA. PPM serves source vs. binary at the same URL, gated
     // by the User-Agent. The index fetch in `P3MBinaryIndex::fetch` sets this
@@ -556,67 +659,84 @@ pub async fn install_from_lockfile(
     // binary package — silent breakage). Built once and attached per-spec
     // below.
     let detected_platform = Platform::detect();
+
+    // Build HostInfo once — used for UA construction and Built: matching.
+    let host_info = uvr_core::r_version::downloader::host_info(&r_minor_str);
+    let user_agent = uvr_core::r_version::downloader::user_agent(&host_info);
+    // For backward compat with downstream code expecting Option<String>:
     let linux_ppm_user_agent: Option<String> = match detected_platform {
-        Ok(p) if matches!(p, Platform::LinuxX86_64 | Platform::LinuxArm64) => {
-            let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
-            uvr_core::registry::p3m::ppm_linux_codename(&slug).map(|_| {
-                let arch = if matches!(p, Platform::LinuxX86_64) {
-                    "x86_64"
-                } else {
-                    "aarch64"
-                };
-                // R version is the project's actual minor, not a hardcoded
-                // string — future-proofs the UA against PPM tightening its
-                // sniffing rules.
-                format!("R ({r_minor_str}.0 {arch}-pc-linux-gnu {arch} linux-gnu)")
-            })
-        }
+        Ok(Platform::LinuxX86_64 | Platform::LinuxArm64) => Some(user_agent.clone()),
         _ => None,
     };
 
     let plans: Vec<PkgPlan> = if !cache_misses.is_empty() {
-        let p3m = match detected_platform {
-            Ok(platform) => {
-                // #55: Linux gets binaries via PPM's `__linux__/<codename>` URL
-                // space, gated by a User-Agent the registry sets internally.
-                // The slug is the same string we use for R install URLs;
-                // platform_info() inside p3m.rs translates it to PPM's
-                // codename system. None for non-Linux platforms.
-                let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
-                    Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
-                } else {
-                    None
-                };
-                P3MBinaryIndex::fetch(
-                    &client,
-                    &r_minor_str,
-                    platform,
-                    bioc_release,
-                    slug.as_deref(),
-                )
-                .await
+        // Re-fetch each [[sources]] (HTTP-cached → 304 normally) and partition
+        // into binary-capable vs. source-only. A registry is "binary-capable"
+        // when at least one of its PACKAGES entries has a Built: line that
+        // matches the running host triple + R minor.
+        // Sync-time only: UVR_REPOS env-injected sources are added here so a
+        // CI runner can swap binary mirrors at install time without changing
+        // uvr.toml or contaminating uvr.lock. Lock-time (lock.rs) only sees
+        // uvr.toml's [[sources]], so the lockfile stays reproducible across
+        // environments.
+        let env_repos = uvr_core::env_vars::repos().unwrap_or_default();
+        let combined_sources: Vec<uvr_core::manifest::PackageSource> = env_repos
+            .iter()
+            .map(|r| uvr_core::manifest::PackageSource {
+                name: r.name.clone(),
+                url: r.url.clone(),
+            })
+            .chain(project.manifest.sources.iter().cloned())
+            .collect();
+        let custom_registries =
+            fetch_custom_registries(&client, &combined_sources, Some(user_agent.as_str())).await;
+        let custom_binary: Vec<&uvr_core::registry::cran::CranRegistry> = custom_registries
+            .iter()
+            .filter(|r| r.is_binary_capable(&host_info.triple, &r_minor_str))
+            .collect();
+
+        // (C) decision: any binary-capable custom source fully replaces P3M
+        // for this sync. P3M is not consulted at all.
+        let p3m = if custom_binary.is_empty() {
+            match detected_platform {
+                Ok(platform) => {
+                    let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
+                        Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
+                    } else {
+                        None
+                    };
+                    Some(
+                        P3MBinaryIndex::fetch(
+                            &client,
+                            &r_minor_str,
+                            platform,
+                            bioc_release,
+                            slug.as_deref(),
+                        )
+                        .await,
+                    )
+                }
+                Err(_) => Some(P3MBinaryIndex::empty()),
             }
-            Err(_) => P3MBinaryIndex::empty(),
+        } else {
+            tracing::info!(
+                "Using {} binary-capable custom source(s); P3M suppressed.",
+                custom_binary.len()
+            );
+            None
         };
 
         cache_misses
             .iter()
             .map(|p| {
-                if let Some(bin_url) = p3m.binary_url(&p.name, &p.version) {
-                    PkgPlan {
-                        pkg: p,
-                        url: bin_url.to_string(),
-                        fallback_url: Some(source_url(p, bioc_release)),
-                        is_binary: true,
-                    }
-                } else {
-                    PkgPlan {
-                        pkg: p,
-                        url: source_url(p, bioc_release),
-                        fallback_url: None,
-                        is_binary: false,
-                    }
-                }
+                select_pkg_plan(
+                    p,
+                    &custom_binary,
+                    p3m.as_ref(),
+                    &host_info.triple,
+                    &r_minor_str,
+                    bioc_release,
+                )
             })
             .collect()
     } else {
@@ -633,33 +753,8 @@ pub async fn install_from_lockfile(
         }
     }
 
-    let binary_count = plans.iter().filter(|p| p.is_binary).count();
-    let source_count = plans.len() - binary_count;
-
-    // Compact plan line: "3 cached · 4 binary · 1 from source"
-    if cache_hit_count > 0 || binary_count > 0 || source_count > 0 {
-        let mut parts = Vec::new();
-        if cache_hit_count > 0 {
-            parts.push(format!("{cache_hit_count} cached"));
-        }
-        if binary_count > 0 {
-            parts.push(format!("{binary_count} binary"));
-        }
-        if source_count > 0 {
-            parts.push(format!("{source_count} from source"));
-        }
-        let sep = format!(" {} ", ui::glyph::bullet());
-        let action = match (new_count, upgrade_count) {
-            (n, 0) => format!("Installing {n} package(s)"),
-            (0, u) => format!("Upgrading {u} package(s)"),
-            (n, u) => format!("Installing {n}, upgrading {u}"),
-        };
-        // Colon between the action and the breakdown reads cleaner than a bullet,
-        // which visually duplicates the separators inside `parts` — especially in
-        // ASCII mode where `bullet()` renders as `.` and the line ends up looking
-        // like "Installing 116 package(s) . 111 binary . 5 from source".
-        ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
-    }
+    let mut runtime_binary = 0usize;
+    let mut runtime_source = 0usize;
 
     if !plans.is_empty() {
         let specs: Vec<DownloadSpec> = plans
@@ -669,10 +764,13 @@ pub async fn install_from_lockfile(
                 url: &p.url,
                 fallback_url: p.fallback_url.as_deref(),
                 is_binary: p.is_binary,
-                // Attach the R-shaped UA only for Linux PPM binary URLs so
-                // PPM serves the binary tarball, not source. macOS / Windows
-                // / source-fallback paths leave it None (default uvr UA).
-                user_agent: if p.is_binary && p.url.contains("/__linux__/") {
+                // Attach the host R UA on Linux for any binary URL — P3M needs
+                // it for tarball serving (not just index), and custom binary
+                // sources may use UA to route between musl and gnu builds.
+                // Source URLs go through CRAN which doesn't gate on UA.
+                // `linux_ppm_user_agent` is None on macOS/Windows so this
+                // is still effectively Linux-only.
+                user_agent: if p.is_binary {
                     linux_ppm_user_agent.as_deref()
                 } else {
                     None
@@ -686,49 +784,151 @@ pub async fn install_from_lockfile(
             .await
             .context("Download failed")?;
 
+        // Phase: pre-sniff every downloaded tarball so the upfront message and
+        // "no binary repo" hint both reflect runtime classification rather than
+        // the lock-time pre-estimate.  For repos like cran.rpkgs.com that
+        // publish pre-built tarballs without advertising them in PACKAGES.gz,
+        // this means users see the correct binary/source split throughout the
+        // run, not just in the final summary.
+        let detected_per_plan: Vec<InstallKind> = plans
+            .iter()
+            .zip(results.iter())
+            .map(|(plan, result)| {
+                if result.used_binary {
+                    return InstallKind::Binary;
+                }
+                match inspect_tarball(&result.path, &plan.pkg.name) {
+                    Some(meta) => {
+                        let host_matches = meta
+                            .built
+                            .as_ref()
+                            .is_some_and(|b| b.matches_host(&host_info.triple, &r_minor_str));
+                        if host_matches {
+                            InstallKind::Binary
+                        } else if meta.pure_r {
+                            InstallKind::PureR
+                        } else {
+                            InstallKind::Source
+                        }
+                    }
+                    None => InstallKind::Source,
+                }
+            })
+            .collect();
+
+        runtime_binary = detected_per_plan
+            .iter()
+            .filter(|k| matches!(**k, InstallKind::Binary | InstallKind::PureR))
+            .count();
+        runtime_source = detected_per_plan
+            .iter()
+            .filter(|k| **k == InstallKind::Source)
+            .count();
+
+        // Compact plan line: "3 cached · 4 binary · 1 from source"
+        if cache_hit_count > 0 || runtime_binary > 0 || runtime_source > 0 {
+            let mut parts = Vec::new();
+            if cache_hit_count > 0 {
+                parts.push(format!("{cache_hit_count} cached"));
+            }
+            if runtime_binary > 0 {
+                parts.push(format!("{runtime_binary} binary"));
+            }
+            if runtime_source > 0 {
+                parts.push(format!("{runtime_source} from source"));
+            }
+            let sep = format!(" {} ", ui::glyph::bullet());
+            let action = match (new_count, upgrade_count) {
+                (n, 0) => format!("Installing {n} package(s)"),
+                (0, u) => format!("Upgrading {u} package(s)"),
+                (n, u) => format!("Installing {n}, upgrading {u}"),
+            };
+            // Colon between the action and the breakdown reads cleaner than a bullet,
+            // which visually duplicates the separators inside `parts` — especially in
+            // ASCII mode where `bullet()` renders as `.` and the line ends up looking
+            // like "Installing 116 package(s) . 111 binary . 5 from source".
+            ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
+        }
+
+        // "No binary repo" hint — only fires when no packages were binary and at
+        // least one real source build (compilation) is needed. Pure-R alone doesn't
+        // indicate "no binaries available" — those packages simply have no binary form.
+        if runtime_binary == 0 && runtime_source > 0 && !plans.is_empty() {
+            println!(
+                "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
+                host_info.distro_label, r_minor_str, runtime_source
+            );
+        }
+
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
 
         // Aggregate progress bar — one line for the whole install phase.
         let total = plans.len() as u64;
         let pb = ui::make_aggregate_bar(total);
-        for (plan, result) in plans.iter().zip(results.iter()) {
-            let verb = if result.used_binary {
-                "installing"
-            } else {
-                "compiling"
+        for ((plan, result), &kind) in plans
+            .iter()
+            .zip(results.iter())
+            .zip(detected_per_plan.iter())
+        {
+            tracing::debug!(
+                "install plan for {} {}: plan.is_binary={} used_binary={} kind={:?}",
+                plan.pkg.name,
+                plan.pkg.version,
+                plan.is_binary,
+                result.used_binary,
+                kind,
+            );
+
+            let verb = match kind {
+                InstallKind::Binary => "installing",
+                InstallKind::PureR => "installing", // also fast — no compile
+                InstallKind::Source => "compiling",
             };
             pb.set_message(format!("{verb} {} {}", plan.pkg.name, plan.pkg.version));
 
-            if result.used_binary {
-                install_binary_package(
-                    &result.path,
-                    &library,
-                    &plan.pkg.name,
-                    libr_path.as_deref(),
-                )
-                .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
-            } else {
-                // For source compilation, surface the last build line as the bar message.
-                let name = plan.pkg.name.clone();
-                let version = plan.pkg.version.clone();
-                let pb_for_closure = pb.clone();
-                installer
-                    .install_streaming(&result.path, &library, &plan.pkg.name, timeout, |line| {
-                        let short: String = line.chars().take(50).collect();
-                        pb_for_closure.set_message(format!("compiling {name} {version} ({short})"));
-                    })
+            match kind {
+                InstallKind::Binary => {
+                    install_binary_package(
+                        &result.path,
+                        &library,
+                        &plan.pkg.name,
+                        libr_path.as_deref(),
+                    )
                     .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+                }
+                InstallKind::PureR | InstallKind::Source => {
+                    // R CMD INSTALL handles both: PureR is a fast no-compile install;
+                    // Source actually compiles. R detects which from DESCRIPTION.
+                    let name = plan.pkg.name.clone();
+                    let version = plan.pkg.version.clone();
+                    let pb_for_closure = pb.clone();
+                    installer
+                        .install_streaming(
+                            &result.path,
+                            &library,
+                            &plan.pkg.name,
+                            timeout,
+                            |line| {
+                                let short: String = line.chars().take(50).collect();
+                                pb_for_closure
+                                    .set_message(format!("compiling {name} {version} ({short})"));
+                            },
+                        )
+                        .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
+                }
             }
 
             pb.inc(1);
 
             // Store the newly installed package in the global cache for future reuse.
+            // cache_key takes a bool — Binary is true; PureR + Source are false.
+            let cache_key_binary = matches!(kind, InstallKind::Binary);
             let key = package_cache::cache_key(
                 &plan.pkg.name,
                 &plan.pkg.version,
                 plan.pkg.checksum.as_deref(),
                 &r_minor_str,
-                result.used_binary,
+                cache_key_binary,
                 libr_path.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);
@@ -752,11 +952,11 @@ pub async fn install_from_lockfile(
         let hit_pct = (cache_hit_count as f64 / total_count as f64 * 100.0).round() as u64;
         sub_parts.push(format!("{hit_pct}% cache hit"));
     }
-    if binary_count > 0 {
-        sub_parts.push(format!("{binary_count} binary"));
+    if runtime_binary > 0 {
+        sub_parts.push(format!("{runtime_binary} binary"));
     }
-    if source_count > 0 {
-        sub_parts.push(format!("{source_count} from source"));
+    if runtime_source > 0 {
+        sub_parts.push(format!("{runtime_source} from source"));
     }
     let sep = format!(" {} ", ui::glyph::bullet());
     ui::summary(headline, sub_parts.join(&sep));
@@ -1615,5 +1815,122 @@ mod tests {
             dev: false,
         };
         assert!(is_installed(&dash_pkg_no_raw, dir.path()));
+    }
+
+    use uvr_core::r_version::downloader::HostTriple;
+    use uvr_core::registry::cran::{parse_packages_gz, CranRegistry};
+
+    fn musl_host() -> HostTriple {
+        HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        }
+    }
+
+    fn locked_pkg(name: &str, version: &str, url: &str) -> LockedPackage {
+        LockedPackage {
+            name: name.into(),
+            version: version.into(),
+            raw_version: None,
+            source: PackageSource::Cran,
+            checksum: None,
+            requires: vec![],
+            url: Some(url.into()),
+            system_requirements: None,
+            dev: false,
+        }
+    }
+
+    fn rlang_musl_packages() -> &'static str {
+        "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+"
+    }
+
+    #[test]
+    fn select_plan_uses_first_custom_binary_match() {
+        let pkg = locked_pkg(
+            "rlang",
+            "1.1.6",
+            "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz",
+        );
+        let reg = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://rpkgs.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(plan.is_binary);
+        assert_eq!(
+            plan.url,
+            "https://rpkgs.example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+        assert_eq!(
+            plan.fallback_url.as_deref(),
+            Some("https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz")
+        );
+    }
+
+    #[test]
+    fn select_plan_falls_through_when_custom_has_no_binary() {
+        let pkg = locked_pkg(
+            "jsonlite",
+            "1.8.8",
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz",
+        );
+        // Custom registry has rlang but not jsonlite.
+        let reg = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://rpkgs.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        // Falls all the way through to source — P3M is None.
+        assert!(!plan.is_binary);
+        assert_eq!(
+            plan.url,
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
+        );
+        assert!(plan.fallback_url.is_none());
+    }
+
+    #[test]
+    fn select_plan_first_custom_wins_over_second() {
+        let pkg = locked_pkg(
+            "rlang",
+            "1.1.6",
+            "https://cran.r-project.org/src/contrib/rlang_1.1.6.tar.gz",
+        );
+        let reg_a = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://first.example.com/src/contrib".into(),
+        );
+        let reg_b = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://second.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg_a, &reg_b];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(plan.url.contains("first.example.com"), "got: {}", plan.url);
+    }
+
+    #[test]
+    fn select_plan_falls_through_to_source_when_nothing_matches() {
+        let pkg = locked_pkg(
+            "jsonlite",
+            "1.8.8",
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz",
+        );
+        let custom: Vec<&CranRegistry> = vec![];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(!plan.is_binary);
+        assert_eq!(
+            plan.url,
+            "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
+        );
     }
 }

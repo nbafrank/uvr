@@ -67,9 +67,8 @@ async fn resolve_lockfile(
 ) -> Result<Lockfile> {
     // Query the actual running R version to pin in the lockfile.
     let r_constraint = project.manifest.project.r_version.as_deref();
-    let actual_r_version = find_r_binary(r_constraint)
-        .ok()
-        .and_then(|r| query_r_version(&r));
+    let r_binary_opt = find_r_binary(r_constraint).ok();
+    let actual_r_version = r_binary_opt.as_deref().and_then(query_r_version);
 
     let spinner = make_spinner("Resolving dependencies...");
 
@@ -120,9 +119,14 @@ async fn resolve_lockfile(
         }
     };
     let custom_fut = async {
+        // Lock time only sees `uvr.toml`-declared sources. UVR_REPOS is a
+        // sync-time concern (alternate binary mirrors), not a lock-time one
+        // — keeping it out of lock means the lockfile stays reproducible
+        // across environments with different env vars (matches #31's
+        // reasoning).
         let mut regs = Vec::new();
         for source in &project.manifest.sources {
-            let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade)
+            let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade, None)
                 .await
                 .with_context(|| {
                     format!("Failed to fetch index for repository '{}'", source.name)

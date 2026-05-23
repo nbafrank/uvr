@@ -6,3 +6,4 @@
 *.swp
 *.swo
 benchmarks/bench-results.json
+/dist/

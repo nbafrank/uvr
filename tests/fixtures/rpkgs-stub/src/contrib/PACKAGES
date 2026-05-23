@@ -1,0 +1,15 @@
+Package: jsonlite
+Version: 1.8.8
+Depends: methods
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+MD5sum: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+Package: rlang
+Version: 1.1.6
+Path: x86_64/alpine-3.23
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+MD5sum: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+Package: cli
+Version: 3.6.0
+MD5sum: cccccccccccccccccccccccccccccccc

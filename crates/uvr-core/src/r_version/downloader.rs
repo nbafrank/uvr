@@ -193,10 +193,17 @@ pub fn detect_posit_distro_slug() -> String {
     if let Some(override_slug) = DISTRO_OVERRIDE.get() {
         return override_slug.clone();
     }
-    // Read os-release; fall back to default if anything fails
-    let content = match std::fs::read_to_string("/etc/os-release") {
-        Ok(c) => c,
-        Err(_) => return "ubuntu-2204".to_string(),
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    detect_posit_distro_slug_from_os_release(content.as_deref())
+}
+
+/// Testable helper: parse os-release content (or fall back) into a Posit
+/// CDN distro slug. Module-private; the inline test module calls it
+/// directly. Production callers go through [`detect_posit_distro_slug`].
+pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) -> String {
+    let content = match content {
+        Some(c) => c,
+        None => return "ubuntu-2204".to_string(),
     };
 
     let mut id = String::new();
@@ -218,7 +225,6 @@ pub fn detect_posit_distro_slug() -> String {
         "debian" => format!("debian-{version_id}"),
         "centos" => format!("centos-{version_id}"),
         "rhel" | "rocky" | "almalinux" => {
-            // Major version only
             let major = version_id.split('.').next().unwrap_or(&version_id);
             format!("rhel-{major}")
         }
@@ -226,8 +232,163 @@ pub fn detect_posit_distro_slug() -> String {
             let ver = version_id.replace('.', "");
             format!("opensuse-{ver}")
         }
+        "alpine" => {
+            // Truncate `3.23.4` → `3.23` to match the #30 sysreqs normalization
+            // and to make `ppm_linux_codename` return None (P3M is then skipped
+            // cleanly; sync falls through to source compile).
+            let minor = version_id.split('.').take(2).collect::<Vec<_>>().join(".");
+            format!("alpine-{minor}")
+        }
         _ => "ubuntu-2204".to_string(),
     }
+}
+
+/// Parsed host platform triple, modeled after Rust target triples and
+/// R's `R.Version()$platform` reporting.
+///
+/// Used to construct user-agent strings and to match `Built:` fields in
+/// CRAN-like binary repositories (cran.rpkgs.com, P3M, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTriple {
+    /// CPU architecture: `"x86_64"` | `"aarch64"`.
+    pub arch: String,
+    /// Vendor: `"pc"` on Linux/Windows, `"apple"` on macOS.
+    pub vendor: String,
+    /// OS: `"linux"` | `"darwin"` | `"windows"`.
+    pub os: String,
+    /// ABI / libc: `"gnu"` | `"musl"` | `"darwin"` | `"msvc"`.
+    pub abi: String,
+}
+
+/// Build a `HostTriple` from optional `/etc/os-release` content and the
+/// detected `Platform`. Module-private; the inline test module calls it
+/// directly. Production callers go through [`host_triple()`].
+fn host_triple_from_os_release(content: Option<&str>, platform: Platform) -> HostTriple {
+    let mut id = String::new();
+    if let Some(c) = content {
+        for line in c.lines() {
+            if let Some(val) = line.strip_prefix("ID=") {
+                id = val.trim_matches('"').to_lowercase();
+                break;
+            }
+        }
+    }
+
+    let arch = match platform {
+        Platform::LinuxX86_64 | Platform::MacOsX86_64 | Platform::WindowsX86_64 => "x86_64",
+        Platform::LinuxArm64 | Platform::MacOsArm64 => "aarch64",
+    };
+
+    let (vendor, os, default_abi) = match platform {
+        Platform::LinuxX86_64 | Platform::LinuxArm64 => ("pc", "linux", "gnu"),
+        Platform::MacOsArm64 | Platform::MacOsX86_64 => ("apple", "darwin", "darwin"),
+        Platform::WindowsX86_64 => ("pc", "windows", "msvc"),
+    };
+
+    let abi = match (platform, id.as_str()) {
+        (Platform::LinuxX86_64 | Platform::LinuxArm64, "alpine") => "musl",
+        _ => default_abi,
+    };
+
+    HostTriple {
+        arch: arch.to_string(),
+        vendor: vendor.to_string(),
+        os: os.to_string(),
+        abi: abi.to_string(),
+    }
+}
+
+/// Detect the host triple by reading `/etc/os-release` and combining with
+/// `Platform::detect()`. Used at sync time to construct the UA and match
+/// `Built:` fields.
+pub fn host_triple() -> HostTriple {
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    let platform = Platform::detect().unwrap_or(Platform::LinuxX86_64);
+    host_triple_from_os_release(content.as_deref(), platform)
+}
+
+/// Host platform info plus pretty distro label and R version, suitable for
+/// constructing user-agent strings.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    pub triple: HostTriple,
+    /// Pretty distro label as it appears in the UA, e.g. `"Alpine Linux 3.23.4"`.
+    /// Defaults to `"unknown"` when `/etc/os-release` is missing or sparse.
+    pub distro_label: String,
+    /// R minor or patch version, e.g. `"4.5.0"`. Caller-supplied; not detected.
+    pub r_version: String,
+}
+
+/// Build a `HostInfo` from optional `/etc/os-release` content. Module-private;
+/// the inline test module calls it directly. Production callers go through
+/// [`host_info()`].
+fn host_info_from_os_release(
+    content: Option<&str>,
+    platform: Platform,
+    r_version: &str,
+) -> HostInfo {
+    let triple = host_triple_from_os_release(content, platform);
+
+    let mut name = String::new();
+    let mut version_id = String::new();
+    if let Some(c) = content {
+        for line in c.lines() {
+            if let Some(val) = line.strip_prefix("NAME=") {
+                name = val.trim_matches('"').to_string();
+            } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
+                version_id = val.trim_matches('"').to_string();
+            }
+        }
+    }
+
+    let distro_label = if name.is_empty() {
+        "unknown".to_string()
+    } else if version_id.is_empty() {
+        name
+    } else {
+        format!("{name} {version_id}")
+    };
+
+    HostInfo {
+        triple,
+        distro_label,
+        r_version: r_version.to_string(),
+    }
+}
+
+/// Detect the host info. `r_version` should be the R version in use for the
+/// project (caller-supplied because uvr knows the project R version).
+pub fn host_info(r_version: &str) -> HostInfo {
+    let content = std::fs::read_to_string("/etc/os-release").ok();
+    let platform = Platform::detect().unwrap_or(Platform::LinuxX86_64);
+    host_info_from_os_release(content.as_deref(), platform, r_version)
+}
+
+/// Construct a User-Agent string matching what real R sends via
+/// `getOption("HTTPUserAgent")`:
+///
+/// ```text
+/// R (<ver> <triple> <arch> <os>-<abi>)
+/// ```
+///
+/// Examples:
+/// - Alpine: `R (4.5.0 x86_64-pc-linux-musl x86_64 linux-musl)`
+/// - Ubuntu: `R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)`
+///
+/// PPM's UA gating requires this exact `R (` prefix; see the test in
+/// `registry/p3m.rs`. cran.rpkgs.com uses the platform triple substring
+/// (`linux-musl` vs `linux-gnu`) to route requests to the right binary.
+pub fn user_agent(info: &HostInfo) -> String {
+    let HostTriple {
+        arch,
+        vendor,
+        os,
+        abi,
+    } = &info.triple;
+    format!(
+        "R ({} {}-{}-{}-{} {} {}-{})",
+        info.r_version, arch, vendor, os, abi, arch, os, abi
+    )
 }
 
 /// Download and extract R to `~/.uvr/r-versions/<version>/`.
@@ -1538,5 +1699,168 @@ mod tests {
         let content = std::fs::read(dir.path().join("binary.so")).unwrap();
         // Should be unchanged — binary files are skipped
         assert_eq!(content, data);
+    }
+
+    #[test]
+    fn host_triple_alpine_x86_64() {
+        let os_release = r#"NAME="Alpine Linux"
+ID=alpine
+VERSION_ID=3.23.4
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxX86_64);
+        assert_eq!(triple.arch, "x86_64");
+        assert_eq!(triple.vendor, "pc");
+        assert_eq!(triple.os, "linux");
+        assert_eq!(triple.abi, "musl");
+    }
+
+    #[test]
+    fn host_triple_ubuntu_x86_64() {
+        let os_release = r#"NAME="Ubuntu"
+ID=ubuntu
+VERSION_ID="22.04"
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxX86_64);
+        assert_eq!(triple.abi, "gnu");
+    }
+
+    #[test]
+    fn host_triple_alpine_aarch64() {
+        let os_release = r#"ID=alpine
+VERSION_ID=3.23
+"#;
+        let triple = host_triple_from_os_release(Some(os_release), Platform::LinuxArm64);
+        assert_eq!(triple.arch, "aarch64");
+        assert_eq!(triple.abi, "musl");
+    }
+
+    #[test]
+    fn host_triple_no_os_release_falls_back_to_gnu() {
+        let triple = host_triple_from_os_release(None, Platform::LinuxX86_64);
+        assert_eq!(triple.abi, "gnu");
+    }
+
+    #[test]
+    fn host_triple_macos() {
+        let triple = host_triple_from_os_release(None, Platform::MacOsArm64);
+        assert_eq!(triple.vendor, "apple");
+        assert_eq!(triple.os, "darwin");
+        assert_eq!(triple.abi, "darwin");
+    }
+
+    #[test]
+    fn host_triple_windows() {
+        let triple = host_triple_from_os_release(None, Platform::WindowsX86_64);
+        assert_eq!(triple.arch, "x86_64");
+        assert_eq!(triple.vendor, "pc");
+        assert_eq!(triple.os, "windows");
+        assert_eq!(triple.abi, "msvc");
+    }
+
+    #[test]
+    fn user_agent_alpine_matches_real_r() {
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "musl".into(),
+            },
+            distro_label: "Alpine Linux 3.23.4".into(),
+            r_version: "4.5.0".into(),
+        };
+        assert_eq!(
+            user_agent(&info),
+            "R (4.5.0 x86_64-pc-linux-musl x86_64 linux-musl)"
+        );
+    }
+
+    #[test]
+    fn user_agent_ubuntu_matches_real_r() {
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "gnu".into(),
+            },
+            distro_label: "Ubuntu 22.04".into(),
+            r_version: "4.5.0".into(),
+        };
+        assert_eq!(
+            user_agent(&info),
+            "R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)"
+        );
+    }
+
+    #[test]
+    fn user_agent_satisfies_ppm_gating() {
+        // PPM's UA gating in registry/p3m.rs sniffs for the literal "R (" prefix.
+        // Regression guard: any future change to user_agent() that drops this
+        // prefix will silently break P3M binary downloads on Ubuntu/Debian.
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "gnu".into(),
+            },
+            distro_label: "Ubuntu 22.04".into(),
+            r_version: "4.5.0".into(),
+        };
+        let ua = user_agent(&info);
+        assert!(
+            ua.starts_with("R ("),
+            "PPM gating requires 'R (' prefix; got: {ua}"
+        );
+        assert!(ua.contains("linux-gnu"));
+    }
+
+    #[test]
+    fn host_info_uses_pretty_distro_label() {
+        let os_release = r#"NAME="Alpine Linux"
+ID=alpine
+VERSION_ID=3.23.4
+"#;
+        let info = host_info_from_os_release(Some(os_release), Platform::LinuxX86_64, "4.5.0");
+        assert_eq!(info.distro_label, "Alpine Linux 3.23.4");
+        assert_eq!(info.r_version, "4.5.0");
+    }
+
+    #[test]
+    fn host_info_unknown_distro_label() {
+        let info = host_info_from_os_release(None, Platform::LinuxX86_64, "4.5.0");
+        assert_eq!(info.distro_label, "unknown");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_full_version() {
+        // Alpine 3.23.4 reports VERSION_ID="3.23.4"; we truncate to 3.23
+        // (matching the existing #30 sysreqs normalization).
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=alpine\nVERSION_ID=3.23.4\n"));
+        assert_eq!(slug, "alpine-3.23");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_minor_only() {
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=alpine\nVERSION_ID=3.21\n"));
+        assert_eq!(slug, "alpine-3.21");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_unknown_distro_still_falls_back() {
+        // Regression: Arch / NixOS / Gentoo / etc. keep the ubuntu-2204
+        // fallback (out of scope for this PR).
+        let slug = detect_posit_distro_slug_from_os_release(Some("ID=arch\n"));
+        assert_eq!(slug, "ubuntu-2204");
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_alpine_skips_p3m() {
+        // Integration check: alpine slug must not resolve to a PPM codename,
+        // so P3MBinaryIndex returns empty for alpine and sync falls through
+        // to source compile.
+        assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.23").is_none());
+        assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.21").is_none());
     }
 }

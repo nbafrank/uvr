@@ -7,6 +7,83 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Fixes
+
+- **Install summary: 'binary' covers everything that didn't compile (pat-s)**:
+  uvr's tarball inspector internally distinguishes truly-binary tarballs
+  (host-matching `Built:` line, extracted via the pure-Rust fast path)
+  from pure-R packages (`NeedsCompilation: no`, installed via `R CMD
+  INSTALL` with no C compilation). User-facing, both are reported as
+  "binary" because neither invokes a compiler. Only packages that
+  actually fired the C/C++/Fortran compiler are reported as "from
+  source". For a typical rcmdcheck install on cran.rpkgs.com, the
+  summary reads `79 binary, 4 from source`.
+
+- **Pre-install and "no binary repo" messages reflect actual classification (pat-s)**:
+  uvr now runs Task 13's tarball-sniff for every downloaded package
+  before printing the pre-install summary. Both the upfront
+  "Installing N package(s): X binary, Y from source" line and the
+  "No binary repo for X on R Y" hint now use runtime classification
+  instead of the lock-time pre-estimate. For cran.rpkgs.com (binaries
+  served behind a source-style PACKAGES), the upfront message now
+  correctly says "binary" for entries with a host-matching `Built:`
+  inside their tarball DESCRIPTION. The "no binary repo" hint only
+  fires when no package was reclassified.
+
+- **extract_tgz uses manual file extraction (pat-s)**: replaced
+  `tar::Entry::unpack` (which performs metadata preservation, symlink
+  validation, and a remove-then-recreate dance) with explicit
+  `fs::create_dir_all` + `fs::File::create` + `io::copy`. R packages
+  need none of the syscalls tar-rs's unpack tries; sidestepping them
+  fixes opaque first-entry extraction failures on Drone CI / overlayfs
+  / FUSE filesystems. Error messages now include `io::Error.kind()`
+  for future debuggability.
+
+- **Alpine binary install (pat-s)**: `detect_posit_distro_slug()`
+  no longer rewrites alpine to `ubuntu-2204`. On alpine, uvr now produces
+  the slug `alpine-X.Y` which `ppm_linux_codename` cannot translate, so
+  `P3MBinaryIndex` returns empty. Sync falls through to source compile
+  (slow but correct) instead of silently downloading wrong-libc binaries
+  from P3M's Jammy index. Other unknown distros keep the legacy fallback.
+
+### Features
+
+- **`UVR_REPOS` env var (pat-s)**: inject `[[sources]]` entries from the
+  environment at **sync time only**, so the lockfile stays reproducible
+  across environments (lock time only sees `uvr.toml`'s `[[sources]]`).
+  Comma-separated URLs; source names auto-derived from the URL host.
+  Useful for CI workflows that want to swap binary mirrors at install
+  time without committing to project config:
+
+  ```sh
+  UVR_REPOS=https://cran.rpkgs.com/arm64/alpine323/latest uvr sync
+  ```
+
+- **Custom binary sources via `[[sources]]` (pat-s)**: any
+  CRAN-like repo declared in `[[sources]]` can now supply binaries
+  to uvr. Auto-detection: an entry's `Built:` field is matched
+  against the running host's triple + R minor. If at least one
+  source has host-matching `Built:` entries, P3M is suppressed and
+  custom sources are queried in declaration order. Source-only
+  custom repos (r-multiverse, r-universe) keep their existing
+  behavior — they coexist with P3M as today. The `Path:` field is
+  honored for non-default tarball locations, with traversal
+  hardening.
+
+  Example for alpine:
+
+  ```toml
+  [[sources]]
+  name = "rpkgs"
+  url  = "https://cran.rpkgs.com"
+  ```
+
+  uvr's User-Agent now matches what real R sends via
+  `getOption("HTTPUserAgent")`: `R (<ver> <triple> <arch> <os>-<abi>)`.
+  This satisfies PPM's existing gating and gives cran.rpkgs.com the
+  triple substring (`linux-musl` vs `linux-gnu`) it needs to route
+  requests to the right binary.
+
 ## v0.3.5 (2026-05-15)
 
 Largest batched release since v0.3.0. Two new commands, one new

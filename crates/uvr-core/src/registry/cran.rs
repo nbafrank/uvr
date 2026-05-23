@@ -29,6 +29,11 @@ pub struct CranPackageEntry {
     pub md5sum: String,
     /// Raw `SystemRequirements` field from DESCRIPTION, if present.
     pub system_requirements: Option<String>,
+    /// `Path:` field — relative location of the tarball within the
+    /// repository, when not at the default `<base>/<name>_<version>.tar.gz`.
+    pub path: Option<String>,
+    /// `Built:` field, parsed. Present iff this entry is a binary build.
+    pub built: Option<BuiltInfo>,
 }
 
 impl CranPackageEntry {
@@ -60,7 +65,14 @@ impl CranPackageEntry {
     }
 
     pub fn tarball_url_with_base(&self, base: &str) -> String {
-        format!("{}/{}_{}.tar.gz", base, self.name, self.raw_version)
+        let safe_path = self.path.as_deref().filter(|p| {
+            !p.is_empty() && !p.starts_with('/') && !p.split('/').any(|seg| seg == "..")
+        });
+        let dir = match safe_path {
+            Some(p) => format!("{}/{}", base, p),
+            None => base.to_string(),
+        };
+        format!("{}/{}_{}.tar.gz", dir, self.name, self.raw_version)
     }
 }
 
@@ -68,6 +80,115 @@ impl CranPackageEntry {
 pub struct DepConstraint {
     pub name: String,
     pub req: Option<VersionReq>,
+}
+
+/// Parsed `Built:` field from a CRAN PACKAGES entry. Present on binary
+/// builds; absent on source-only entries.
+///
+/// Canonical format (semicolon-separated, four fields):
+///
+/// ```text
+/// R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+/// ```
+///
+/// Extra fields beyond the fourth are ignored. The build date is stored
+/// raw and not validated — kept only for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltInfo {
+    pub r_version: String,
+    pub platform: String,
+    pub date: String,
+    pub os_family: String,
+}
+
+impl BuiltInfo {
+    /// Returns true iff this binary build matches the given host:
+    /// - R `major.minor` equals `r_minor` (patch ignored)
+    /// - Platform triple matches `host` vendor-relaxed: arch, OS, and ABI must
+    ///   match exactly, but the vendor segment is ignored (Alpine reports
+    ///   `unknown`; Ubuntu/Debian report `pc`; uvr always emits `pc`)
+    /// - OS family matches host's OS (linux/macos = "unix"; windows = "windows")
+    pub fn matches_host(
+        &self,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> bool {
+        // R version major.minor match (ignore patch).
+        let built_minor: String = self
+            .r_version
+            .split('.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".");
+        if built_minor != r_minor {
+            return false;
+        }
+
+        // Triple match, vendor-relaxed: R reports `unknown` on Alpine
+        // but `pc` on Ubuntu/Debian, while uvr's host_triple unconditionally
+        // emits `pc` on Linux. Normalize both sides by dropping the
+        // vendor segment (the 2nd of 4) before comparing.
+        let host_normalized = format!("{}-{}-{}", host.arch, host.os, host.abi);
+        if normalize_triple_drop_vendor(&self.platform) != host_normalized {
+            return false;
+        }
+
+        // OS family.
+        let expected_os_family = match host.os.as_str() {
+            "windows" => "windows",
+            _ => "unix",
+        };
+        if self.os_family != expected_os_family {
+            return false;
+        }
+
+        true
+    }
+}
+
+/// Drop the vendor segment (2nd of typically 4) from a platform triple so
+/// vendor variants (Alpine's `unknown` vs Ubuntu's `pc` vs macOS's `apple`)
+/// don't cause false mismatches.
+///
+/// Examples:
+/// - `aarch64-unknown-linux-musl` → `aarch64-linux-musl`
+/// - `aarch64-pc-linux-musl`      → `aarch64-linux-musl`
+/// - `x86_64-w64-mingw32`         → `x86_64-mingw32`
+/// - `aarch64-apple-darwin20`     → `aarch64-darwin20`
+///
+/// If the input doesn't look like a 3+ segment triple, returns it
+/// unchanged.
+pub(crate) fn normalize_triple_drop_vendor(triple: &str) -> String {
+    // Split on the first dash to capture arch, then on the next dash to
+    // drop the vendor segment, then rejoin with the remainder.
+    let Some((arch, rest)) = triple.split_once('-') else {
+        return triple.to_string();
+    };
+    let Some((_vendor, tail)) = rest.split_once('-') else {
+        return triple.to_string();
+    };
+    format!("{arch}-{tail}")
+}
+
+/// Parse a `Built:` field. Lenient: returns `None` on anything that doesn't
+/// look like a binary-build marker (missing `R` prefix, fewer than four
+/// fields, etc.). Treats unparseable as "not a binary".
+pub fn parse_built(s: &str) -> Option<BuiltInfo> {
+    let parts: Vec<&str> = s.split(';').map(|p| p.trim()).collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let r_field = parts[0];
+    let r_version = r_field.strip_prefix("R ")?.trim().to_string();
+    if r_version.is_empty() {
+        return None;
+    }
+    Some(BuiltInfo {
+        r_version,
+        platform: parts[1].to_string(),
+        date: parts[2].to_string(),
+        os_family: parts[3].to_string(),
+    })
 }
 
 /// In-memory CRAN index.
@@ -114,6 +235,22 @@ impl CranIndex {
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
+
+    /// Iterator over all entries (all versions of all packages).
+    pub fn all_entries(&self) -> impl Iterator<Item = &CranPackageEntry> {
+        self.packages.values().flat_map(|v| v.iter())
+    }
+
+    /// Find the entry for `(name, exact version)`. Compares the normalized
+    /// version (e.g. `1.1-3` → `1.1.3`).
+    pub fn find_exact(&self, name: &str, version: &str) -> Option<&CranPackageEntry> {
+        let want = normalize_version(version);
+        let parsed = Version::parse(&want).ok()?;
+        self.packages
+            .get(name)?
+            .iter()
+            .find(|e| e.version == parsed)
+    }
 }
 
 /// The CRAN registry — downloads and caches the package index.
@@ -137,17 +274,23 @@ impl CranRegistry {
             CRAN_SRC_BASE,
             PackageSource::Cran,
             force_refresh,
+            None,
         )
         .await
     }
 
     /// Fetch a CRAN-like index from any repository that serves PACKAGES.gz.
     /// Used for custom repositories like r-multiverse, r-universe, etc.
+    ///
+    /// `user_agent` is forwarded on every HTTP request so hosts like
+    /// cran.rpkgs.com can route to the correct binary flavour (musl vs gnu)
+    /// based on the R-shaped UA. Pass `None` to use the default client UA.
     pub async fn fetch_custom(
         client: &reqwest::Client,
         repo_name: &str,
         base_url: &str,
         force_refresh: bool,
+        user_agent: Option<&str>,
     ) -> Result<Self> {
         let base_url = base_url.trim_end_matches('/');
         let packages_url = format!("{base_url}/src/contrib/PACKAGES.gz");
@@ -166,8 +309,54 @@ impl CranRegistry {
                 name: repo_name.to_string(),
             },
             force_refresh,
+            user_agent,
         )
         .await
+    }
+
+    /// Returns true iff at least one entry in this registry has a `Built:`
+    /// line matching the host. Used at sync time to decide whether this
+    /// custom source contributes binaries.
+    pub fn is_binary_capable(
+        &self,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> bool {
+        self.index.all_entries().any(|e| {
+            e.built
+                .as_ref()
+                .is_some_and(|b| b.matches_host(host, r_minor))
+        })
+    }
+
+    /// Returns the binary tarball URL for `(name, version)` only if the
+    /// matching entry exists, its version matches, and its `Built:` line
+    /// matches the host. Path traversal hardening is applied.
+    pub fn binary_url_for(
+        &self,
+        name: &str,
+        version: &str,
+        host: &crate::r_version::downloader::HostTriple,
+        r_minor: &str,
+    ) -> Option<String> {
+        let entry = self.index.find_exact(name, version)?;
+        let built = entry.built.as_ref()?;
+        if !built.matches_host(host, r_minor) {
+            return None;
+        }
+        Some(entry.tarball_url_with_base(&self.src_base))
+    }
+
+    /// Test-only constructor.
+    #[doc(hidden)]
+    pub fn for_test(index: CranIndex, src_base: String) -> Self {
+        CranRegistry {
+            index,
+            src_base,
+            source: PackageSource::Custom {
+                name: "test".to_string(),
+            },
+        }
     }
 
     async fn fetch_from(
@@ -177,6 +366,7 @@ impl CranRegistry {
         src_base: &str,
         source: PackageSource,
         force_refresh: bool,
+        user_agent: Option<&str>,
     ) -> Result<Self> {
         let cache_path = cache_path_for(cache_key);
         let has_cache = cache_path.exists();
@@ -185,6 +375,9 @@ impl CranRegistry {
         if !force_refresh && has_cache {
             if let Some((etag, last_modified)) = read_cache_meta(cache_key) {
                 let mut req = client.get(packages_url);
+                if let Some(ua) = user_agent {
+                    req = req.header(reqwest::header::USER_AGENT, ua);
+                }
                 if let Some(ref e) = etag {
                     req = req.header("If-None-Match", e.as_str());
                 }
@@ -276,7 +469,11 @@ impl CranRegistry {
 
         // No cache or force refresh — full download
         debug!("Downloading {} PACKAGES.gz...", cache_key);
-        let resp = client.get(packages_url).send().await?;
+        let mut req = client.get(packages_url);
+        if let Some(ua) = user_agent {
+            req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(UvrError::Other(format!(
                 "Failed to fetch package index from {packages_url} (HTTP {})",
@@ -425,6 +622,8 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         .unwrap_or_default();
     let md5sum = fields.get("MD5sum").cloned().unwrap_or_default();
     let system_requirements = fields.get("SystemRequirements").cloned();
+    let path = fields.get("Path").cloned().filter(|p| !p.is_empty());
+    let built = fields.get("Built").and_then(|s| parse_built(s));
 
     Some(CranPackageEntry {
         name,
@@ -435,6 +634,8 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
         linking_to,
         md5sum,
         system_requirements,
+        path,
+        built,
     })
 }
 
@@ -545,5 +746,366 @@ MD5sum: def789
         let dcf2 = "Package: dplyr\nVersion: 1.1.4\nMD5sum: def\n";
         let entry2 = parse_dcf_block(dcf2).unwrap();
         assert!(entry2.system_requirements.is_none());
+    }
+
+    #[test]
+    fn parse_built_canonical() {
+        let b =
+            parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix").unwrap();
+        assert_eq!(b.r_version, "4.5.0");
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
+        assert_eq!(b.date, "2025-01-15 12:00:00 UTC");
+        assert_eq!(b.os_family, "unix");
+    }
+
+    #[test]
+    fn parse_built_extra_fields_ignored() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix; extra; junk").unwrap();
+        assert_eq!(b.os_family, "unix");
+    }
+
+    #[test]
+    fn parse_built_too_few_fields_returns_none() {
+        assert!(parse_built("R 4.5.0; x86_64-pc-linux-musl").is_none());
+        assert!(parse_built("R 4.5.0; x86_64; 2025-01-15").is_none());
+    }
+
+    #[test]
+    fn parse_built_no_r_prefix_returns_none() {
+        assert!(parse_built("4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").is_none());
+    }
+
+    #[test]
+    fn parse_built_unparseable_returns_none() {
+        assert!(parse_built("garbage").is_none());
+        assert!(parse_built("").is_none());
+    }
+
+    #[test]
+    fn parse_built_with_whitespace_around_separators() {
+        let b = parse_built("R 4.5.0 ; x86_64-pc-linux-musl ; 2025-01-15 ; unix").unwrap();
+        assert_eq!(b.r_version, "4.5.0");
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
+    }
+
+    #[test]
+    fn parse_dcf_extracts_path_and_built() {
+        let block = "Package: rlang
+Version: 1.1.6
+Path: linux/musl-3.23
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15 12:00:00 UTC; unix
+MD5sum: abc123";
+        let entry = parse_dcf_block(block).unwrap();
+        assert_eq!(entry.name, "rlang");
+        assert_eq!(entry.path.as_deref(), Some("linux/musl-3.23"));
+        let b = entry.built.as_ref().unwrap();
+        assert_eq!(b.platform, "x86_64-pc-linux-musl");
+    }
+
+    #[test]
+    fn parse_dcf_no_path_no_built_regression() {
+        let block = "Package: jsonlite
+Version: 1.8.8
+MD5sum: deadbeef";
+        let entry = parse_dcf_block(block).unwrap();
+        assert!(entry.path.is_none());
+        assert!(entry.built.is_none());
+    }
+
+    #[test]
+    fn parse_dcf_built_unparseable_yields_none() {
+        let block = "Package: foo
+Version: 1.0
+Built: garbage-not-actually-built-format";
+        let entry = parse_dcf_block(block).unwrap();
+        assert!(entry.built.is_none(), "garbage Built: should be ignored");
+    }
+
+    fn entry_with_path(path: Option<&str>) -> CranPackageEntry {
+        CranPackageEntry {
+            name: "rlang".into(),
+            version: Version::parse("1.1.6").unwrap(),
+            raw_version: "1.1.6".into(),
+            depends: vec![],
+            imports: vec![],
+            linking_to: vec![],
+            md5sum: String::new(),
+            system_requirements: None,
+            path: path.map(|p| p.to_string()),
+            built: None,
+        }
+    }
+
+    #[test]
+    fn tarball_url_no_path_unchanged() {
+        let entry = entry_with_path(None);
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_with_path_appends_subdir() {
+        let entry = entry_with_path(Some("linux/musl-3.23"));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/linux/musl-3.23/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_rejects_path_traversal() {
+        let entry = entry_with_path(Some("../../../etc"));
+        // Falls back to default URL (path is dropped) — no traversal.
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_rejects_absolute_path() {
+        let entry = entry_with_path(Some("/usr/bin"));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_url_empty_path_treated_as_none() {
+        let entry = entry_with_path(Some(""));
+        assert_eq!(
+            entry.tarball_url_with_base("https://example.com/src/contrib"),
+            "https://example.com/src/contrib/rlang_1.1.6.tar.gz"
+        );
+    }
+
+    fn registry_from_packages(text: &str, src_base: &str) -> CranRegistry {
+        let index = parse_packages_gz(text).unwrap();
+        CranRegistry::for_test(index, src_base.to_string())
+    }
+
+    fn musl_alpine_host() -> crate::r_version::downloader::HostTriple {
+        crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        }
+    }
+
+    fn gnu_ubuntu_host() -> crate::r_version::downloader::HostTriple {
+        crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "gnu".into(),
+        }
+    }
+
+    #[test]
+    fn built_matches_host_exact_alpine() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_matches_host_r_minor_patch_ignored() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b.matches_host(&musl_alpine_host(), "4.5"));
+        let b2 = parse_built("R 4.5.3; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(b2.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_r_minor() {
+        let b = parse_built("R 4.4.0; x86_64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_libc() {
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_arch() {
+        let b = parse_built("R 4.5.0; aarch64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        assert!(!b.matches_host(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn built_mismatches_os_family_windows_on_linux() {
+        let b = parse_built("R 4.5.0; x86_64-w64-mingw32; 2025-01-15; windows").unwrap();
+        assert!(!b.matches_host(&gnu_ubuntu_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_yes_with_musl_built() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_no_for_source_only() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(!reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn is_binary_capable_no_for_wrong_libc() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(!reg.is_binary_capable(&musl_alpine_host(), "4.5"));
+    }
+
+    #[test]
+    fn binary_url_for_returns_url_when_match() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert_eq!(
+            reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5"),
+            Some("https://example.com/src/contrib/rlang_1.1.6.tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn binary_url_for_honors_path() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Path: x86_64/alpine-3.23
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert_eq!(
+            reg.binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5"),
+            Some(
+                "https://example.com/src/contrib/x86_64/alpine-3.23/rlang_1.1.6.tar.gz".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn binary_url_for_returns_none_when_no_match() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg
+            .binary_url_for("rlang", "1.1.6", &musl_alpine_host(), "4.5")
+            .is_none());
+    }
+
+    #[test]
+    fn binary_url_for_returns_none_for_unknown_package() {
+        let pkgs = "Package: rlang
+Version: 1.1.6
+Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
+
+";
+        let reg = registry_from_packages(pkgs, "https://example.com/src/contrib");
+        assert!(reg
+            .binary_url_for("nonexistent", "0.0.0", &musl_alpine_host(), "4.5")
+            .is_none());
+    }
+
+    #[test]
+    fn matches_host_ignores_vendor_alpine_r_reports_unknown() {
+        // R built on Alpine reports `aarch64-unknown-linux-musl`,
+        // but uvr's host_triple emits `aarch64-pc-linux-musl`.
+        // These must match anyway — vendor is decorative.
+        let b = parse_built("R 4.5.2; aarch64-unknown-linux-musl; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "aarch64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_ignores_vendor_inverse_direction() {
+        // Symmetry: Built: pc, host: unknown should also match.
+        let b = parse_built("R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "unknown".into(),
+            os: "linux".into(),
+            abi: "gnu".into(),
+        };
+        assert!(b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_still_rejects_arch_mismatch() {
+        // Vendor-lenient does NOT mean wildly lenient. Arch must still match.
+        let b = parse_built("R 4.5.0; aarch64-pc-linux-musl; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(!b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn matches_host_still_rejects_abi_mismatch_with_relaxed_vendor() {
+        // gnu Built: vs musl host — still mismatch.
+        let b = parse_built("R 4.5.0; x86_64-unknown-linux-gnu; 2025-01-15; unix").unwrap();
+        let host = crate::r_version::downloader::HostTriple {
+            arch: "x86_64".into(),
+            vendor: "pc".into(),
+            os: "linux".into(),
+            abi: "musl".into(),
+        };
+        assert!(!b.matches_host(&host, "4.5"));
+    }
+
+    #[test]
+    fn normalize_triple_drop_vendor_examples() {
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-unknown-linux-musl"),
+            "aarch64-linux-musl"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-pc-linux-musl"),
+            "aarch64-linux-musl"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("x86_64-w64-mingw32"),
+            "x86_64-mingw32"
+        );
+        assert_eq!(
+            normalize_triple_drop_vendor("aarch64-apple-darwin20"),
+            "aarch64-darwin20"
+        );
+        // Degenerate inputs: returned as-is.
+        assert_eq!(normalize_triple_drop_vendor("aarch64"), "aarch64");
+        assert_eq!(normalize_triple_drop_vendor("aarch64-musl"), "aarch64-musl");
+        assert_eq!(normalize_triple_drop_vendor(""), "");
     }
 }
