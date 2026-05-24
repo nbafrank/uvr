@@ -206,6 +206,7 @@ pub fn welcome(version: &str) {
             &[
                 ("uvr r install <ver>", "Install an R version"),
                 ("uvr doctor", "Diagnose environment issues"),
+                ("uvr upgrade", "Update uvr itself to the latest release"),
                 ("uvr help", "Full command reference"),
             ],
         ),
