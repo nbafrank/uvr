@@ -7,7 +7,61 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.6 (2026-05-24)
+
+Follow-up release to v0.3.5. Lands @pat-s's PR #88 (alpine binaries +
+custom binary sources + `extract_tgz` rewrite + `UVR_REPOS`), the #99
+broken-install recovery path, and a few small UX fixes.
+
+### Features
+
+- **`UVR_REPOS` env var (pat-s, #31 follow-up)**: inject `[[sources]]`
+  entries from the environment at **sync time only**, so the lockfile
+  stays reproducible across environments (lock time only sees
+  `uvr.toml`'s `[[sources]]`). Comma-separated URLs; source names
+  auto-derived from the URL host. Useful for CI workflows that want to
+  swap binary mirrors at install time without committing to project
+  config:
+
+  ```sh
+  UVR_REPOS=https://cran.rpkgs.com/arm64/alpine323/latest uvr sync
+  ```
+
+- **Custom binary sources via `[[sources]]` (pat-s)**: any CRAN-like
+  repo declared in `[[sources]]` can now supply binaries to uvr.
+  Auto-detection: an entry's `Built:` field is matched against the
+  running host's triple + R minor. If at least one source has
+  host-matching `Built:` entries, P3M is suppressed and custom
+  sources are queried in declaration order. Source-only custom repos
+  (r-multiverse, r-universe) keep their existing behavior — they
+  coexist with P3M as today. The `Path:` field is honored for
+  non-default tarball locations, with traversal hardening.
+
+  Example for alpine:
+
+  ```toml
+  [[sources]]
+  name = "rpkgs"
+  url  = "https://cran.rpkgs.com"
+  ```
+
+  uvr's User-Agent now matches what real R sends via
+  `getOption("HTTPUserAgent")`: `R (<ver> <triple> <arch> <os>-<abi>)`.
+  This satisfies PPM's existing gating and gives cran.rpkgs.com the
+  triple substring (`linux-musl` vs `linux-gnu`) it needs to route
+  requests to the right binary.
+
 ### Fixes
+
+- **`uvr r install` detects and replaces broken installs (#99)**: the
+  short-circuit on "directory exists" now validates that the binary
+  actually responds to `R --version`. If it doesn't (e.g. a
+  half-patched macOS install on macOS 26.x left behind), the dir is
+  removed and a fresh install proceeds. The "pinned but not installed
+  (installed: 4.6.0, 4.6.0)" warning now distinguishes
+  broken-from-missing — when the dir exists at the pinned version,
+  the message reads "appears installed at X but is broken (no version
+  response)" and points at the recovery path.
 
 - **Install summary: 'binary' covers everything that didn't compile (pat-s)**:
   uvr's tarball inspector internally distinguishes truly-binary tarballs
@@ -46,43 +100,16 @@ Pure tracking section — fixes and small features land here between tags.
   (slow but correct) instead of silently downloading wrong-libc binaries
   from P3M's Jammy index. Other unknown distros keep the legacy fallback.
 
-### Features
+- **Welcome screen surfaces `uvr upgrade`**: the Tooling section now
+  includes `uvr upgrade` between `doctor` and `help`. Users on a stale
+  build no longer need to dig through `uvr help` to find the
+  self-update command.
 
-- **`UVR_REPOS` env var (pat-s)**: inject `[[sources]]` entries from the
-  environment at **sync time only**, so the lockfile stays reproducible
-  across environments (lock time only sees `uvr.toml`'s `[[sources]]`).
-  Comma-separated URLs; source names auto-derived from the URL host.
-  Useful for CI workflows that want to swap binary mirrors at install
-  time without committing to project config:
-
-  ```sh
-  UVR_REPOS=https://cran.rpkgs.com/arm64/alpine323/latest uvr sync
-  ```
-
-- **Custom binary sources via `[[sources]]` (pat-s)**: any
-  CRAN-like repo declared in `[[sources]]` can now supply binaries
-  to uvr. Auto-detection: an entry's `Built:` field is matched
-  against the running host's triple + R minor. If at least one
-  source has host-matching `Built:` entries, P3M is suppressed and
-  custom sources are queried in declaration order. Source-only
-  custom repos (r-multiverse, r-universe) keep their existing
-  behavior — they coexist with P3M as today. The `Path:` field is
-  honored for non-default tarball locations, with traversal
-  hardening.
-
-  Example for alpine:
-
-  ```toml
-  [[sources]]
-  name = "rpkgs"
-  url  = "https://cran.rpkgs.com"
-  ```
-
-  uvr's User-Agent now matches what real R sends via
-  `getOption("HTTPUserAgent")`: `R (<ver> <triple> <arch> <os>-<abi>)`.
-  This satisfies PPM's existing gating and gives cran.rpkgs.com the
-  triple substring (`linux-musl` vs `linux-gnu`) it needs to route
-  requests to the right binary.
+- **Benchmark Dockerfile bumps Rust 1.83 → 1.86**: transitive deps
+  (notably `time` 0.3.47+) require Cargo's stabilised `edition2024`
+  feature (Cargo 1.85+). The bench image had been silently failing for
+  ~3 weeks before this. Bench-only change; doesn't affect release
+  builds.
 
 ## v0.3.5 (2026-05-15)
 
