@@ -7,6 +7,23 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.7 (2026-05-24)
+
+Version-string hotfix. v0.3.5 and v0.3.6 binaries were built from a
+workspace `Cargo.toml` that still pinned `version = "0.3.4"`, so they
+identify themselves as v0.3.4 in `uvr --version` and the welcome screen.
+That also traps users in an `uvr upgrade` loop, since the embedded version
+keeps comparing as older than the latest GitHub tag.
+
+The code shipped under v0.3.5 / v0.3.6 is functionally correct; only the
+reported version was wrong. v0.3.7 contains no other changes — it just
+bumps the workspace version so the binary self-identifies correctly and
+breaks the upgrade loop.
+
+If you're stuck on a binary that says v0.3.4 but you ran `uvr upgrade`
+recently, run `uvr upgrade` again once v0.3.7 is published and it will
+settle.
+
 ## v0.3.6 (2026-05-24)
 
 Follow-up release to v0.3.5. Lands @pat-s's PR #88 (alpine binaries +
