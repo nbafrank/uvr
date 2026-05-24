@@ -29,11 +29,12 @@ ARG R_VERSION=4.5.3
 # distros and matches what we ship as
 # `uvr-x86_64-unknown-linux-musl.tar.gz` in release artifacts.
 #
-# Bumped 1.83 → 1.86 in May 2026: transitive deps (notably `time`
-# 0.3.47+) now require the stabilised `edition2024` feature which
-# landed in Cargo 1.85. Pin tracks current stable rather than MSRV
-# because the bench image is rebuilt on every release.
-FROM rust:1.86.0-slim-bookworm AS builder
+# Pin tracks current stable rather than MSRV because the bench image
+# is rebuilt on every release. Bumped over time as transitive deps
+# raise their minimum rustc: 1.83 → 1.86 (May 2026, `edition2024` /
+# Cargo 1.85) → 1.88 (May 2026, `home@0.5.12`, `time@0.3.47`,
+# `time-core@0.1.8` all require rustc 1.88).
+FROM rust:1.88.0-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config musl-tools \
