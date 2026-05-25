@@ -7,6 +7,26 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Fixes
+
+- **`uvr import` now scaffolds a complete uvr project**: previously
+  `uvr import renv.lock` wrote `uvr.toml` and `.uvr/library/` but
+  skipped everything else `uvr init` does — no `.Rprofile` block,
+  no `.gitignore` entry, no Positron config, no companion package.
+  R startup would still pick up `renv/activate.R` (if present) and
+  reset `.libPaths()` to `renv/library/`, completely bypassing
+  uvr's library. Workaround pre-fix was `rm uvr.toml && uvr init &&
+  uvr import renv.lock`. Now `uvr import` calls the same idempotent
+  scaffolding `uvr init` does.
+
+- **`uvr import` detects leftover renv plumbing and warns**: after
+  import, if `renv/` exists or `.Rprofile` still sources
+  `renv/activate.R`, uvr prints a warning block listing what's
+  left and how to remove it. Pass `--clean-renv` to strip the
+  hook line from `.Rprofile` and delete `renv/` automatically.
+  Without this, the migration appears to succeed but R startup
+  still loads renv and competes with uvr for the library path.
+
 ## v0.3.7 (2026-05-24)
 
 Version-string hotfix. v0.3.5 and v0.3.6 binaries were built from a

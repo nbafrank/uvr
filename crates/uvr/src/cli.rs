@@ -324,6 +324,13 @@ pub struct ImportArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
+
+    /// Tear down the renv project after a successful import: remove the
+    /// `renv/` directory and strip any `source("renv/activate.R")` hook
+    /// from `.Rprofile`. Without this flag, `uvr import` only warns
+    /// about leftover renv plumbing and leaves it in place.
+    #[arg(long)]
+    pub clean_renv: bool,
 }
 
 // ────────────────────────────────────────────────────────────

@@ -425,7 +425,7 @@ pub fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
     std::fs::write(&path, content)
 }
 
-fn write_gitignore(dir: &Path) -> std::io::Result<()> {
+pub fn write_gitignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".gitignore");
     let uvr_entry = format!("/{DOT_UVR_DIR}/{LIBRARY_DIR}/");
 
