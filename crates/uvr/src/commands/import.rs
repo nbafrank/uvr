@@ -366,7 +366,9 @@ fn warn_renv_leftovers(status: &RenvLeftovers) {
         body.push("`renv/` directory still present (will be ignored once the hook is gone, but takes disk space).".to_string());
     }
     body.push(String::new());
-    body.push("Re-run `uvr import --clean-renv` to remove these, or clean up manually:".to_string());
+    body.push(
+        "Re-run `uvr import --clean-renv` to remove these, or clean up manually:".to_string(),
+    );
     if status.activate_hook_in_rprofile {
         body.push("  sed -i '/renv\\/activate.R/d' .Rprofile".to_string());
     }
@@ -506,7 +508,8 @@ mod tests {
 
     #[test]
     fn strip_hook_handles_wrapped_form() {
-        let input = "if (file.exists(\"renv/activate.R\")) source(\"renv/activate.R\")\noptions(foo = 1)\n";
+        let input =
+            "if (file.exists(\"renv/activate.R\")) source(\"renv/activate.R\")\noptions(foo = 1)\n";
         let out = strip_renv_hook(input);
         assert_eq!(out, "options(foo = 1)\n");
     }
