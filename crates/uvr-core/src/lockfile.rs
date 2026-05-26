@@ -300,6 +300,30 @@ source = "forgejo:"
     }
 
     #[test]
+    fn round_trip_forgejo_source_with_port() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "forgejo:git.local:3000"
+"#;
+        let lf: Lockfile = input.parse().expect("parse forgejo source with port");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Forgejo {
+                host: "git.local:3000".to_string()
+            }
+        );
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "forgejo:git.local:3000""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
     fn round_trip_custom_source() {
         let input = r#"
 [r]
