@@ -60,6 +60,36 @@ pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)
     ))
 }
 
+/// Look up a Forgejo API token from the environment.
+///
+/// Lookup order:
+/// 1. `UVR_FORGEJO_TOKEN_<NORMALIZED_HOST>` — per-host.
+/// 2. `UVR_FORGEJO_TOKEN` — single token for users with one instance.
+///
+/// Host normalization: strip `:port`, uppercase, replace `.` and `-`
+/// with `_`. E.g. `codefloe.com` → `CODEFLOE_COM`, `git.local:3000` →
+/// `GIT_LOCAL`. Whitespace-only env values are treated as unset so a
+/// shell that exports `UVR_FORGEJO_TOKEN=` doesn't fail authenticated
+/// requests with a literal empty bearer.
+pub(crate) fn forgejo_token(host: &str) -> Option<String> {
+    let host_no_port = host.split(':').next().unwrap_or(host);
+    let normalized: String = host_no_port
+        .to_ascii_uppercase()
+        .chars()
+        .map(|c| if c == '.' || c == '-' { '_' } else { c })
+        .collect();
+    let per_host = format!("UVR_FORGEJO_TOKEN_{normalized}");
+    for var in [per_host.as_str(), "UVR_FORGEJO_TOKEN"] {
+        if let Ok(v) = std::env::var(var) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +142,33 @@ mod tests {
         assert!(parse_forgejo_spec("forgejo:://u/r").is_none());
         assert!(parse_forgejo_spec("forgejo::codefloe.com//r").is_none());
         assert!(parse_forgejo_spec("forgejo::codefloe.com/u/").is_none());
+    }
+
+    // All token lookup tests are combined into a single test to avoid races
+    // from env-mutation across parallel test threads (std::env is global).
+    #[test]
+    fn token_lookup() {
+        // --- sub-test: per-host var takes precedence over global ---
+        let host = "lookup-test-host.example";
+        let per_host_var = "UVR_FORGEJO_TOKEN_LOOKUP_TEST_HOST_EXAMPLE";
+        std::env::set_var(per_host_var, "host-specific");
+        std::env::set_var("UVR_FORGEJO_TOKEN", "global");
+        assert_eq!(forgejo_token(host).as_deref(), Some("host-specific"));
+        std::env::remove_var(per_host_var);
+        assert_eq!(forgejo_token(host).as_deref(), Some("global"));
+        std::env::remove_var("UVR_FORGEJO_TOKEN");
+        assert_eq!(forgejo_token(host), None);
+
+        // --- sub-test: port is stripped before normalization ---
+        // Port is stripped before normalization so the env var name is
+        // stable across `host` vs `host:port`.
+        std::env::set_var("UVR_FORGEJO_TOKEN_GIT_LOCAL", "t");
+        assert_eq!(forgejo_token("git.local:3000").as_deref(), Some("t"));
+        std::env::remove_var("UVR_FORGEJO_TOKEN_GIT_LOCAL");
+
+        // --- sub-test: whitespace-only values are treated as unset ---
+        std::env::set_var("UVR_FORGEJO_TOKEN", "   ");
+        assert_eq!(forgejo_token("any.host").as_deref(), None);
+        std::env::remove_var("UVR_FORGEJO_TOKEN");
     }
 }
