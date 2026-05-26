@@ -306,8 +306,8 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
                 repo = parts[2],
                 r = git_ref_owned,
             );
-            let auth = uvr_core::registry::forgejo::forgejo_token(host)
-                .map(|t| format!("token {t}"));
+            let auth =
+                uvr_core::registry::forgejo::forgejo_token(host).map(|t| format!("token {t}"));
             (url, auth)
         } else {
             // github: `user/repo`
