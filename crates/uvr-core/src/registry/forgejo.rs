@@ -90,6 +90,187 @@ pub(crate) fn forgejo_token(host: &str) -> Option<String> {
     None
 }
 
+/// Resolve a Forgejo-hosted R package: fetch commit SHA, fetch DESCRIPTION,
+/// build a tarball URL for the lockfile.
+pub async fn resolve_forgejo_package(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<PackageInfo> {
+    resolve_forgejo_package_with_remotes(client, host, owner, repo, git_ref)
+        .await
+        .map(|(info, _)| info)
+}
+
+/// Resolve a Forgejo package and return its `Remotes:`-declared forgejo deps,
+/// so callers can walk transitive forgejo→forgejo chains during `uvr lock`.
+pub async fn resolve_forgejo_package_with_remotes(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<(PackageInfo, Vec<ForgejoRemote>)> {
+    let commit_sha = fetch_commit_sha(client, host, owner, repo, git_ref).await?;
+
+    let desc_url = format!(
+        "https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}"
+    );
+    let mut desc_req = client
+        .get(&desc_url)
+        .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
+    if let Some(tok) = forgejo_token(host) {
+        desc_req = desc_req.header("Authorization", format!("token {tok}"));
+    }
+    let desc_resp = desc_req.send().await?;
+    if !desc_resp.status().is_success() {
+        return Err(map_forgejo_error(
+            desc_resp.status(),
+            host,
+            owner,
+            repo,
+            &commit_sha,
+        ));
+    }
+    let desc_text = desc_resp.text().await?;
+
+    let desc_fields = crate::dcf::parse_dcf_fields(&desc_text);
+    let pkg_name = desc_fields
+        .get("Package")
+        .cloned()
+        .unwrap_or_else(|| repo.to_string());
+    let pkg_version = desc_fields
+        .get("Version")
+        .cloned()
+        .unwrap_or_else(|| "0.0.0".to_string());
+    let version = Version::parse(&crate::resolver::normalize_version(&pkg_version))
+        .unwrap_or_else(|_| Version::new(0, 0, 0));
+
+    let requires = parse_description_deps(&desc_fields);
+    let remotes = parse_forgejo_remotes(&desc_fields);
+
+    let url = format!(
+        "https://{host}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz"
+    );
+
+    debug!("Forgejo {host}/{owner}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
+
+    Ok((
+        PackageInfo {
+            name: pkg_name,
+            version,
+            source: PackageSource::Forgejo {
+                host: host.to_string(),
+            },
+            checksum: Some(format!("git:{commit_sha}")),
+            requires,
+            url,
+            raw_version: None,
+            system_requirements: None,
+        },
+        remotes,
+    ))
+}
+
+async fn fetch_commit_sha(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<String> {
+    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/commits/{git_ref}");
+    let mut req = client
+        .get(&url)
+        .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
+        .header("Accept", "application/json");
+    if let Some(tok) = forgejo_token(host) {
+        req = req.header("Authorization", format!("token {tok}"));
+    }
+    let resp = req.send().await?;
+
+    if !resp.status().is_success() {
+        return Err(map_forgejo_error(resp.status(), host, owner, repo, git_ref));
+    }
+
+    // Forgejo returns either a JSON commit object (`{ "sha": "...", ... }`)
+    // or — when `?stat=false&verification=false` etc. — an array; the
+    // `commits/{ref}` endpoint always returns a single object.
+    #[derive(serde::Deserialize)]
+    struct CommitObj {
+        sha: String,
+    }
+    let body = resp.text().await?;
+    let commit: CommitObj = serde_json::from_str(&body).map_err(|e| {
+        UvrError::Other(format!(
+            "Forgejo {host}/{owner}/{repo}@{git_ref}: could not parse commit JSON ({e}). Body: {}",
+            body.chars().take(200).collect::<String>()
+        ))
+    })?;
+    Ok(commit.sha)
+}
+
+fn map_forgejo_error(
+    status: reqwest::StatusCode,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    ref_or_sha: &str,
+) -> UvrError {
+    match status.as_u16() {
+        401 | 403 => UvrError::Other(format!(
+            "Forgejo returned {status} for {host}/{owner}/{repo}; \
+             set UVR_FORGEJO_TOKEN_<HOST> if the repo is private."
+        )),
+        404 => UvrError::Other(format!(
+            "Forgejo repository not found: {host}/{owner}/{repo}@{ref_or_sha}. \
+             Check the spec and that the repo exists."
+        )),
+        _ => UvrError::Other(format!(
+            "Forgejo error for {host}/{owner}/{repo}@{ref_or_sha}: HTTP {status}"
+        )),
+    }
+}
+
+fn parse_forgejo_remotes(
+    desc_fields: &std::collections::BTreeMap<String, String>,
+) -> Vec<ForgejoRemote> {
+    let Some(remotes_field) = desc_fields.get("Remotes") else {
+        return Vec::new();
+    };
+    crate::manifest::parse_remotes_field(remotes_field)
+        .into_iter()
+        .filter_map(|(name, spec)| match spec {
+            DependencySpec::Detailed(d) => match d.git {
+                Some(g) if g.starts_with("forgejo::") => Some((name, g, d.rev)),
+                _ => None,
+            },
+            DependencySpec::Version(_) => None,
+        })
+        .collect()
+}
+
+/// Same shape as `github::parse_description_deps` — small enough that
+/// reusing it via a shared helper isn't worth the cross-module coupling.
+fn parse_description_deps(fields: &std::collections::BTreeMap<String, String>) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    for field in &["Imports", "Depends"] {
+        if let Some(value) = fields.get(*field) {
+            for d in crate::registry::cran::parse_dep_field(value) {
+                if !crate::resolver::is_base_package(&d.name) {
+                    deps.push(Dep {
+                        name: d.name,
+                        constraint: d.req.as_ref().map(|r| r.to_string()),
+                    });
+                }
+            }
+        }
+    }
+    deps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +351,24 @@ mod tests {
         std::env::set_var("UVR_FORGEJO_TOKEN", "   ");
         assert_eq!(forgejo_token("any.host").as_deref(), None);
         std::env::remove_var("UVR_FORGEJO_TOKEN");
+    }
+
+    #[test]
+    fn parse_forgejo_remotes_filters_non_forgejo() {
+        // DESCRIPTION mixing forgejo, github, and gitlab remotes — only
+        // forgejo:: entries should come out of the parser.
+        let desc = "\
+Package: x
+Version: 0.1.0
+Remotes: forgejo::codefloe.com/pat-s/mypkg@v0.1.0,
+    github::user/other,
+    gitlab::someone/skipme
+";
+        let fields = crate::dcf::parse_dcf_fields(desc);
+        let remotes = parse_forgejo_remotes(&fields);
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].0, "mypkg");
+        assert_eq!(remotes[0].1, "forgejo::codefloe.com/pat-s/mypkg");
+        assert_eq!(remotes[0].2.as_deref(), Some("v0.1.0"));
     }
 }
