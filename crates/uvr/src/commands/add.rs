@@ -292,36 +292,81 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
         };
         let git_ref_owned = d.rev.as_deref().unwrap_or("HEAD").to_string();
 
-        // Build the raw-DESCRIPTION URL appropriate for the registry.
-        let desc_url = if let Some(body) = git.strip_prefix("forgejo::") {
-            // body = "host/owner/repo"
+        // Build the raw-DESCRIPTION URL appropriate for the registry, and
+        // attach an appropriate token if one is in the environment.
+        let (desc_url, auth_header) = if let Some(body) = git.strip_prefix("forgejo::") {
             let parts: Vec<&str> = body.split('/').collect();
             if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
                 continue;
             }
-            format!(
+            let host = parts[0];
+            let url = format!(
                 "https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={r}",
-                host = parts[0],
                 owner = parts[1],
                 repo = parts[2],
                 r = git_ref_owned,
-            )
+            );
+            // Mirror crate::registry::forgejo::forgejo_token's lookup
+            // (normalize host: strip port, uppercase, .-/- → _) then check
+            // UVR_FORGEJO_TOKEN_<HOST> then UVR_FORGEJO_TOKEN. Inlined here
+            // because forgejo_token is pub(crate) inside uvr-core.
+            let host_no_port = host.split(':').next().unwrap_or(host);
+            let normalized: String = host_no_port
+                .to_ascii_uppercase()
+                .chars()
+                .map(|c| if c == '.' || c == '-' { '_' } else { c })
+                .collect();
+            let per_host = format!("UVR_FORGEJO_TOKEN_{normalized}");
+            let auth = {
+                let mut found: Option<String> = None;
+                for var in [per_host.as_str(), "UVR_FORGEJO_TOKEN"] {
+                    if let Ok(v) = std::env::var(var) {
+                        let t = v.trim().to_string();
+                        if !t.is_empty() {
+                            found = Some(format!("token {t}"));
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            (url, auth)
         } else {
             // github: `user/repo`
             let spec_str = format!("{git}@{git_ref_owned}");
             let Some((user, repo, resolved_ref)) = parse_github_spec(&spec_str) else {
                 continue;
             };
-            format!("https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION")
+            let url = format!(
+                "https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION"
+            );
+            // #95: attach a GitHub token when available so CI runners
+            // walking renv.lock imports don't hit the 60 req/hr shared
+            // unauthenticated rate limit.
+            let auth = {
+                let mut found: Option<String> = None;
+                for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
+                    if let Ok(v) = std::env::var(var) {
+                        let t = v.trim().to_string();
+                        if !t.is_empty() {
+                            found = Some(format!("Bearer {t}"));
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            (url, auth)
         };
 
-        match client
+        let mut req = client
             .get(&desc_url)
-            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
+            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
+        if let Some(auth) = auth_header {
+            req = req.header("Authorization", auth);
+        }
+
+        match req.send().await.and_then(|r| r.error_for_status()) {
             Ok(resp) => {
                 let text = resp.text().await.unwrap_or_default();
                 let fields = uvr_core::dcf::parse_dcf_fields(&text);
