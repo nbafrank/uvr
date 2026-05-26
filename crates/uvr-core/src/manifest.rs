@@ -439,7 +439,14 @@ fn parse_forgejo_entry(body: &str) -> Option<(String, DependencySpec)> {
     let (path_no_anchor, rev) = match path.split_once('@') {
         Some((p, r)) => {
             let r = r.split('#').next().unwrap_or(r).trim();
-            (p.trim(), if r.is_empty() { None } else { Some(r.to_string()) })
+            (
+                p.trim(),
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r.to_string())
+                },
+            )
         }
         None => (path.split('#').next().unwrap_or(path).trim(), None),
     };

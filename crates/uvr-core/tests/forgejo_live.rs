@@ -21,8 +21,8 @@ async fn resolve_public_forgejo_repo() {
     let info = resolve_forgejo_package(
         &client,
         "codeberg.org",
-        "Codeberg",       // owner — placeholder; replace with a real org/user hosting an R pkg
-        "Documentation",  // repo  — placeholder; replace likewise
+        "Codeberg", // owner — placeholder; replace with a real org/user hosting an R pkg
+        "Documentation", // repo  — placeholder; replace likewise
         "main",
     )
     .await
@@ -30,13 +30,9 @@ async fn resolve_public_forgejo_repo() {
 
     assert!(!info.name.is_empty(), "package name from DESCRIPTION");
     assert!(
-        info.url
-            .starts_with("https://codeberg.org/api/v1/repos/"),
+        info.url.starts_with("https://codeberg.org/api/v1/repos/"),
         "archive URL pinned to /api/v1/: {}",
         info.url
     );
-    assert!(
-        info.url.ends_with(".tar.gz"),
-        "archive URL ends in .tar.gz"
-    );
+    assert!(info.url.ends_with(".tar.gz"), "archive URL ends in .tar.gz");
 }

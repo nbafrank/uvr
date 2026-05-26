@@ -455,15 +455,11 @@ mod tests {
 
     #[test]
     fn parse_forgejo_spec_cli() {
-        let (name, spec) =
-            parse_add_spec("forgejo::codefloe.com/pat-s/mypkg@main", false).unwrap();
+        let (name, spec) = parse_add_spec("forgejo::codefloe.com/pat-s/mypkg@main", false).unwrap();
         assert_eq!(name, "mypkg");
         match spec {
             DependencySpec::Detailed(d) => {
-                assert_eq!(
-                    d.git.as_deref(),
-                    Some("forgejo::codefloe.com/pat-s/mypkg")
-                );
+                assert_eq!(d.git.as_deref(), Some("forgejo::codefloe.com/pat-s/mypkg"));
                 assert_eq!(d.rev.as_deref(), Some("main"));
             }
             other => panic!("expected Detailed, got {other:?}"),
@@ -472,8 +468,7 @@ mod tests {
 
     #[test]
     fn parse_forgejo_spec_cli_no_ref() {
-        let (name, spec) =
-            parse_add_spec("forgejo::codefloe.com/pat-s/mypkg", false).unwrap();
+        let (name, spec) = parse_add_spec("forgejo::codefloe.com/pat-s/mypkg", false).unwrap();
         assert_eq!(name, "mypkg");
         match spec {
             DependencySpec::Detailed(d) => {

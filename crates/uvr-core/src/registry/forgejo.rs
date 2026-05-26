@@ -115,9 +115,8 @@ pub async fn resolve_forgejo_package_with_remotes(
 ) -> Result<(PackageInfo, Vec<ForgejoRemote>)> {
     let commit_sha = fetch_commit_sha(client, host, owner, repo, git_ref).await?;
 
-    let desc_url = format!(
-        "https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}"
-    );
+    let desc_url =
+        format!("https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}");
     let mut desc_req = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
@@ -151,9 +150,7 @@ pub async fn resolve_forgejo_package_with_remotes(
     let requires = parse_description_deps(&desc_fields);
     let remotes = parse_forgejo_remotes(&desc_fields);
 
-    let url = format!(
-        "https://{host}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz"
-    );
+    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz");
 
     debug!("Forgejo {host}/{owner}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
 
@@ -294,8 +291,7 @@ mod tests {
 
     #[test]
     fn parse_spec_with_port() {
-        let (host, _, _, _) =
-            parse_forgejo_spec("forgejo::git.local:3000/u/r").unwrap();
+        let (host, _, _, _) = parse_forgejo_spec("forgejo::git.local:3000/u/r").unwrap();
         assert_eq!(host, "git.local:3000");
     }
 

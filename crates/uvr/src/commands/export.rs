@@ -347,9 +347,7 @@ mod tests {
                 host: "codefloe.com".into(),
             },
             checksum: Some("git:abc123".into()),
-            url: Some(
-                "https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz".into(),
-            ),
+            url: Some("https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz".into()),
             requires: vec![],
             raw_version: None,
             system_requirements: None,
