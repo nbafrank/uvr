@@ -234,16 +234,18 @@ fn map_forgejo_error(
 fn parse_forgejo_remotes(
     desc_fields: &std::collections::BTreeMap<String, String>,
 ) -> Vec<ForgejoRemote> {
+    // Return ALL git-bearing entries — both `git = "user/repo"` (github)
+    // and `git = "forgejo::host/owner/repo"` (forgejo). The lock-time BFS
+    // dispatches by prefix via `classify_git`, so a forgejo package whose
+    // DESCRIPTION declares `Remotes: github::user/repo` walks correctly
+    // into the github registry. Mirrors `github::parse_github_remotes`.
     let Some(remotes_field) = desc_fields.get("Remotes") else {
         return Vec::new();
     };
     crate::manifest::parse_remotes_field(remotes_field)
         .into_iter()
         .filter_map(|(name, spec)| match spec {
-            DependencySpec::Detailed(d) => match d.git {
-                Some(g) if g.starts_with("forgejo::") => Some((name, g, d.rev)),
-                _ => None,
-            },
+            DependencySpec::Detailed(d) => d.git.map(|repo| (name, repo, d.rev)),
             DependencySpec::Version(_) => None,
         })
         .collect()
@@ -350,9 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_forgejo_remotes_filters_non_forgejo() {
-        // DESCRIPTION mixing forgejo, github, and gitlab remotes — only
-        // forgejo:: entries should come out of the parser.
+    fn parse_forgejo_remotes_keeps_all_git_bearing_entries() {
+        // A forgejo package's DESCRIPTION may declare git-bearing Remotes
+        // pointing at either registry. We pass them all through; the
+        // lock-time BFS dispatches per-prefix via classify_git.
         let desc = "\
 Package: x
 Version: 0.1.0
@@ -362,9 +365,19 @@ Remotes: forgejo::codefloe.com/pat-s/mypkg@v0.1.0,
 ";
         let fields = crate::dcf::parse_dcf_fields(desc);
         let remotes = parse_forgejo_remotes(&fields);
-        assert_eq!(remotes.len(), 1);
-        assert_eq!(remotes[0].0, "mypkg");
-        assert_eq!(remotes[0].1, "forgejo::codefloe.com/pat-s/mypkg");
+        let pairs: Vec<(&str, &str)> = remotes
+            .iter()
+            .map(|(n, g, _)| (n.as_str(), g.as_str()))
+            .collect();
+        // gitlab:: is dropped by parse_remotes_field; forgejo and github survive.
+        assert_eq!(
+            pairs,
+            vec![
+                ("mypkg", "forgejo::codefloe.com/pat-s/mypkg"),
+                ("other", "user/other"),
+            ]
+        );
+        // The forgejo entry still carries its ref.
         assert_eq!(remotes[0].2.as_deref(), Some("v0.1.0"));
     }
 }
