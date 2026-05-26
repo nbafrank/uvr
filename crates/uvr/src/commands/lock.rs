@@ -8,6 +8,7 @@ use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
+use uvr_core::registry::forgejo::{parse_forgejo_spec, resolve_forgejo_package_with_remotes};
 use uvr_core::registry::github::{parse_github_spec, resolve_github_package_with_remotes};
 use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
@@ -107,7 +108,7 @@ async fn resolve_lockfile(
         None
     };
 
-    // Fetch all indices in parallel: CRAN + Bioc + custom repos + GitHub deps.
+    // Fetch all indices in parallel: CRAN + Bioc + custom repos + git deps.
     let cran_fut = CranRegistry::fetch(client, upgrade);
     let bioc_fut = async {
         match &bioc_release {
@@ -135,15 +136,14 @@ async fn resolve_lockfile(
         }
         Ok::<_, anyhow::Error>(regs)
     };
-    let github_fut = resolve_github_deps(client, &project.manifest);
+    let git_fut = resolve_git_deps(client, &project.manifest);
 
-    // Fetch all indices in parallel: CRAN + Bioc + custom repos + GitHub deps.
-    let (cran_result, bioc_result, github_result, custom_result) =
-        tokio::join!(cran_fut, bioc_fut, github_fut, custom_fut,);
+    let (cran_result, bioc_result, git_result, custom_result) =
+        tokio::join!(cran_fut, bioc_fut, git_fut, custom_fut,);
 
     let cran = cran_result.context("Failed to fetch CRAN index")?;
     let bioc_opt = bioc_result?;
-    let pre_resolved = github_result?;
+    let pre_resolved = git_result?;
     let custom_registries: Vec<CranRegistry> = custom_result?;
 
     // Build the registry chain: custom sources → Bioconductor → CRAN.
@@ -193,17 +193,35 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
     }
 }
 
-/// Collect all GitHub dependencies from the manifest, resolve them via the
-/// GitHub API, and recursively walk any `Remotes:` declared in their
-/// DESCRIPTIONs. Returns a map from package name → PackageInfo that the
-/// resolver can inject without going through the registry chain (#84).
+/// Which registry to query for a `git = "..."` manifest value.
+#[derive(Debug, PartialEq)]
+enum GitKind {
+    GitHub,
+    Forgejo,
+}
+
+fn classify_git(git: &str) -> GitKind {
+    if git.starts_with("forgejo::") {
+        GitKind::Forgejo
+    } else {
+        GitKind::GitHub
+    }
+}
+
+/// Collect all git package (github or forgejo) dependencies from the manifest,
+/// resolve them via the respective API, and recursively walk any `Remotes:`
+/// declared in their DESCRIPTIONs. Returns a map from package name →
+/// PackageInfo that the resolver can inject without going through the registry
+/// chain (#84).
 ///
-/// BFS: seed the queue from manifest direct + dev github deps, pop one,
-/// resolve via github API (which also returns its `Remotes:` chain), and
-/// push each unseen remote back onto the queue. Dedupe on `"user/repo@ref"`
-/// so a diamond doesn't cause two HTTP fetches.
+/// BFS: seed the queue from manifest direct + dev git deps, pop one,
+/// dispatch to github or forgejo resolver based on the `forgejo::` prefix
+/// (which also returns its `Remotes:` chain), and push each unseen remote
+/// back onto the queue. Dedupe on `"user/repo@ref"` (github) or
+/// `"forgejo::host/owner/repo@ref"` (forgejo) so a diamond doesn't cause
+/// two HTTP fetches.
 ///
-/// **Failure policy.** Manifest-direct specs hard-error on any github
+/// **Failure policy.** Manifest-direct specs hard-error on any git package
 /// failure — those are user-declared deps and silent skips would let
 /// `uvr lock` produce a lockfile that's missing what the user asked for.
 /// Transitive specs (discovered via another package's `Remotes:`) are
@@ -218,7 +236,7 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
 /// the user can see the discarded transitive pin. Any future
 /// parallelisation of this loop must preserve the manifest-first ordering
 /// or replace it with an explicit priority flag.
-async fn resolve_github_deps(
+async fn resolve_git_deps(
     client: &reqwest::Client,
     manifest: &uvr_core::manifest::Manifest,
 ) -> Result<HashMap<String, PackageInfo>> {
@@ -251,19 +269,39 @@ async fn resolve_github_deps(
         if !visited_specs.insert(spec.clone()) {
             continue;
         }
-        let Some((user, repo, git_ref)) = parse_github_spec(&spec) else {
-            continue;
-        };
         let is_direct = direct_specs.contains(&spec);
-        let resolved = resolve_github_package_with_remotes(client, &user, &repo, &git_ref).await;
+
+        // GithubRemote and ForgejoRemote are both aliases for
+        // `(String, String, Option<String>)`, so this match unifies into a
+        // single `Result<(PackageInfo, Vec<(String, String, Option<String>)>), UvrError>`.
+        // The middle string carries the canonical next-hop spec for each
+        // registry: `"user/repo"` for github, `"forgejo::host/owner/repo"`
+        // for forgejo, so the BFS classifier on the next pop works
+        // correctly with no further rewriting.
+        let resolved = match classify_git(&spec) {
+            GitKind::Forgejo => {
+                let body = spec.strip_prefix("forgejo::").unwrap_or(&spec);
+                let Some((host, owner, repo, git_ref)) = parse_forgejo_spec(body) else {
+                    continue;
+                };
+                resolve_forgejo_package_with_remotes(client, &host, &owner, &repo, &git_ref).await
+            }
+            GitKind::GitHub => {
+                let Some((user, repo, git_ref)) = parse_github_spec(&spec) else {
+                    continue;
+                };
+                resolve_github_package_with_remotes(client, &user, &repo, &git_ref).await
+            }
+        };
+
         let (info, remotes) = match resolved {
             Ok(pair) => pair,
             Err(e) if is_direct => {
-                return Err(e).with_context(|| format!("Failed to resolve GitHub package {spec}"));
+                return Err(e).with_context(|| format!("Failed to resolve git package {spec}"));
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to fetch GitHub Remote {spec} ({e}); falling back to registry resolution"
+                    "Failed to fetch git Remote {spec} ({e}); falling back to registry resolution"
                 );
                 continue;
             }
@@ -271,7 +309,7 @@ async fn resolve_github_deps(
 
         if let Some(existing) = pre_resolved.get(&info.name) {
             tracing::warn!(
-                "GitHub package {} already resolved from a different spec ({}); discarding {}",
+                "git package {} already resolved from a different spec ({}); discarding {}",
                 info.name,
                 existing.checksum.as_deref().unwrap_or("?"),
                 spec
@@ -281,6 +319,10 @@ async fn resolve_github_deps(
         }
 
         for (_dep_name, repo_path, rev) in remotes {
+            // `repo_path` is already in canonical form:
+            //   github  → "user/repo"
+            //   forgejo → "forgejo::host/owner/repo"
+            // so we don't need to re-prefix.
             let next_spec = match rev {
                 Some(r) => format!("{repo_path}@{r}"),
                 None => repo_path,
@@ -292,6 +334,21 @@ async fn resolve_github_deps(
     }
 
     Ok(pre_resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_git_distinguishes_prefixes() {
+        assert_eq!(classify_git("tidyverse/ggplot2"), GitKind::GitHub);
+        assert_eq!(classify_git("user/repo"), GitKind::GitHub);
+        assert_eq!(
+            classify_git("forgejo::codefloe.com/pat-s/mypkg"),
+            GitKind::Forgejo
+        );
+    }
 }
 
 // Re-export from util for backward compatibility within this module
