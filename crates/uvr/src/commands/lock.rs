@@ -15,6 +15,8 @@ use uvr_core::resolver::{PackageRegistry, Resolver};
 
 use crate::ui;
 
+use super::util::{build_client, make_spinner};
+
 pub async fn run(upgrade: bool) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     let start = ui::now();
@@ -350,6 +352,3 @@ mod tests {
         );
     }
 }
-
-// Re-export from util for backward compatibility within this module
-use super::util::{build_client, make_spinner};
