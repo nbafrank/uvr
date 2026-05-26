@@ -71,7 +71,7 @@ pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)
 /// `GIT_LOCAL`. Whitespace-only env values are treated as unset so a
 /// shell that exports `UVR_FORGEJO_TOKEN=` doesn't fail authenticated
 /// requests with a literal empty bearer.
-pub(crate) fn forgejo_token(host: &str) -> Option<String> {
+pub fn forgejo_token(host: &str) -> Option<String> {
     let host_no_port = host.split(':').next().unwrap_or(host);
     let normalized: String = host_no_port
         .to_ascii_uppercase()

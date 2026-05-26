@@ -306,30 +306,8 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
                 repo = parts[2],
                 r = git_ref_owned,
             );
-            // Mirror crate::registry::forgejo::forgejo_token's lookup
-            // (normalize host: strip port, uppercase, .-/- → _) then check
-            // UVR_FORGEJO_TOKEN_<HOST> then UVR_FORGEJO_TOKEN. Inlined here
-            // because forgejo_token is pub(crate) inside uvr-core.
-            let host_no_port = host.split(':').next().unwrap_or(host);
-            let normalized: String = host_no_port
-                .to_ascii_uppercase()
-                .chars()
-                .map(|c| if c == '.' || c == '-' { '_' } else { c })
-                .collect();
-            let per_host = format!("UVR_FORGEJO_TOKEN_{normalized}");
-            let auth = {
-                let mut found: Option<String> = None;
-                for var in [per_host.as_str(), "UVR_FORGEJO_TOKEN"] {
-                    if let Ok(v) = std::env::var(var) {
-                        let t = v.trim().to_string();
-                        if !t.is_empty() {
-                            found = Some(format!("token {t}"));
-                            break;
-                        }
-                    }
-                }
-                found
-            };
+            let auth = uvr_core::registry::forgejo::forgejo_token(host)
+                .map(|t| format!("token {t}"));
             (url, auth)
         } else {
             // github: `user/repo`
