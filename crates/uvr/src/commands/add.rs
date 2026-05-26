@@ -9,6 +9,38 @@ use crate::ui::palette;
 
 /// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
+    // Forgejo: explicit `forgejo::host/owner/repo[@ref]` prefix. Checked
+    // before the bare `user/repo` heuristic below so a forgejo spec
+    // doesn't get misclassified as a malformed GitHub spec.
+    if let Some(body) = raw.strip_prefix("forgejo::") {
+        let (path_part, git_ref) = if let Some(at) = body.rfind('@') {
+            (&body[..at], Some(body[at + 1..].to_string()))
+        } else {
+            (body, None)
+        };
+
+        let parts: Vec<&str> = path_part.split('/').collect();
+        if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+            anyhow::bail!(
+                "Invalid Forgejo spec '{raw}'. Expected: forgejo::host/owner/repo or forgejo::host/owner/repo@ref"
+            );
+        }
+        let name = parts[2].to_string();
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            anyhow::bail!("Invalid package name '{name}' extracted from Forgejo spec '{raw}'");
+        }
+
+        let spec = DependencySpec::Detailed(DetailedDep {
+            git: Some(format!("forgejo::{path_part}")),
+            rev: git_ref,
+            ..Default::default()
+        });
+        return Ok((name, spec));
+    }
+
     // GitHub: contains '/'
     if raw.contains('/') {
         let (repo, git_ref) = if let Some(at) = raw.rfind('@') {
@@ -369,5 +401,42 @@ mod tests {
     #[test]
     fn parse_empty_name() {
         assert!(parse_add_spec("", false).is_err());
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli() {
+        let (name, spec) =
+            parse_add_spec("forgejo::codefloe.com/pat-s/mypkg@main", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(
+                    d.git.as_deref(),
+                    Some("forgejo::codefloe.com/pat-s/mypkg")
+                );
+                assert_eq!(d.rev.as_deref(), Some("main"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli_no_ref() {
+        let (name, spec) =
+            parse_add_spec("forgejo::codefloe.com/pat-s/mypkg", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.rev, None);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli_rejects_bad_shape() {
+        assert!(parse_add_spec("forgejo::codefloe.com/onlyone", false).is_err());
+        assert!(parse_add_spec("forgejo::/pat-s/mypkg", false).is_err());
+        assert!(parse_add_spec("forgejo::codefloe.com//mypkg", false).is_err());
     }
 }
