@@ -111,6 +111,7 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             remote_url: forgejo_info
                 .as_ref()
                 .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}")),
+            remote_type: forgejo_info.as_ref().map(|_| "git2r".to_string()),
         };
         packages.insert(pkg.name.clone(), entry);
     }
@@ -223,6 +224,8 @@ struct RenvPackage {
     remote_ref: Option<String>,
     #[serde(rename = "RemoteUrl", skip_serializing_if = "Option::is_none")]
     remote_url: Option<String>,
+    #[serde(rename = "RemoteType", skip_serializing_if = "Option::is_none")]
+    remote_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -356,6 +359,46 @@ mod tests {
         let (source, repository) = export_source_and_repository(&pkg.source);
         assert_eq!(source, "Git");
         assert_eq!(repository, None);
+    }
+
+    #[test]
+    fn export_renv_forgejo_package_emits_remote_url_and_type() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "mypkg".to_string(),
+                version: "0.1.0".to_string(),
+                raw_version: None,
+                source: PackageSource::Forgejo {
+                    host: "codefloe.com".to_string(),
+                },
+                checksum: Some("git:abc123".to_string()),
+                requires: vec![],
+                url: Some(
+                    "https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz"
+                        .to_string(),
+                ),
+                system_requirements: None,
+                dev: false,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["Packages"]["mypkg"]["Source"], "Git");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteType"], "git2r");
+        assert_eq!(
+            parsed["Packages"]["mypkg"]["RemoteUrl"],
+            "https://codefloe.com/pat-s/mypkg"
+        );
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "pat-s");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "abc123");
     }
 
     #[test]
