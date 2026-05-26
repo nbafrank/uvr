@@ -1396,7 +1396,15 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
                 pkg.name, ver
             )
         }
-        PackageSource::GitHub | PackageSource::Local => String::new(),
+        // Forgejo, GitHub, and Local always have `url` populated by the
+        // resolver (or are file:// paths handled elsewhere); the
+        // `if let Some(url) ...` guard at the top of this function takes
+        // the URL straight from `pkg.url`. If we reach this arm with no
+        // URL, something earlier mis-resolved; return empty and let the
+        // sync surface a clear download error.
+        PackageSource::Forgejo { .. }
+        | PackageSource::GitHub
+        | PackageSource::Local => String::new(),
         PackageSource::Custom { .. } => {
             // Custom repo packages should always have a stored URL from resolution.
             // Fall back to empty if somehow missing.
