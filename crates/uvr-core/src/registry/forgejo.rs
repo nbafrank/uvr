@@ -178,7 +178,14 @@ async fn fetch_commit_sha(
     repo: &str,
     git_ref: &str,
 ) -> Result<String> {
-    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/commits/{git_ref}");
+    // Forgejo's `/commits/{ref}` endpoint 404s (it exists in Gitea's API
+    // surface but Forgejo's HTTP routing rejects it). The list-commits
+    // endpoint with `?sha=<ref>&limit=1` is the supported way to resolve
+    // a ref to a SHA — it accepts branches, tags, and SHAs and returns a
+    // JSON array of commit objects.
+    let url = format!(
+        "https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={git_ref}&limit=1"
+    );
     let mut req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
@@ -192,21 +199,22 @@ async fn fetch_commit_sha(
         return Err(map_forgejo_error(resp.status(), host, owner, repo, git_ref));
     }
 
-    // Forgejo returns either a JSON commit object (`{ "sha": "...", ... }`)
-    // or — when `?stat=false&verification=false` etc. — an array; the
-    // `commits/{ref}` endpoint always returns a single object.
     #[derive(serde::Deserialize)]
     struct CommitObj {
         sha: String,
     }
     let body = resp.text().await?;
-    let commit: CommitObj = serde_json::from_str(&body).map_err(|e| {
+    let commits: Vec<CommitObj> = serde_json::from_str(&body).map_err(|e| {
         UvrError::Other(format!(
-            "Forgejo {host}/{owner}/{repo}@{git_ref}: could not parse commit JSON ({e}). Body: {}",
+            "Forgejo {host}/{owner}/{repo}@{git_ref}: could not parse commit list JSON ({e}). Body: {}",
             body.chars().take(200).collect::<String>()
         ))
     })?;
-    Ok(commit.sha)
+    commits.into_iter().next().map(|c| c.sha).ok_or_else(|| {
+        UvrError::Other(format!(
+            "Forgejo {host}/{owner}/{repo}@{git_ref}: commit list was empty. The ref may not exist."
+        ))
+    })
 }
 
 fn map_forgejo_error(
