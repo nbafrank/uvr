@@ -757,9 +757,28 @@ pub async fn install_from_lockfile(
     let mut runtime_source = 0usize;
 
     if !plans.is_empty() {
+        // Forgejo tarballs (the lockfile `url` field for forgejo sources)
+        // require the registry-scoped token to download from private repos.
+        // The lock phase already attaches it to API calls; sync needs to
+        // attach it to the archive download too. github tarballs go through
+        // api.github.com which works unauthenticated for public repos and
+        // GitHub doesn't accept the same env-var convention here — no auth
+        // forwarding needed.
+        let auth_headers: Vec<Option<String>> = plans
+            .iter()
+            .map(|p| match &p.pkg.source {
+                uvr_core::lockfile::PackageSource::Forgejo { host } => {
+                    uvr_core::registry::forgejo::forgejo_token(host)
+                        .map(|t| format!("token {t}"))
+                }
+                _ => None,
+            })
+            .collect();
+
         let specs: Vec<DownloadSpec> = plans
             .iter()
-            .map(|p| DownloadSpec {
+            .zip(auth_headers.iter())
+            .map(|(p, auth)| DownloadSpec {
                 pkg: p.pkg,
                 url: &p.url,
                 fallback_url: p.fallback_url.as_deref(),
@@ -775,6 +794,7 @@ pub async fn install_from_lockfile(
                 } else {
                     None
                 },
+                auth_header: auth.as_deref(),
             })
             .collect();
 
