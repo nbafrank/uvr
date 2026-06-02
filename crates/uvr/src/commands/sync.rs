@@ -768,8 +768,7 @@ pub async fn install_from_lockfile(
             .iter()
             .map(|p| match &p.pkg.source {
                 uvr_core::lockfile::PackageSource::Forgejo { host } => {
-                    uvr_core::registry::forgejo::forgejo_token(host)
-                        .map(|t| format!("token {t}"))
+                    uvr_core::registry::forgejo::forgejo_token(host).map(|t| format!("token {t}"))
                 }
                 _ => None,
             })

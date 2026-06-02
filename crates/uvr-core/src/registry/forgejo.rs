@@ -183,9 +183,7 @@ async fn fetch_commit_sha(
     // endpoint with `?sha=<ref>&limit=1` is the supported way to resolve
     // a ref to a SHA — it accepts branches, tags, and SHAs and returns a
     // JSON array of commit objects.
-    let url = format!(
-        "https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={git_ref}&limit=1"
-    );
+    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={git_ref}&limit=1");
     let mut req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
