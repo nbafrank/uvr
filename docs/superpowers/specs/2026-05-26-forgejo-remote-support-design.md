@@ -81,13 +81,13 @@ All three calls hit `/api/v1/` on the user-supplied host. No Gitea-only routes. 
 
 | Step | Endpoint | Output |
 |------|----------|--------|
-| Resolve ref → SHA | `GET https://<host>/api/v1/repos/{owner}/{repo}/commits/{ref}` | JSON; read `.sha` |
+| Resolve ref → SHA | `GET https://<host>/api/v1/repos/{owner}/{repo}/commits?sha={ref}&limit=1` | JSON array; first element's `.sha` |
 | Fetch DESCRIPTION | `GET https://<host>/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={sha}` | Raw file |
 | Tarball (stored in lockfile, downloaded at sync) | `https://<host>/api/v1/repos/{owner}/{repo}/archive/{sha}.tar.gz` | gzip tarball |
 
 Differences from `github.rs`:
 
-- GitHub uses an Accept header (`application/vnd.github.sha`) to get back the SHA as a bare string. Forgejo has no equivalent — we fetch JSON and extract `.sha`. One small `serde_json` deserialization per dep.
+- GitHub's `/repos/{o}/{r}/commits/{ref}` returns a single commit object; Forgejo's `/commits/{ref}` endpoint 404s (the Gitea-compatible route is not exposed by Forgejo's HTTP router), so we use the list-commits endpoint with `?sha=<ref>&limit=1` and read the first element. Accepts branches, tags, and SHAs the same way GitHub's does. One small `serde_json` deserialization per dep.
 - All three endpoints share the same `/api/v1/` base. GitHub mixes `api.github.com` (commits, tarball) and `raw.githubusercontent.com` (DESCRIPTION).
 
 ## Code organization
@@ -141,7 +141,7 @@ The BFS in `resolve_git_deps` (formerly `resolve_github_deps`) handles cross-reg
 
 `forgejo_token(host)` lookup order:
 
-1. Normalize host: lowercase, replace `.` and `-` with `_`, strip port. `codefloe.com` → `CODEFLOE_COM`.
+1. Normalize host: strip port, uppercase, replace `.` and `-` with `_`. `codefloe.com` → `CODEFLOE_COM`; `git.local:3000` → `GIT_LOCAL`.
 2. `UVR_FORGEJO_TOKEN_<NORMALIZED>` (per-host).
 3. `UVR_FORGEJO_TOKEN` (single token; useful when the user only talks to one instance).
 4. None → unauthenticated.
