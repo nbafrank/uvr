@@ -127,7 +127,7 @@ Shape mirrors `github.rs`. Parses DESCRIPTION fields via the existing `crate::dc
 | `crates/uvr/src/commands/add.rs::resolve_github_pkg_names` | Generalize to dispatch by prefix; rename `resolve_git_pkg_names`. |
 | `crates/uvr/src/commands/lock.rs::resolve_github_deps` | Rename `resolve_git_deps`. Dispatch by prefix in the BFS loop. |
 | `crates/uvr/src/commands/sync.rs::source_url` | Add `PackageSource::Forgejo { .. }` to the `""` arm (URL is always populated by the resolver). |
-| `crates/uvr/src/commands/export.rs` | Map `Forgejo` to renv's `RemoteType: gitea` (closest existing remote type renv ships with). Document the choice inline. |
+| `crates/uvr/src/commands/export.rs` | Map `Forgejo` to renv's `Source: Git` + `RemoteType: git2r` + `RemoteUrl: https://<host>/<owner>/<repo>` + `RemoteUsername/Repo/Ref` for round-trip-into-renv. (renv has no Forgejo-aware source type; `git2r` is the closest renv-understood `RemoteType` for a generic clone-from-URL flow.) |
 
 ### Cross-host `Remotes:` traversal
 
