@@ -50,6 +50,7 @@ impl Downloader {
                 let fallback_url = spec.fallback_url.map(str::to_string);
                 let is_binary = spec.is_binary;
                 let user_agent = spec.user_agent.map(str::to_string);
+                let auth_header = spec.auth_header.map(str::to_string);
                 // Binary packages: lockfile checksum is for the source tarball, not the
                 // P3M binary. Skip verification on binary downloads, but keep the
                 // checksum for the fallback path which downloads the source tarball.
@@ -73,6 +74,7 @@ impl Downloader {
                         &url,
                         primary_checksum.as_deref(),
                         user_agent.as_deref(),
+                        auth_header.as_deref(),
                         &mp,
                     )
                     .await;
@@ -104,6 +106,7 @@ impl Downloader {
                                 fallback,
                                 source_checksum.as_deref(),
                                 None, // fallback URL is plain CRAN source — no UA override needed
+                                None, // fallback is a different host; never forward primary auth
                                 &mp,
                             )
                             .await?;
@@ -138,6 +141,11 @@ pub struct DownloadSpec<'a> {
     /// served at the same URL, and the default `uvr/x.y.z` UA gets you
     /// source. None = use the client's default UA.
     pub user_agent: Option<&'a str>,
+    /// Optional `Authorization` header value (e.g. `"token <forgejo>"` or
+    /// `"Bearer <github>"`). Forwarded to the primary URL only. Fallback
+    /// URLs (CRAN Archive, P3M → source) deliberately drop the header —
+    /// the token is registry-scoped and shouldn't leak to other hosts.
+    pub auth_header: Option<&'a str>,
 }
 
 /// Result of downloading a single package.
@@ -176,6 +184,7 @@ async fn download_one(
     url: &str,
     expected_checksum: Option<&str>,
     user_agent: Option<&str>,
+    auth_header: Option<&str>,
     mp: &MultiProgress,
 ) -> Result<PathBuf> {
     // Derive the cache filename from the URL so that source tarballs (.tar.gz)
@@ -245,6 +254,9 @@ async fn download_one(
         let mut req = client.get(target);
         if let Some(ua) = user_agent {
             req = req.header(reqwest::header::USER_AGENT, ua);
+        }
+        if let Some(auth) = auth_header {
+            req = req.header(reqwest::header::AUTHORIZATION, auth);
         }
         req
     };

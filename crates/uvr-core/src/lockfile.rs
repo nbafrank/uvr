@@ -64,6 +64,12 @@ pub enum PackageSource {
     Cran,
     Bioconductor,
     GitHub,
+    /// A Forgejo-hosted package. `host` is the bare hostname (optionally
+    /// `host:port`), e.g. `"codefloe.com"`. Serializes as
+    /// `"forgejo:<host>"` in the lockfile.
+    Forgejo {
+        host: String,
+    },
     Local,
     /// A custom CRAN-like repository (r-multiverse, r-universe, PPM, etc.)
     Custom {
@@ -90,7 +96,20 @@ impl<'de> Deserialize<'de> for PackageSource {
             "bioconductor" => PackageSource::Bioconductor,
             "github" => PackageSource::GitHub,
             "local" => PackageSource::Local,
-            _ => PackageSource::Custom { name: s },
+            _ => {
+                // `forgejo:<host>` with a non-empty host → Forgejo variant.
+                // Anything else (including a bare `forgejo:`) falls through
+                // to Custom so a future typo doesn't silently become a
+                // valid Forgejo source with an empty host.
+                if let Some(host) = s.strip_prefix("forgejo:") {
+                    if !host.is_empty() {
+                        return Ok(PackageSource::Forgejo {
+                            host: host.to_string(),
+                        });
+                    }
+                }
+                PackageSource::Custom { name: s }
+            }
         })
     }
 }
@@ -101,6 +120,7 @@ impl std::fmt::Display for PackageSource {
             PackageSource::Cran => write!(f, "cran"),
             PackageSource::Bioconductor => write!(f, "bioconductor"),
             PackageSource::GitHub => write!(f, "github"),
+            PackageSource::Forgejo { host } => write!(f, "forgejo:{host}"),
             PackageSource::Local => write!(f, "local"),
             PackageSource::Custom { name } => write!(f, "{name}"),
         }
@@ -231,6 +251,76 @@ source = "cran"
 "#;
         let lf: Lockfile = old.parse().unwrap();
         assert!(lf.get_package("ggplot2").unwrap().url.is_none());
+    }
+
+    #[test]
+    fn round_trip_forgejo_source() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "forgejo:codefloe.com"
+url = "https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz"
+"#;
+        let lf: Lockfile = input.parse().expect("parse forgejo source");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Forgejo {
+                host: "codefloe.com".to_string()
+            }
+        );
+
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "forgejo:codefloe.com""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn forgejo_source_empty_host_falls_to_custom() {
+        // Defensive: a malformed `"forgejo:"` (empty host) deserializes
+        // to Custom, not to Forgejo with an empty host string.
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "x"
+version = "0.1.0"
+source = "forgejo:"
+"#;
+        let lf: Lockfile = input.parse().expect("parse");
+        assert!(matches!(
+            lf.packages[0].source,
+            PackageSource::Custom { ref name } if name == "forgejo:"
+        ));
+    }
+
+    #[test]
+    fn round_trip_forgejo_source_with_port() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "forgejo:git.local:3000"
+"#;
+        let lf: Lockfile = input.parse().expect("parse forgejo source with port");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Forgejo {
+                host: "git.local:3000".to_string()
+            }
+        );
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "forgejo:git.local:3000""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
     }
 
     #[test]

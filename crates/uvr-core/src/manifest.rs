@@ -297,20 +297,20 @@ fn resolve_remote_pkg_name(
 
 /// Parse an R `Remotes:` field into `(package_name, DependencySpec)` pairs.
 ///
-/// Supports devtools/remotes-style GitHub entries:
+/// Supports devtools/remotes-style GitHub entries plus uvr's `forgejo::`:
 /// - `user/repo` → `git = "user/repo"`
 /// - `user/repo@ref` → `git = "user/repo", rev = "ref"`
 /// - `github::user/repo[@ref]` → same (explicit prefix)
 /// - `pkgname=user/repo[@ref]` → explicit package name binding
+/// - `forgejo::host/owner/repo[@ref]` → `git = "forgejo::host/owner/repo", rev = "ref"`
 ///
-/// Entries with unsupported prefixes (`gitlab::`, `bitbucket::`, `git::`,
+/// Entries with other prefixes (`gitlab::`, `bitbucket::`, `git::`,
 /// `url::`, `local::`, `bioc::`) are skipped for now — the caller keeps
 /// whatever version-based spec it already had from `Imports:`.
 ///
 /// Visible to the github registry so it can walk transitive `Remotes:`
-/// chains during `uvr lock` (#84) — when a github-sourced package's
-/// DESCRIPTION declares another github dep via `Remotes:`, we follow
-/// the chain instead of falling back to CRAN and erroring.
+/// chains during `uvr lock` (#84) — and to the forgejo registry for the
+/// same reason.
 pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
     let mut result = Vec::new();
     for entry in field.split(',') {
@@ -319,7 +319,20 @@ pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> 
             continue;
         }
 
-        // Skip non-GitHub remote types we don't translate yet.
+        // Two registries are translated today: github (the bare/`github::`
+        // form, returning `git = "owner/repo"`) and forgejo (the
+        // `forgejo::host/owner/repo` form, returning the same prefix
+        // verbatim in `git` so the lock-time BFS can dispatch on it).
+        // Other prefixes (`gitlab::`, `bitbucket::`, `git::`, `url::`,
+        // `local::`, `bioc::`) are skipped — the caller keeps whatever
+        // version-based spec it already had from `Imports:`.
+        let forgejo_body = entry.strip_prefix("forgejo::");
+        if let Some(body) = forgejo_body {
+            if let Some(parsed) = parse_forgejo_entry(body) {
+                result.push(parsed);
+            }
+            continue;
+        }
         if let Some((prefix, _)) = entry.split_once("::") {
             if prefix != "github" {
                 continue;
@@ -405,6 +418,55 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     tmp.persist(path)
         .map_err(|e| crate::error::UvrError::Io(e.error))?;
     Ok(())
+}
+
+/// Parse the `host/owner/repo[@ref]` body of a `forgejo::`-prefixed
+/// `Remotes:` entry into `(pkg_name, DependencySpec)`. The package name
+/// defaults to the repo segment. Returns `None` if the body is malformed.
+///
+/// The `git` field stores the *full* `"forgejo::host/owner/repo"` string
+/// (prefix included) so downstream code that walks `Remotes:` chains can
+/// tell forgejo and github specs apart by string prefix.
+fn parse_forgejo_entry(body: &str) -> Option<(String, DependencySpec)> {
+    // Optional `pkgname=` override.
+    let (explicit_name, path) = match body.split_once('=') {
+        Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
+            (Some(n.trim().to_string()), p.trim())
+        }
+        _ => (None, body),
+    };
+
+    let (path_no_anchor, rev) = match path.split_once('@') {
+        Some((p, r)) => {
+            let r = r.split('#').next().unwrap_or(r).trim();
+            (
+                p.trim(),
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r.to_string())
+                },
+            )
+        }
+        None => (path.split('#').next().unwrap_or(path).trim(), None),
+    };
+
+    let parts: Vec<&str> = path_no_anchor.split('/').collect();
+    if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    let repo = parts[2];
+    let pkg_name = explicit_name.unwrap_or_else(|| repo.to_string());
+    if pkg_name.is_empty() {
+        return None;
+    }
+
+    let spec = DependencySpec::Detailed(DetailedDep {
+        git: Some(format!("forgejo::{path_no_anchor}")),
+        rev,
+        ..Default::default()
+    });
+    Some((pkg_name, spec))
 }
 
 #[cfg(test)]
@@ -692,5 +754,23 @@ bioc = true
         ));
         assert!(m.remove_dep("ggplot2"));
         assert!(!m.remove_dep("ggplot2"));
+    }
+
+    #[test]
+    fn parse_remotes_field_keeps_forgejo() {
+        let field = "forgejo::codefloe.com/pat-s/mypkg@v0.1.0, github::user/a, gitlab::other/x";
+        let v = parse_remotes_field(field);
+        let names: Vec<&str> = v.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["mypkg", "a"]);
+
+        // The forgejo entry stores the full `forgejo::host/owner/repo` in
+        // the `git` field, with the ref split into `rev`.
+        match &v[0].1 {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.git.as_deref(), Some("forgejo::codefloe.com/pat-s/mypkg"));
+                assert_eq!(d.rev.as_deref(), Some("v0.1.0"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
     }
 }

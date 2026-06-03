@@ -1,5 +1,6 @@
 pub mod bioconductor;
 pub mod cran;
+pub mod forgejo;
 pub mod github;
 pub mod p3m;
 

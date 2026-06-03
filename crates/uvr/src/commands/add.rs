@@ -9,6 +9,38 @@ use crate::ui::palette;
 
 /// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
+    // Forgejo: explicit `forgejo::host/owner/repo[@ref]` prefix. Checked
+    // before the bare `user/repo` heuristic below so a forgejo spec
+    // doesn't get misclassified as a malformed GitHub spec.
+    if let Some(body) = raw.strip_prefix("forgejo::") {
+        let (path_part, git_ref) = if let Some(at) = body.rfind('@') {
+            (&body[..at], Some(body[at + 1..].to_string()))
+        } else {
+            (body, None)
+        };
+
+        let parts: Vec<&str> = path_part.split('/').collect();
+        if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+            anyhow::bail!(
+                "Invalid Forgejo spec '{raw}'. Expected: forgejo::host/owner/repo or forgejo::host/owner/repo@ref"
+            );
+        }
+        let name = parts[2].to_string();
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            anyhow::bail!("Invalid package name '{name}' extracted from Forgejo spec '{raw}'");
+        }
+
+        let spec = DependencySpec::Detailed(DetailedDep {
+            git: Some(format!("forgejo::{path_part}")),
+            rev: git_ref,
+            ..Default::default()
+        });
+        return Ok((name, spec));
+    }
+
     // GitHub: contains '/'
     if raw.contains('/') {
         let (repo, git_ref) = if let Some(at) = raw.rfind('@') {
@@ -139,7 +171,7 @@ pub async fn run(
     // `--no-lock`, the manifest entry uses the URL-derived basename and
     // the user can edit it later if it diverges from the actual Package.
     if !no_lock {
-        resolve_github_pkg_names(&mut parsed).await;
+        resolve_git_pkg_names(&mut parsed).await;
     }
 
     // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
@@ -216,15 +248,15 @@ pub async fn run(
     Ok(())
 }
 
-/// For each GitHub-sourced dep in `parsed`, fetch the remote DESCRIPTION
-/// and replace the URL-derived name with the actual `Package:` field
-/// (uvr-r #8). Mutates in place. Best-effort — every failure path
+/// For each git-sourced dep (github or forgejo) in `parsed`, fetch the remote
+/// DESCRIPTION and replace the URL-derived name with the actual `Package:`
+/// field (uvr-r #8). Mutates in place. Best-effort — every failure path
 /// (transport error, missing DESCRIPTION, malformed file) is logged
-/// internally and the URL-derived name is kept. If *every* GitHub spec
+/// internally and the URL-derived name is kept. If *every* git spec
 /// in the batch fails, surface a single user-facing warn so an offline
 /// user knows manifest names may need a manual touch-up. Returns no
 /// error: callers don't need to handle one.
-async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
+async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
     use uvr_core::registry::github::parse_github_spec;
 
     let needs_resolve: Vec<usize> = parsed
@@ -258,32 +290,60 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
         let Some(git) = d.git.as_deref() else {
             continue;
         };
-        let git_ref = d.rev.as_deref().unwrap_or("HEAD").to_string();
-        let spec_str = format!("{git}@{git_ref}");
-        let Some((user, repo, resolved_ref)) = parse_github_spec(&spec_str) else {
-            continue;
-        };
-        // Cheap path: hit raw.githubusercontent.com directly for the
-        // DESCRIPTION at the requested ref. Avoids the commit-resolution
-        // round-trip that the full resolver does — we only need the
-        // Package: field.
-        let url =
-            format!("https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION");
-        let mut req = client
-            .get(&url)
-            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
-        // #95: attach a GitHub token when available so CI runners
-        // walking renv.lock imports don't hit the 60 req/hr shared
-        // unauthenticated rate limit.
-        for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
-            if let Ok(tok) = std::env::var(var) {
-                let t = tok.trim();
-                if !t.is_empty() {
-                    req = req.bearer_auth(t);
-                    break;
-                }
+        let git_ref_owned = d.rev.as_deref().unwrap_or("HEAD").to_string();
+
+        // Build the raw-DESCRIPTION URL appropriate for the registry, and
+        // attach an appropriate token if one is in the environment.
+        let (desc_url, auth_header) = if let Some(body) = git.strip_prefix("forgejo::") {
+            let parts: Vec<&str> = body.split('/').collect();
+            if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+                continue;
             }
+            let host = parts[0];
+            let url = format!(
+                "https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={r}",
+                owner = parts[1],
+                repo = parts[2],
+                r = git_ref_owned,
+            );
+            let auth =
+                uvr_core::registry::forgejo::forgejo_token(host).map(|t| format!("token {t}"));
+            (url, auth)
+        } else {
+            // github: `user/repo`
+            let spec_str = format!("{git}@{git_ref_owned}");
+            let Some((user, repo, resolved_ref)) = parse_github_spec(&spec_str) else {
+                continue;
+            };
+            let url = format!(
+                "https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION"
+            );
+            // #95: attach a GitHub token when available so CI runners
+            // walking renv.lock imports don't hit the 60 req/hr shared
+            // unauthenticated rate limit.
+            let auth = {
+                let mut found: Option<String> = None;
+                for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
+                    if let Ok(v) = std::env::var(var) {
+                        let t = v.trim().to_string();
+                        if !t.is_empty() {
+                            found = Some(format!("Bearer {t}"));
+                            break;
+                        }
+                    }
+                }
+                found
+            };
+            (url, auth)
+        };
+
+        let mut req = client
+            .get(&desc_url)
+            .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
+        if let Some(auth) = auth_header {
+            req = req.header("Authorization", auth);
         }
+
         match req.send().await.and_then(|r| r.error_for_status()) {
             Ok(resp) => {
                 let text = resp.text().await.unwrap_or_default();
@@ -302,7 +362,7 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             }
             Err(e) => {
                 tracing::warn!(
-                    "DESCRIPTION fetch failed for {git}@{resolved_ref}: {e}; using {provisional_name} as the package name"
+                    "DESCRIPTION fetch failed for {git}@{git_ref_owned}: {e}; using {provisional_name} as the package name"
                 );
                 fetch_failures += 1;
             }
@@ -313,7 +373,7 @@ async fn resolve_github_pkg_names(parsed: &mut [(String, DependencySpec)]) {
     // logged via tracing::warn — surface to user only when 100% failed.
     if fetch_failures == total {
         ui::warn(
-            "Could not reach GitHub to look up DESCRIPTION fields; package names default to repo basenames. Edit uvr.toml if a name differs.",
+            "Could not reach git host to look up DESCRIPTION fields; package names default to repo basenames. Edit uvr.toml if a name differs.",
         );
     }
 }
@@ -369,5 +429,37 @@ mod tests {
     #[test]
     fn parse_empty_name() {
         assert!(parse_add_spec("", false).is_err());
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli() {
+        let (name, spec) = parse_add_spec("forgejo::codefloe.com/pat-s/mypkg@main", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.git.as_deref(), Some("forgejo::codefloe.com/pat-s/mypkg"));
+                assert_eq!(d.rev.as_deref(), Some("main"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli_no_ref() {
+        let (name, spec) = parse_add_spec("forgejo::codefloe.com/pat-s/mypkg", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.rev, None);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_forgejo_spec_cli_rejects_bad_shape() {
+        assert!(parse_add_spec("forgejo::codefloe.com/onlyone", false).is_err());
+        assert!(parse_add_spec("forgejo::/pat-s/mypkg", false).is_err());
+        assert!(parse_add_spec("forgejo::codefloe.com//mypkg", false).is_err());
     }
 }

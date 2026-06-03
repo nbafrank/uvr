@@ -66,13 +66,7 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
 
     let mut packages = HashMap::new();
     for pkg in &lockfile.packages {
-        let (source, repository) = match &pkg.source {
-            PackageSource::Cran => ("Repository".to_string(), Some("CRAN".to_string())),
-            PackageSource::Bioconductor => ("Bioconductor".to_string(), None),
-            PackageSource::GitHub => ("GitHub".to_string(), None),
-            PackageSource::Local => ("Local".to_string(), None),
-            PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
-        };
+        let (source, repository) = export_source_and_repository(&pkg.source);
 
         let version = pkg
             .raw_version
@@ -86,10 +80,14 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             Some(pkg.requires.clone())
         };
 
-        let remote_info = if pkg.source == PackageSource::GitHub {
-            pkg.url.as_ref().and_then(|u| parse_github_remote(u))
-        } else {
-            None
+        let remote_info = match &pkg.source {
+            PackageSource::GitHub => pkg.url.as_ref().and_then(|u| parse_github_remote(u)),
+            _ => None,
+        };
+
+        let forgejo_info = match &pkg.source {
+            PackageSource::Forgejo { .. } => pkg.url.as_ref().and_then(|u| parse_forgejo_remote(u)),
+            _ => None,
         };
 
         let entry = RenvPackage {
@@ -98,9 +96,22 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             source,
             repository,
             requirements,
-            remote_username: remote_info.as_ref().map(|(user, _, _)| user.clone()),
-            remote_repo: remote_info.as_ref().map(|(_, repo, _)| repo.clone()),
-            remote_ref: remote_info.as_ref().and_then(|(_, _, r)| r.clone()),
+            remote_username: remote_info
+                .as_ref()
+                .map(|(user, _, _)| user.clone())
+                .or_else(|| forgejo_info.as_ref().map(|(_, owner, _, _)| owner.clone())),
+            remote_repo: remote_info
+                .as_ref()
+                .map(|(_, repo, _)| repo.clone())
+                .or_else(|| forgejo_info.as_ref().map(|(_, _, repo, _)| repo.clone())),
+            remote_ref: remote_info
+                .as_ref()
+                .and_then(|(_, _, r)| r.clone())
+                .or_else(|| forgejo_info.as_ref().map(|(_, _, _, sha)| sha.clone())),
+            remote_url: forgejo_info
+                .as_ref()
+                .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}")),
+            remote_type: forgejo_info.as_ref().map(|_| "git2r".to_string()),
         };
         packages.insert(pkg.name.clone(), entry);
     }
@@ -111,6 +122,23 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
     };
 
     serde_json::to_string_pretty(&renv_lock).context("Failed to serialize renv.lock")
+}
+
+/// Map a `PackageSource` to renv's (Source, Repository) string pair for
+/// the renv.lock export. Extracted from the inline match in
+/// `export_renv` so we can unit-test the Forgejo mapping without
+/// constructing a full `Lockfile`. Forgejo maps to renv's `Source: Git`
+/// (the git2r-backed remote) — renv has no Forgejo-aware type, so a
+/// generic Git mapping with `RemoteUrl` set is the most importable shape.
+fn export_source_and_repository(src: &PackageSource) -> (String, Option<String>) {
+    match src {
+        PackageSource::Cran => ("Repository".to_string(), Some("CRAN".to_string())),
+        PackageSource::Bioconductor => ("Bioconductor".to_string(), None),
+        PackageSource::GitHub => ("GitHub".to_string(), None),
+        PackageSource::Forgejo { .. } => ("Git".to_string(), None),
+        PackageSource::Local => ("Local".to_string(), None),
+        PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
+    }
 }
 
 fn parse_github_remote(url: &str) -> Option<(String, String, Option<String>)> {
@@ -127,6 +155,29 @@ fn parse_github_remote(url: &str) -> Option<(String, String, Option<String>)> {
         }
     }
     None
+}
+
+/// Parse a Forgejo archive URL into (host, owner, repo, sha). Returns
+/// `None` if the URL doesn't match the expected
+/// `/api/v1/repos/{owner}/{repo}/archive/{sha}.tar.gz` shape.
+fn parse_forgejo_remote(url: &str) -> Option<(String, String, String, String)> {
+    let parts: Vec<&str> = url.split('/').collect();
+    let api_idx = parts.iter().position(|s| *s == "api")?;
+    if parts.get(api_idx + 1).copied()? != "v1" {
+        return None;
+    }
+    if parts.get(api_idx + 2).copied()? != "repos" {
+        return None;
+    }
+    let owner = parts.get(api_idx + 3)?.to_string();
+    let repo = parts.get(api_idx + 4)?.to_string();
+    if parts.get(api_idx + 5).copied()? != "archive" {
+        return None;
+    }
+    let last = parts.get(api_idx + 6)?.to_string();
+    let sha = last.strip_suffix(".tar.gz").unwrap_or(&last).to_string();
+    let host = parts.get(2).copied()?.to_string();
+    Some((host, owner, repo, sha))
 }
 
 #[derive(Serialize)]
@@ -171,6 +222,10 @@ struct RenvPackage {
     remote_repo: Option<String>,
     #[serde(rename = "RemoteRef", skip_serializing_if = "Option::is_none")]
     remote_ref: Option<String>,
+    #[serde(rename = "RemoteUrl", skip_serializing_if = "Option::is_none")]
+    remote_url: Option<String>,
+    #[serde(rename = "RemoteType", skip_serializing_if = "Option::is_none")]
+    remote_type: Option<String>,
 }
 
 #[cfg(test)]
@@ -282,6 +337,78 @@ mod tests {
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "user");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "main");
+    }
+
+    #[test]
+    fn export_forgejo_package() {
+        use uvr_core::lockfile::{LockedPackage, PackageSource};
+
+        let pkg = LockedPackage {
+            name: "mypkg".into(),
+            version: "0.1.0".into(),
+            source: PackageSource::Forgejo {
+                host: "codefloe.com".into(),
+            },
+            checksum: Some("git:abc123".into()),
+            url: Some("https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz".into()),
+            requires: vec![],
+            raw_version: None,
+            system_requirements: None,
+            dev: false,
+        };
+        let (source, repository) = export_source_and_repository(&pkg.source);
+        assert_eq!(source, "Git");
+        assert_eq!(repository, None);
+    }
+
+    #[test]
+    fn export_renv_forgejo_package_emits_remote_url_and_type() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "mypkg".to_string(),
+                version: "0.1.0".to_string(),
+                raw_version: None,
+                source: PackageSource::Forgejo {
+                    host: "codefloe.com".to_string(),
+                },
+                checksum: Some("git:abc123".to_string()),
+                requires: vec![],
+                url: Some(
+                    "https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz"
+                        .to_string(),
+                ),
+                system_requirements: None,
+                dev: false,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["Packages"]["mypkg"]["Source"], "Git");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteType"], "git2r");
+        assert_eq!(
+            parsed["Packages"]["mypkg"]["RemoteUrl"],
+            "https://codefloe.com/pat-s/mypkg"
+        );
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "pat-s");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "abc123");
+    }
+
+    #[test]
+    fn parse_forgejo_remote_archive_url() {
+        let url = "https://codefloe.com/api/v1/repos/pat-s/mypkg/archive/abc123.tar.gz";
+        let (host, owner, repo, sha) = parse_forgejo_remote(url).unwrap();
+        assert_eq!(host, "codefloe.com");
+        assert_eq!(owner, "pat-s");
+        assert_eq!(repo, "mypkg");
+        assert_eq!(sha, "abc123");
     }
 
     #[test]
