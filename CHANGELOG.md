@@ -7,6 +7,26 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.8 (2026-06-03)
+
+Two-headline release: `uvr import` now scaffolds a complete project layout
+(closing the half-migrated-from-renv gap), and uvr learns to resolve
+dependencies from Forgejo/Codeberg/codefloe via a new `forgejo::` prefix
+(PR #101, @pat-s).
+
+### Features
+
+- **Forgejo remote support** (#101 by @pat-s): a new `forgejo::` prefix in
+  `Remotes` and `uvr add` resolves package dependencies hosted on any
+  Forgejo instance (Codeberg, codefloe, self-hosted). Resolves via Forgejo's
+  list-commits API, walks transitive cross-host `Remotes` (forgejo →
+  github → CRAN), and ships a renv-compatible `RemoteType: git2r` export
+  path so existing renv tooling can re-import the lockfile. Private
+  repositories: set `UVR_FORGEJO_TOKEN_<HOST>` (e.g.
+  `UVR_FORGEJO_TOKEN_CODEBERG_ORG`) and the token is host-scoped through
+  both API calls and tarball downloads (fallback URLs explicitly drop the
+  token so it never leaks to other hosts).
+
 ### Fixes
 
 - **`uvr import` now scaffolds a complete uvr project**: previously
