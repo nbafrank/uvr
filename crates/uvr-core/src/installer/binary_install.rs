@@ -110,7 +110,19 @@ pub fn install_binary_package(
         if let Err(e) = verify_mach_o_arch_in_libs(&pkg_dir, package_name) {
             // Roll back the extracted package so a stale wrong-arch tree
             // doesn't sit in the library for downstream commands to trip on.
+            // remove_dir_with_retry is best-effort (Spotlight indexer / NFS /
+            // root-owned files can keep it from completing); surface a warning
+            // if the tree survives so the user knows their library state is
+            // partially inconsistent in addition to the install having failed.
             remove_dir_with_retry(&pkg_dir);
+            if pkg_dir.exists() {
+                tracing::warn!(
+                    "Arch check rejected '{}' but rollback of '{}' did not complete; \
+                     stale wrong-architecture files remain in the library.",
+                    package_name,
+                    pkg_dir.display()
+                );
+            }
             return Err(e);
         }
     }
@@ -210,13 +222,17 @@ fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> 
                 )));
             }
         } else if magic_be == FAT_MAGIC {
-            // Universal (fat) Mach-O: parse the nfat_arch count + each
-            // fat_arch entry (20 bytes), all big-endian.
-            let mut nfat_buf = [0u8; 4];
-            if file.read_exact(&mut nfat_buf).is_err() {
-                continue;
-            }
-            let nfat = u32::from_be_bytes(nfat_buf);
+            // Universal (fat) Mach-O. The fat_header layout from
+            // <mach-o/fat.h> is just two big-endian u32s: magic + nfat_arch,
+            // both already sitting in our initial 8-byte `header` read.
+            // (Previous versions incorrectly re-read 4 more bytes for nfat,
+            // which gave us the first fat_arch's cpu_type instead of the
+            // arch count — caught by post-commit review of bb32065.)
+            let nfat = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+            // Apple's toolchain never emits more than a handful of slices;
+            // cap to guard against corrupt or adversarial tarballs that
+            // could otherwise drive billions of read_exact calls.
+            let nfat = nfat.min(16);
             let mut matched = false;
             for _ in 0..nfat {
                 let mut arch_entry = [0u8; 20];
@@ -1078,6 +1094,58 @@ mod tests {
         std::fs::create_dir_all(&pkg_dir).unwrap();
         verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
             .expect("pure-R package without libs/ should pass");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_fat_macho_so(path: &std::path::Path, cpu_types: &[u32]) {
+        // Minimal fat Mach-O: fat_header (8 bytes BE) + N * fat_arch (20 bytes BE).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xcafebabe_u32.to_be_bytes()); // FAT_MAGIC
+        bytes.extend_from_slice(&(cpu_types.len() as u32).to_be_bytes()); // nfat_arch
+        for &ct in cpu_types {
+            bytes.extend_from_slice(&ct.to_be_bytes()); // cpu_type
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // cpu_subtype
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // offset
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // size
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // align
+        }
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_accepts_fat_universal_so() {
+        // Universal binary with both arm64 and x86_64 slices should pass
+        // regardless of host arch — exercises the fat_header parsing path.
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        write_fat_macho_so(&libs.join("pkg.so"), &[0x01000007, 0x0100000c]);
+
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect("universal Mach-O with host slice should pass");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_rejects_fat_without_host_slice() {
+        // Fat binary missing the host's slice: arm64 host gets an x86_64-only
+        // fat binary (only one slice, but that one isn't ours).
+        let wrong_only: u32 = match std::env::consts::ARCH {
+            "aarch64" | "arm64" => 0x01000007,
+            "x86_64" => 0x0100000c,
+            other => panic!("unexpected host arch: {other}"),
+        };
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        write_fat_macho_so(&libs.join("pkg.so"), &[wrong_only]);
+
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect_err("fat binary missing host slice should be rejected");
+        assert!(err.to_string().contains("#102"));
     }
 
     #[cfg(target_os = "macos")]
