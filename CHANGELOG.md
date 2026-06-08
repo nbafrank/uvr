@@ -7,6 +7,50 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.9 (2026-06-07)
+
+Three user-reported macOS/Linux install issues fixed: a Tahoe SIGSEGV in
+the methods package, opaque "No such file or directory" errors on Linux
+.deb installs, and Posit Package Manager serving wrong-arch binaries on
+Apple Silicon.
+
+### Fixes
+
+- **macOS Tahoe 26.x: R 4.6.0 no longer segfaults in `methods` init**
+  (#99 @mvuorre): Tahoe tightened library-validation enforcement on
+  ad-hoc signed binaries; R's `methods` package crashed during
+  `initMethodDispatch` the first time it dyld-loaded an S4 method table.
+  The ad-hoc resign step in `uvr r install` now embeds an entitlements
+  plist with `disable-library-validation`,
+  `allow-unsigned-executable-memory`, and
+  `allow-dyld-environment-variables`. Verified on Tahoe 26.5.1 arm64:
+  fresh install of R 4.6.0 + `library(stats)` loads without segfault.
+  Existing uvr-installed R versions on Tahoe need a reinstall (`rm -rf
+  ~/.uvr/r-versions/<ver> && uvr r install <ver>`) to pick up the new
+  signature.
+
+- **Linux `uvr r install` now reports the failing path** (#54
+  @joelostblom): the .deb install pipeline propagated bare
+  `std::io::Error` through `?` in several spots, surfacing the opaque
+  message `"I/O error: No such file or directory (os error 2)"` with no
+  hint at which path was missing. Each io operation in
+  `install_r_linux`, `patch_text_files`, `patch_makeconf_libr`, and
+  `write_renviron_site` now reports the specific file or directory
+  involved. Also added a `mkdir -p etc/` guard since some partial
+  extracts leave the `etc/` subtree missing.
+
+- **macOS arm64: wrong-arch packages from P3M are detected and
+  rejected** (#102 @connormfrench): Posit Package Manager has been
+  observed serving x86_64 tarballs from its `sonoma-arm64` binary
+  channel. Previously `uvr sync` installed them blindly and the
+  packages failed to load at runtime with arch errors. uvr now reads
+  the Mach-O header of every `.so` in `<pkg>/libs/` post-extraction
+  and rejects the install if the cpu_type doesn't match the host
+  (handles thin 64-bit and universal/fat Mach-O). On rejection the
+  partial extract is rolled back and the error names the workaround
+  (set `UVR_REPOS` to prefer CRAN). Linux distro channels are
+  unaffected.
+
 ## v0.3.8 (2026-06-03)
 
 Two-headline release: `uvr import` now scaffolds a complete project layout
