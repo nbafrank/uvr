@@ -1054,8 +1054,7 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_thin_macho_so(&libs.join("pkg.so"), host_cpu);
 
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
-            .expect("host-arch .so should pass the check");
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect("host-arch .so should pass the check");
     }
 
     #[cfg(target_os = "macos")]
@@ -1074,9 +1073,8 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_thin_macho_so(&libs.join("pkg.so"), wrong_cpu);
 
-        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect_err(
-            "wrong-arch .so should be rejected",
-        );
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect_err("wrong-arch .so should be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("wrong-architecture") || msg.contains("contains a"),
@@ -1157,7 +1155,6 @@ mod tests {
         let libs = pkg_dir.join("libs");
         std::fs::create_dir_all(&libs).unwrap();
         std::fs::write(libs.join("README"), "not a Mach-O").unwrap();
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
-            .expect("non-.so files should be ignored");
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect("non-.so files should be ignored");
     }
 }

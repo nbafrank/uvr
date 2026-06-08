@@ -811,12 +811,8 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
     if !makeconf.exists() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(&makeconf).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to read {}: {e}",
-            makeconf.display()
-        ))
-    })?;
+    let content = std::fs::read_to_string(&makeconf)
+        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", makeconf.display())))?;
     let dest_str = dest.to_string_lossy();
     let patched = content
         .lines()
@@ -987,8 +983,8 @@ const ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 fn entitlements_path() -> Option<&'static Path> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
-        let path = std::env::temp_dir()
-            .join(format!("uvr-entitlements-{}.plist", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("uvr-entitlements-{}.plist", std::process::id()));
         match std::fs::write(&path, ENTITLEMENTS_PLIST) {
             Ok(()) => Some(path),
             Err(e) => {
@@ -1021,7 +1017,14 @@ fn resign_adhoc(path: &Path) {
     if let Some(ent) = entitlements_path() {
         let ent_str = ent.to_string_lossy().to_string();
         match Command::new("codesign")
-            .args(["--force", "--sign", "-", "--entitlements", &ent_str, &path_str])
+            .args([
+                "--force",
+                "--sign",
+                "-",
+                "--entitlements",
+                &ent_str,
+                &path_str,
+            ])
             .output()
         {
             Ok(o) if o.status.success() => {}
@@ -1044,10 +1047,7 @@ fn resign_adhoc(path: &Path) {
                 );
             }
             Err(e) => {
-                tracing::error!(
-                    "codesign failed to spawn for {}: {e}",
-                    path.display()
-                );
+                tracing::error!("codesign failed to spawn for {}: {e}", path.display());
             }
         }
         return;
@@ -1193,12 +1193,8 @@ fn write_renviron_site(dest: &Path) -> Result<()> {
          DYLD_LIBRARY_PATH=${{R_HOME}}/lib\n\
          LD_LIBRARY_PATH=${{R_HOME}}/lib\n"
     );
-    std::fs::write(&renviron, content).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to write {}: {e}",
-            renviron.display()
-        ))
-    })?;
+    std::fs::write(&renviron, content)
+        .map_err(|e| UvrError::Other(format!("Failed to write {}: {e}", renviron.display())))?;
     Ok(())
 }
 
