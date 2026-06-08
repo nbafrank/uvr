@@ -462,7 +462,12 @@ pub async fn download_and_install_r(
         response.error_for_status()?.bytes().await?
     };
 
-    std::fs::create_dir_all(&install_dir)?;
+    std::fs::create_dir_all(&install_dir).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to create install directory {}: {e}",
+            install_dir.display()
+        ))
+    })?;
 
     match platform {
         Platform::MacOsArm64 | Platform::MacOsX86_64 => {
@@ -751,10 +756,26 @@ fn extract_r_home_dir(dest: &Path) -> Result<String> {
 /// This prevents accidentally corrupting (and invalidating the code signature of)
 /// Mach-O binaries or dylibs that may embed the path string as a constant.
 fn patch_text_files(dir: &Path, old: &str, new: &str) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to read directory {} during path patching: {e}",
+            dir.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to read entry in {} during path patching: {e}",
+                dir.display()
+            ))
+        })?;
         let path = entry.path();
-        let ft = entry.file_type()?;
+        let ft = entry.file_type().map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to stat {} during path patching: {e}",
+                path.display()
+            ))
+        })?;
         if ft.is_symlink() {
             continue;
         }
@@ -768,7 +789,12 @@ fn patch_text_files(dir: &Path, old: &str, new: &str) -> Result<()> {
                 }
                 if let Ok(content) = String::from_utf8(bytes) {
                     if content.contains(old) {
-                        std::fs::write(&path, content.replace(old, new))?;
+                        std::fs::write(&path, content.replace(old, new)).map_err(|e| {
+                            UvrError::Other(format!(
+                                "Failed to write patched {} during path patching: {e}",
+                                path.display()
+                            ))
+                        })?;
                     }
                 }
             }
@@ -784,7 +810,12 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
     if !makeconf.exists() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(&makeconf)?;
+    let content = std::fs::read_to_string(&makeconf).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to read {}: {e}",
+            makeconf.display()
+        ))
+    })?;
     let dest_str = dest.to_string_lossy();
     let patched = content
         .lines()
@@ -803,7 +834,12 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
     } else {
         patched
     };
-    std::fs::write(&makeconf, patched)?;
+    std::fs::write(&makeconf, patched).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to write patched {}: {e}",
+            makeconf.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -1034,12 +1070,28 @@ fn write_renviron_site(dest: &Path) -> Result<()> {
     if existing.contains("DYLD_LIBRARY_PATH=${R_HOME}/lib") {
         return Ok(());
     }
+    // Ensure the etc/ directory exists. Some .deb payloads or partial extracts
+    // can leave `etc/` missing — without this guard, `fs::write` would fire a
+    // bare ENOENT with no hint at which path was missing.
+    if let Some(parent) = renviron.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            UvrError::Other(format!(
+                "Failed to create {} for Renviron.site: {e}",
+                parent.display()
+            ))
+        })?;
+    }
     let content = format!(
         "{existing}# Added by uvr: ensure libR.dylib is always findable by sub-processes.\n\
          DYLD_LIBRARY_PATH=${{R_HOME}}/lib\n\
          LD_LIBRARY_PATH=${{R_HOME}}/lib\n"
     );
-    std::fs::write(&renviron, content)?;
+    std::fs::write(&renviron, content).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to write {}: {e}",
+            renviron.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -1180,9 +1232,18 @@ fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
         ],
     )?;
 
-    let tmp = tempfile::tempdir()?;
+    let tmp = tempfile::tempdir().map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to create temp directory for .deb extraction: {e}. Check $TMPDIR or disk space."
+        ))
+    })?;
     let deb_path = tmp.path().join(format!("r-{version}.deb"));
-    std::fs::write(&deb_path, deb_bytes)?;
+    std::fs::write(&deb_path, deb_bytes).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to write .deb to {}: {e}",
+            deb_path.display()
+        ))
+    })?;
 
     // ar x <deb>
     let status = Command::new("ar")
