@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use tracing::info;
 
@@ -984,7 +985,6 @@ const ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// fall back to a plain ad-hoc resign in that case (degraded but still
 /// works on pre-Tahoe systems).
 fn entitlements_path() -> Option<&'static Path> {
-    use std::sync::OnceLock;
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
         let path = std::env::temp_dir()
@@ -992,10 +992,11 @@ fn entitlements_path() -> Option<&'static Path> {
         match std::fs::write(&path, ENTITLEMENTS_PLIST) {
             Ok(()) => Some(path),
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     "Failed to write entitlements plist to {}: {e}. \
-                     Ad-hoc resign will proceed without entitlements (may crash \
-                     on macOS Tahoe 26.x when R loads dynamic packages).",
+                     Ad-hoc resign will proceed without entitlements; the \
+                     resulting R install will crash on macOS Tahoe 26.x when \
+                     R loads dynamic packages (#99).",
                     path.display()
                 );
                 None
@@ -1007,34 +1008,60 @@ fn entitlements_path() -> Option<&'static Path> {
 
 /// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag and
 /// embedding the entitlements needed for R to load packages on Tahoe.
+///
+/// If the entitlements plist couldn't be written (already loudly errored in
+/// `entitlements_path`), we still attempt a plain ad-hoc resign — the binary
+/// at least loads on pre-Tahoe macOS that way. If `codesign` itself rejects
+/// the entitlements arg or fails for any other reason, we surface the error
+/// rather than silently falling back to an entitlement-free resign: a
+/// silent fallback would produce an install that segfaults later (#99)
+/// instead of one that fails the install step visibly.
 fn resign_adhoc(path: &Path) {
     let path_str = path.to_string_lossy().to_string();
-    let mut cmd = Command::new("codesign");
-    cmd.args(["--force", "--sign", "-"]);
     if let Some(ent) = entitlements_path() {
         let ent_str = ent.to_string_lossy().to_string();
-        cmd.args(["--entitlements", &ent_str, &path_str]);
-        match cmd.status() {
-            Ok(s) if s.success() => return,
-            // Some older codesign versions reject `--entitlements` on ad-hoc
-            // signatures. Fall through to the entitlement-free resign so the
-            // binary still loads on pre-Tahoe macOS.
-            Ok(_) | Err(_) => {
-                tracing::warn!(
-                    "codesign with entitlements failed for {}; retrying without entitlements.",
+        match Command::new("codesign")
+            .args(["--force", "--sign", "-", "--entitlements", &ent_str, &path_str])
+            .output()
+        {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                tracing::error!(
+                    "codesign --entitlements failed for {} (exit {}). \
+                     stderr: {}. R install will be broken — abort and retry, \
+                     or report at https://github.com/nbafrank/uvr/issues with \
+                     this stderr.",
+                    path.display(),
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::error!(
+                    "codesign not found — skipping ad-hoc re-sign of {}. \
+                     R 4.6+ binaries will SIGKILL at startup until codesign is on PATH.",
+                    path.display()
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "codesign failed to spawn for {}: {e}",
                     path.display()
                 );
             }
         }
+        return;
     }
-    // Fallback: plain ad-hoc resign (no entitlements).
+    // entitlements_path() returned None — only reached when the plist write
+    // itself failed (already error!-logged). Best effort: plain ad-hoc
+    // resign so the binary is at least loadable on pre-Tahoe macOS.
     match Command::new("codesign")
         .args(["--force", "--sign", "-", &path_str])
         .status()
     {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(
+            tracing::error!(
                 "codesign not found — skipping ad-hoc re-sign of {}. \
                  R 4.6+ binaries will SIGKILL at startup until codesign is on PATH.",
                 path.display()
