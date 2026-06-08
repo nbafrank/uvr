@@ -98,6 +98,23 @@ pub fn install_binary_package(
         extract_tgz(tarball, library, package_name)?;
     }
 
+    // Verify the extracted shared objects match the host architecture before
+    // proceeding. P3M has been observed serving x86_64 tarballs from its
+    // sonoma-arm64 channel (#102); without this check, the install completes
+    // and the package fails to dyld-load with a confusing arch error at
+    // runtime. macOS-only for now — Linux distro channels don't exhibit the
+    // same mismatch pattern.
+    #[cfg(target_os = "macos")]
+    {
+        let pkg_dir = library.join(package_name);
+        if let Err(e) = verify_mach_o_arch_in_libs(&pkg_dir, package_name) {
+            // Roll back the extracted package so a stale wrong-arch tree
+            // doesn't sit in the library for downstream commands to trip on.
+            remove_dir_with_retry(&pkg_dir);
+            return Err(e);
+        }
+    }
+
     // Patch libR.dylib references in all .so files when using managed R (macOS only).
     if cfg!(target_os = "macos") {
         if let Some(libr) = libr_path {
@@ -106,6 +123,129 @@ pub fn install_binary_package(
                 let _ = patch_so_libr_refs(&pkg_dir, libr);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Verify every `.so` in `<pkg_dir>/libs/` is a Mach-O for the host CPU.
+///
+/// Reads only the 8-byte Mach-O header (or the fat header + arch entries
+/// for universal binaries). Errors with a clear, actionable message if a
+/// `.so` is the wrong arch — that's the failure mode tracked in #102 where
+/// Posit Package Manager's `sonoma-arm64` channel has been observed serving
+/// x86_64-only tarballs. Files that aren't Mach-O at all (unexpected, but
+/// possible if an R package vendors a debug stub or stray asset) are
+/// silently skipped; we only reject confirmed wrong-arch Mach-Os.
+#[cfg(target_os = "macos")]
+fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> {
+    use std::io::Read;
+
+    // CPU type constants from `<mach/machine.h>`:
+    //   CPU_TYPE_X86_64 = CPU_TYPE_X86 (7) | CPU_ARCH_ABI64 (0x01000000)
+    //   CPU_TYPE_ARM64  = CPU_TYPE_ARM (12) | CPU_ARCH_ABI64
+    const CPU_TYPE_X86_64: u32 = 0x01000007;
+    const CPU_TYPE_ARM64: u32 = 0x0100000c;
+    // Mach-O magic numbers (Mach-O is LE on modern macOS; fat headers are BE):
+    const MH_MAGIC_64: u32 = 0xfeedfacf;
+    const FAT_MAGIC: u32 = 0xcafebabe;
+
+    let host_arch = std::env::consts::ARCH;
+    let (expected_cpu_type, expected_arch_name) = match host_arch {
+        "aarch64" | "arm64" => (CPU_TYPE_ARM64, "arm64"),
+        "x86_64" => (CPU_TYPE_X86_64, "x86_64"),
+        // Unknown host arch — don't have a baseline to compare against.
+        _ => return Ok(()),
+    };
+
+    let libs_dir = pkg_dir.join("libs");
+    if !libs_dir.exists() {
+        return Ok(()); // Pure-R package, no native libraries to verify.
+    }
+
+    let entries = std::fs::read_dir(&libs_dir).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to read libs/ for arch check of '{}': {}",
+            package_name, e
+        ))
+    })?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("so") {
+            continue;
+        }
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut header = [0u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            continue; // Too small to be Mach-O; not our concern.
+        }
+        let magic_le = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let magic_be = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+
+        if magic_le == MH_MAGIC_64 {
+            // Thin 64-bit Mach-O: cpu_type is bytes 4..8 little-endian.
+            let cpu_type = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+            if cpu_type != expected_cpu_type {
+                let found = match cpu_type {
+                    CPU_TYPE_X86_64 => "x86_64",
+                    CPU_TYPE_ARM64 => "arm64",
+                    _ => "unknown",
+                };
+                return Err(UvrError::Other(format!(
+                    "Binary package '{}' contains a {} shared object, \
+                     but uvr is running on {} ({}). The upstream binary \
+                     repository likely served a wrong-architecture tarball. \
+                     File: {}. \
+                     Workaround: prefer CRAN by setting \
+                     `UVR_REPOS=\"https://cran.r-project.org,https://packagemanager.posit.co/cran/latest\"`. \
+                     See #102.",
+                    package_name,
+                    found,
+                    expected_arch_name,
+                    host_arch,
+                    path.display()
+                )));
+            }
+        } else if magic_be == FAT_MAGIC {
+            // Universal (fat) Mach-O: parse the nfat_arch count + each
+            // fat_arch entry (20 bytes), all big-endian.
+            let mut nfat_buf = [0u8; 4];
+            if file.read_exact(&mut nfat_buf).is_err() {
+                continue;
+            }
+            let nfat = u32::from_be_bytes(nfat_buf);
+            let mut matched = false;
+            for _ in 0..nfat {
+                let mut arch_entry = [0u8; 20];
+                if file.read_exact(&mut arch_entry).is_err() {
+                    break;
+                }
+                let cpu_type = u32::from_be_bytes([
+                    arch_entry[0],
+                    arch_entry[1],
+                    arch_entry[2],
+                    arch_entry[3],
+                ]);
+                if cpu_type == expected_cpu_type {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Err(UvrError::Other(format!(
+                    "Binary package '{}' is a universal Mach-O but contains \
+                     no {} slice. File: {}. See #102.",
+                    package_name,
+                    expected_arch_name,
+                    path.display()
+                )));
+            }
+        }
+        // Anything else (32-bit Mach-O, non-Mach-O, raw text) is not what we
+        // care about — skip rather than reject.
     }
 
     Ok(())
@@ -868,5 +1008,88 @@ mod tests {
             std::fs::read_to_string(&extracted).unwrap(),
             "Package: t18b\nVersion: 2.0\n"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_thin_macho_so(path: &std::path::Path, cpu_type_le: u32) {
+        // Minimal Mach-O header: just enough bytes for the arch check to read.
+        // Real Mach-O is 32 bytes for the mach_header_64; we only need 8.
+        let mut bytes = Vec::with_capacity(32);
+        bytes.extend_from_slice(&0xfeedfacf_u32.to_le_bytes()); // MH_MAGIC_64
+        bytes.extend_from_slice(&cpu_type_le.to_le_bytes());
+        // Pad to a plausible mach_header_64 length so the file looks valid
+        // enough that other tools wouldn't trip; not strictly required.
+        bytes.resize(32, 0);
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_passes_on_host_arch_so() {
+        // Build a `.so` whose Mach-O arch matches the host running the test.
+        let host_cpu: u32 = match std::env::consts::ARCH {
+            "aarch64" | "arm64" => 0x0100000c,
+            "x86_64" => 0x01000007,
+            other => panic!("unexpected host arch in test: {other}"),
+        };
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        write_thin_macho_so(&libs.join("pkg.so"), host_cpu);
+
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect("host-arch .so should pass the check");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_rejects_wrong_arch_so() {
+        // Wrong arch = opposite of the host. On arm64 host this writes
+        // an x86_64 header; on x86_64 host this writes arm64.
+        let wrong_cpu: u32 = match std::env::consts::ARCH {
+            "aarch64" | "arm64" => 0x01000007, // host=arm64, .so=x86_64
+            "x86_64" => 0x0100000c,            // host=x86_64, .so=arm64
+            other => panic!("unexpected host arch in test: {other}"),
+        };
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        write_thin_macho_so(&libs.join("pkg.so"), wrong_cpu);
+
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect_err(
+            "wrong-arch .so should be rejected",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wrong-architecture") || msg.contains("contains a"),
+            "error message should explain the arch mismatch, got: {msg}"
+        );
+        assert!(msg.contains("#102"), "error should cite issue #102");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_skips_pure_r_package() {
+        // No libs/ directory at all — pure-R package, nothing to verify.
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect("pure-R package without libs/ should pass");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_skips_non_so_files() {
+        // libs/ exists but contains nothing matching *.so — should pass.
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        std::fs::write(libs.join("README"), "not a Mach-O").unwrap();
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect("non-.so files should be ignored");
     }
 }
