@@ -943,9 +943,91 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
     resign_adhoc(binary);
 }
 
-/// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag.
+/// Entitlements plist embedded in every ad-hoc re-sign.
+///
+/// macOS Tahoe (26.x) tightened the default library-validation enforcement
+/// applied to ad-hoc signed binaries. Without an entitlement that explicitly
+/// relaxes it, R's `methods` package crashes during `initMethodDispatch` with
+/// `invalid permissions` the first time it dyld-loads an S4 method table
+/// (#99, @mvuorre). Pre-Tahoe macOS does not check these entitlements for
+/// ad-hoc binaries, so adding them is a no-op there.
+///
+/// - `disable-library-validation`: lets R load `.so`/`.dylib` files that
+///   weren't signed by the same identity (R packages compile arbitrary
+///   shared objects at install time — they will never match the ad-hoc
+///   identity).
+/// - `allow-unsigned-executable-memory`: R's bytecode compiler and a
+///   handful of packages (Rcpp/RcppParallel via TBB, JIT-using packages)
+///   allocate executable memory at runtime.
+/// - `allow-dyld-environment-variables`: keeps `Renviron.site`'s
+///   `DYLD_LIBRARY_PATH` workaround functioning even if hardened runtime
+///   is ever enabled for ad-hoc signing in a future macOS release.
+const ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>
+"#;
+
+/// Lazy-initialized path to the entitlements plist on disk.
+///
+/// Written once per process to `$TMPDIR/uvr-entitlements-<pid>.plist` so
+/// `resign_adhoc` can reference it without paying the write cost on every
+/// dylib it processes. Returns `None` if the temp write failed — callers
+/// fall back to a plain ad-hoc resign in that case (degraded but still
+/// works on pre-Tahoe systems).
+fn entitlements_path() -> Option<&'static Path> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir()
+            .join(format!("uvr-entitlements-{}.plist", std::process::id()));
+        match std::fs::write(&path, ENTITLEMENTS_PLIST) {
+            Ok(()) => Some(path),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to write entitlements plist to {}: {e}. \
+                     Ad-hoc resign will proceed without entitlements (may crash \
+                     on macOS Tahoe 26.x when R loads dynamic packages).",
+                    path.display()
+                );
+                None
+            }
+        }
+    })
+    .as_deref()
+}
+
+/// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag and
+/// embedding the entitlements needed for R to load packages on Tahoe.
 fn resign_adhoc(path: &Path) {
     let path_str = path.to_string_lossy().to_string();
+    let mut cmd = Command::new("codesign");
+    cmd.args(["--force", "--sign", "-"]);
+    if let Some(ent) = entitlements_path() {
+        let ent_str = ent.to_string_lossy().to_string();
+        cmd.args(["--entitlements", &ent_str, &path_str]);
+        match cmd.status() {
+            Ok(s) if s.success() => return,
+            // Some older codesign versions reject `--entitlements` on ad-hoc
+            // signatures. Fall through to the entitlement-free resign so the
+            // binary still loads on pre-Tahoe macOS.
+            Ok(_) | Err(_) => {
+                tracing::warn!(
+                    "codesign with entitlements failed for {}; retrying without entitlements.",
+                    path.display()
+                );
+            }
+        }
+    }
+    // Fallback: plain ad-hoc resign (no entitlements).
     match Command::new("codesign")
         .args(["--force", "--sign", "-", &path_str])
         .status()
@@ -1045,9 +1127,7 @@ pub fn patch_r_dylibs(r_home: &Path) {
         }
 
         if needs_resign {
-            let _ = Command::new("codesign")
-                .args(["--force", "--sign", "-", &path_str])
-                .status();
+            resign_adhoc(&path);
         }
     }
 }
