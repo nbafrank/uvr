@@ -7,6 +7,57 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.10 (2026-06-12)
+
+Fixes a long-standing source-build hang on Linux plus a batch of
+correctness and robustness cleanups across the install, download, and
+git-dependency paths. The headline fix resolves #52 (s2/Matrix/StanHeaders
+builds hanging indefinitely); the rest harden code paths added in the
+recent Forgejo and macOS-Tahoe work.
+
+### Fixes
+
+- **Source builds no longer hang on verbose packages** (#52 @B-Nilson):
+  `uvr add`/`uvr sync` captured a compiling package's stdout and stderr
+  but only drained stderr while the build ran. On a verbose build (s2,
+  Matrix, StanHeaders) the unread stdout pipe filled its ~64KB kernel
+  buffer and the compiler blocked on `write()` forever, deadlocked against
+  uvr's own wait — the process sat at 0% CPU and never finished. uvr now
+  drains stdout on a dedicated thread concurrently with the progress
+  output, so a build of any output volume completes.
+
+- **macOS install aborts loudly on a code-signing failure** (#111): the
+  `uvr r install` patch pipeline (`patch_r_executables`, `patch_r_dylibs`,
+  and the shared ad-hoc resign) previously swallowed `codesign` failures
+  as log lines, producing an install that crashed on first dyld load
+  (the #99 family) instead of failing visibly. A signing failure now
+  aborts the install with an actionable error.
+
+- **git lockfile resolution is deterministic across sources** (#107):
+  when the same package was reachable through two different git specs,
+  the winning version depended on dependency-walk order. uvr now keys
+  deduplication on the resolved package name and reports an explicit
+  error naming both candidate sources when they genuinely diverge,
+  rather than silently picking one.
+
+### Internal / hardening
+
+- Consolidated three independent `forgejo::host/owner/repo[@ref]` spec
+  parsers (CLI `add`, manifest `Remotes:`, registry resolver) into one
+  validated parser, so all three accept and reject identical inputs and
+  validate host and owner/repo segments uniformly (#108).
+- A host-scoped auth token can no longer be forwarded onto the CRAN
+  Archive fallback URL on a download retry (#105).
+- The renv-export Forgejo host is now derived from the API path anchor
+  so it can't drift if the URL prefix changes, with an empty-host guard
+  (#106).
+- The macOS entitlements plist is written `0o600` via an exclusive
+  create so no other local process can read or replace it before
+  `codesign` consumes it (#110).
+- Release CI now fails if the Windows binary's embedded manifest declares
+  a side-by-side `<dependency>`, guarding against a regression of the
+  #74 `ERROR_BAD_EXE_FORMAT` breakage (#104).
+
 ## v0.3.9 (2026-06-07)
 
 Three user-reported macOS/Linux install issues fixed: a Tahoe SIGSEGV in
