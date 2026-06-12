@@ -202,6 +202,18 @@ impl RCmdInstall {
         // Collect all output for error reporting
         let mut all_stderr = String::new();
 
+        // Drain stdout on a dedicated thread. `R CMD INSTALL` writes to both
+        // stdout and stderr; if we only read stderr (below) the stdout pipe
+        // fills its ~64KB kernel buffer on a verbose build and the child blocks
+        // forever on write(2), deadlocking against our own `child.wait()` (#52).
+        let stdout_drain = child.stdout.take().map(|stdout| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = std::io::Read::read_to_string(&mut BufReader::new(stdout), &mut s);
+                s
+            })
+        });
+
         // Read stderr line-by-line to update progress. When the watchdog kills
         // the child, the pipe closes and this loop exits naturally.
         if let Some(stderr) = child.stderr.take() {
@@ -219,6 +231,7 @@ impl RCmdInstall {
         let status = child.wait()?;
         completed.store(true, Ordering::SeqCst);
         let _ = watchdog.join();
+        let all_stdout = stdout_drain.and_then(|h| h.join().ok()).unwrap_or_default();
 
         // Once the OS reaps the child, the PID can be recycled. Drop the
         // registration immediately so a concurrent SIGINT handler can't snapshot
@@ -237,15 +250,10 @@ impl RCmdInstall {
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
-            // Also grab stdout if stderr was empty
+            // Prefer stderr for the error log; fall back to stdout when the
+            // build wrote its diagnostics there instead.
             let log = if all_stderr.trim().is_empty() {
-                if let Some(mut stdout) = child.stdout.take() {
-                    let mut s = String::new();
-                    std::io::Read::read_to_string(&mut stdout, &mut s).unwrap_or(0);
-                    s
-                } else {
-                    all_stderr
-                }
+                all_stdout
             } else {
                 all_stderr
             };
@@ -428,5 +436,49 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // Should not panic when nothing's there.
         cleanup_lock_dir(tmp.path(), "doesnotexist");
+    }
+
+    /// Regression for #52: a build that floods stdout beyond the OS pipe buffer
+    /// (~64KB) must not deadlock. The streaming installer used to drain only
+    /// stderr, so a verbose build (s2, Matrix, StanHeaders) blocked on write(2)
+    /// to a full stdout pipe while we waited on it. With a generous timeout the
+    /// old code would block until the watchdog killed the child and returned a
+    /// timeout error; the fixed code drains stdout concurrently and returns Ok
+    /// in milliseconds.
+    #[cfg(unix)]
+    #[test]
+    fn streaming_does_not_deadlock_on_large_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Fake `R`: ignore args, write ~256KB to stdout (well past any pipe
+        // buffer), a token line to stderr, then exit 0.
+        let fake_r = tmp.path().join("R");
+        std::fs::write(
+            &fake_r,
+            "#!/bin/sh\n\
+             for i in $(seq 1 5000); do\n\
+             echo \"stdout line $i ........................................\"\n\
+             done\n\
+             echo 'compiling fake 1.0' 1>&2\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_r, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let tarball = tmp.path().join("fake_1.0.tar.gz");
+        std::fs::write(&tarball, b"not a real tarball").unwrap();
+
+        let installer = RCmdInstall::new(fake_r.to_string_lossy().to_string());
+        let result = installer.install_streaming(
+            &tarball,
+            &lib,
+            "fake",
+            Some(Duration::from_secs(20)),
+            |_| {},
+        );
+        assert!(result.is_ok(), "deadlocked or failed: {result:?}");
     }
 }
