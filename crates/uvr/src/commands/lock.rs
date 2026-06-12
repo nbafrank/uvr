@@ -265,6 +265,9 @@ async fn resolve_git_deps(
     }
 
     let mut pre_resolved: HashMap<String, PackageInfo> = HashMap::new();
+    // Track which spec each resolved name came from, so a cross-source collision
+    // can name both candidate specs in the error (#107).
+    let mut resolved_from: HashMap<String, String> = HashMap::new();
     let mut visited_specs: HashSet<String> = HashSet::new();
 
     while let Some(spec) = queue.pop_front() {
@@ -309,14 +312,37 @@ async fn resolve_git_deps(
             }
         };
 
+        // Dedup on the *resolved package name*, not the spec string. The same
+        // package can be reachable via two different specs (e.g. a github
+        // transitive at v1 and a forgejo transitive at v2 of the same package);
+        // both have distinct spec strings so visited_specs lets both through.
+        // An identical re-resolution (same version + checksum + url) is a benign
+        // diamond and keeps the first. A genuine divergence is a real ambiguity
+        // whose winner would otherwise depend on BFS arrival order — surface it
+        // as an explicit error naming both candidates rather than guessing (#107).
         if let Some(existing) = pre_resolved.get(&info.name) {
-            tracing::warn!(
-                "git package {} already resolved from a different spec ({}); discarding {}",
-                info.name,
-                existing.checksum.as_deref().unwrap_or("?"),
-                spec
-            );
+            let same = existing.version == info.version
+                && existing.checksum == info.checksum
+                && existing.url == info.url;
+            if !same {
+                let prev_spec = resolved_from
+                    .get(&info.name)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                return Err(anyhow::anyhow!(
+                    "git dependency '{name}' resolves to two different sources:\n  \
+                     - {prev_spec} → v{prev_ver} ({prev_sum})\n  \
+                     - {spec} → v{new_ver} ({new_sum})\n\
+                     Pin a single source/ref for '{name}' to disambiguate.",
+                    name = info.name,
+                    prev_ver = existing.version,
+                    prev_sum = existing.checksum.as_deref().unwrap_or("no checksum"),
+                    new_ver = info.version,
+                    new_sum = info.checksum.as_deref().unwrap_or("no checksum"),
+                ));
+            }
         } else {
+            resolved_from.insert(info.name.clone(), spec.clone());
             pre_resolved.insert(info.name.clone(), info);
         }
 
