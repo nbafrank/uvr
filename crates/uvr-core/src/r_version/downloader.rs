@@ -973,6 +973,31 @@ const ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
+/// Write the entitlements plist with a private file mode. On Unix the file is
+/// created `0o600` via `O_CREAT|O_EXCL` so no other local process can read or
+/// replace it between write and the `codesign` invocation that consumes it
+/// (#110). Any stale same-PID file is removed first so the exclusive create
+/// gets a fresh inode rather than failing on leftover state; `create_new`
+/// still refuses to follow a symlink planted in the gap.
+fn write_entitlements(path: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(path);
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(ENTITLEMENTS_PLIST.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, ENTITLEMENTS_PLIST)
+    }
+}
+
 /// Lazy-initialized path to the entitlements plist on disk.
 ///
 /// Written once per process to `$TMPDIR/uvr-entitlements-<pid>.plist` so
@@ -985,7 +1010,7 @@ fn entitlements_path() -> Option<&'static Path> {
     PATH.get_or_init(|| {
         let path =
             std::env::temp_dir().join(format!("uvr-entitlements-{}.plist", std::process::id()));
-        match std::fs::write(&path, ENTITLEMENTS_PLIST) {
+        match write_entitlements(&path) {
             Ok(()) => Some(path),
             Err(e) => {
                 tracing::error!(

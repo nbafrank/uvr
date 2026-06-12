@@ -250,17 +250,17 @@ async fn download_one(
 
     // Stream response to a temp file to avoid buffering entire packages in RAM.
     // Compute checksums on-the-fly during the stream.
-    let request = |target: &str| {
+    let request = |target: &str, auth: Option<&str>| {
         let mut req = client.get(target);
         if let Some(ua) = user_agent {
             req = req.header(reqwest::header::USER_AGENT, ua);
         }
-        if let Some(auth) = auth_header {
+        if let Some(auth) = auth {
             req = req.header(reqwest::header::AUTHORIZATION, auth);
         }
         req
     };
-    let mut resp_result = match request(url).send().await {
+    let mut resp_result = match request(url, auth_header).send().await {
         Ok(r) => r.error_for_status(),
         Err(e) => Err(e),
     };
@@ -268,8 +268,10 @@ async fn download_one(
         if let Some(archive_url) = cran_archive_url(url) {
             debug!("{name}: {url} failed, retrying via CRAN Archive: {archive_url}");
             // CRAN Archive doesn't require the R-shaped UA, but plumbing the
-            // override here is harmless and keeps requests symmetric.
-            resp_result = match request(&archive_url).send().await {
+            // override here is harmless and keeps requests symmetric. Pass None
+            // for auth: a host-scoped token (e.g. Forgejo) must never leak onto
+            // the CRAN Archive URL, matching download_all's fallback (#105).
+            resp_result = match request(&archive_url, None).send().await {
                 Ok(r) => r.error_for_status(),
                 Err(e) => Err(e),
             };
