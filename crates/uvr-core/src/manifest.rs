@@ -451,18 +451,21 @@ fn parse_forgejo_entry(body: &str) -> Option<(String, DependencySpec)> {
         None => (path.split('#').next().unwrap_or(path).trim(), None),
     };
 
-    let parts: Vec<&str> = path_no_anchor.split('/').collect();
-    if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
-        return None;
-    }
-    let repo = parts[2];
-    let pkg_name = explicit_name.unwrap_or_else(|| repo.to_string());
+    // Validate the host/owner/repo shape through the shared parser so the
+    // manifest accepts/rejects the same specs as the CLI and resolver (#108).
+    // The pkgname= override and @ref/#anchor handling above are Remotes-field
+    // syntax the shared parser doesn't know about, so we strip them first.
+    let parsed = crate::registry::forgejo::parse_forgejo_parts(path_no_anchor)?;
+    let pkg_name = explicit_name.unwrap_or_else(|| parsed.repo.clone());
     if pkg_name.is_empty() {
         return None;
     }
 
     let spec = DependencySpec::Detailed(DetailedDep {
-        git: Some(format!("forgejo::{path_no_anchor}")),
+        git: Some(format!(
+            "forgejo::{}/{}/{}",
+            parsed.host, parsed.owner, parsed.repo
+        )),
         rev,
         ..Default::default()
     });

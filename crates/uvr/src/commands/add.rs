@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use uvr_core::manifest::{DependencySpec, DetailedDep};
 use uvr_core::project::Project;
+use uvr_core::registry::forgejo::parse_forgejo_parts;
 use uvr_core::resolver::is_base_package;
 
 use crate::ui;
@@ -12,33 +13,21 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     // Forgejo: explicit `forgejo::host/owner/repo[@ref]` prefix. Checked
     // before the bare `user/repo` heuristic below so a forgejo spec
     // doesn't get misclassified as a malformed GitHub spec.
-    if let Some(body) = raw.strip_prefix("forgejo::") {
-        let (path_part, git_ref) = if let Some(at) = body.rfind('@') {
-            (&body[..at], Some(body[at + 1..].to_string()))
-        } else {
-            (body, None)
-        };
-
-        let parts: Vec<&str> = path_part.split('/').collect();
-        if parts.len() != 3 || parts.iter().any(|s| s.is_empty()) {
+    if raw.starts_with("forgejo::") {
+        let Some(parsed) = parse_forgejo_parts(raw) else {
             anyhow::bail!(
                 "Invalid Forgejo spec '{raw}'. Expected: forgejo::host/owner/repo or forgejo::host/owner/repo@ref"
             );
-        }
-        let name = parts[2].to_string();
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
-        {
-            anyhow::bail!("Invalid package name '{name}' extracted from Forgejo spec '{raw}'");
-        }
-
+        };
         let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(format!("forgejo::{path_part}")),
-            rev: git_ref,
+            git: Some(format!(
+                "forgejo::{}/{}/{}",
+                parsed.host, parsed.owner, parsed.repo
+            )),
+            rev: parsed.git_ref,
             ..Default::default()
         });
-        return Ok((name, spec));
+        return Ok((parsed.repo, spec));
     }
 
     // GitHub: contains '/'

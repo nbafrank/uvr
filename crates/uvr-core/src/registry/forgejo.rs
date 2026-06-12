@@ -10,25 +10,46 @@ use crate::registry::{Dep, PackageInfo};
 /// field. `(dep_name, "forgejo::host/owner/repo", optional_ref)`.
 pub type ForgejoRemote = (String, String, Option<String>);
 
-/// Parse `"forgejo::host/owner/repo[@ref]"` (or the bare `host/owner/repo[@ref]`
-/// once the prefix has been stripped) into `(host, owner, repo, ref)`.
+/// A validated Forgejo spec. `git_ref` is `None` when the spec carried no
+/// `@ref` segment — callers default it as they see fit (e.g. the registry
+/// resolver uses `"HEAD"`, the manifest/CLI parsers keep `None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoSpec {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub git_ref: Option<String>,
+}
+
+/// Parse and validate `"[forgejo::]host/owner/repo[@ref]"` into structured
+/// parts. This is the single source of truth for the Forgejo spec shape (#108)
+/// — the CLI (`add`), the manifest `Remotes:` parser, and the registry
+/// resolver all funnel through it so they accept and reject identical inputs.
 ///
 /// Accepts:
 /// - `forgejo::codefloe.com/pat-s/mypkg@v0.1.0`
-/// - `codefloe.com/pat-s/mypkg` (ref defaults to `HEAD`)
+/// - `codefloe.com/pat-s/mypkg` (no ref → `git_ref = None`)
 /// - `git.local:3000/u/r` (port allowed)
 ///
 /// Rejects:
 /// - hosts containing a scheme (`https://...`)
 /// - empty host, owner, or repo segments
-/// - anything with more than three path segments
-pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)> {
+/// - anything other than exactly three path segments
+/// - host chars outside `[alnum].-:` or owner/repo chars outside `[alnum].-_`
+pub fn parse_forgejo_parts(spec: &str) -> Option<ForgejoSpec> {
     let body = spec.strip_prefix("forgejo::").unwrap_or(spec);
 
-    let (path_part, git_ref) = if let Some(at_pos) = body.rfind('@') {
-        (&body[..at_pos], body[at_pos + 1..].to_string())
-    } else {
-        (body, "HEAD".to_string())
+    let (path_part, git_ref) = match body.rfind('@') {
+        Some(at) => {
+            let r = &body[at + 1..];
+            let git_ref = if r.is_empty() {
+                None
+            } else {
+                Some(r.to_string())
+            };
+            (&body[..at], git_ref)
+        }
+        None => (body, None),
     };
 
     if path_part.contains("://") {
@@ -43,20 +64,39 @@ pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)
     if host.is_empty() || owner.is_empty() || repo.is_empty() {
         return None;
     }
-    // Host shape: letters, digits, dot, hyphen, optional :port. Anything
-    // else is a user error worth catching before we make a request.
+    // Host shape: letters, digits, dot, hyphen, optional :port. Owner/repo
+    // shape: letters, digits, dot, hyphen, underscore. Anything else is a
+    // user error worth catching before we make a request.
     let host_ok = host
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':');
-    if !host_ok {
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    let seg_ok = |s: &str| {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    };
+    if !host_ok || !seg_ok(owner) || !seg_ok(repo) {
         return None;
     }
 
-    Some((
-        host.to_string(),
-        owner.to_string(),
-        repo.to_string(),
+    Some(ForgejoSpec {
+        host: host.to_string(),
+        owner: owner.to_string(),
+        repo: repo.to_string(),
         git_ref,
+    })
+}
+
+/// Parse `"forgejo::host/owner/repo[@ref]"` into `(host, owner, repo, ref)`,
+/// defaulting a missing ref to `"HEAD"`. Thin wrapper over
+/// [`parse_forgejo_parts`] for the registry resolver / BFS, which want a
+/// concrete ref to query.
+pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)> {
+    let p = parse_forgejo_parts(spec)?;
+    Some((
+        p.host,
+        p.owner,
+        p.repo,
+        p.git_ref.unwrap_or_else(|| "HEAD".to_string()),
     ))
 }
 
@@ -327,6 +367,35 @@ mod tests {
         assert!(parse_forgejo_spec("forgejo:://u/r").is_none());
         assert!(parse_forgejo_spec("forgejo::codefloe.com//r").is_none());
         assert!(parse_forgejo_spec("forgejo::codefloe.com/u/").is_none());
+    }
+
+    #[test]
+    fn parts_ref_is_none_when_absent_head_when_via_spec() {
+        // The shared core keeps "no ref" as None; the spec wrapper defaults it
+        // to HEAD for the resolver. This is the distinction add/manifest rely on.
+        let p = parse_forgejo_parts("forgejo::codefloe.com/pat-s/mypkg").unwrap();
+        assert_eq!(p.git_ref, None);
+        assert_eq!(p.repo, "mypkg");
+        assert_eq!(
+            parse_forgejo_spec("forgejo::codefloe.com/pat-s/mypkg")
+                .unwrap()
+                .3,
+            "HEAD"
+        );
+
+        let p = parse_forgejo_parts("forgejo::codefloe.com/pat-s/mypkg@v1.0").unwrap();
+        assert_eq!(p.git_ref.as_deref(), Some("v1.0"));
+    }
+
+    #[test]
+    fn parts_validates_owner_and_repo_chars() {
+        // Unified host + owner + repo validation (#108): a segment with shell
+        // metacharacters is rejected, not silently accepted as it was by the
+        // pre-consolidation parsers that skipped owner/repo checks.
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/pat-s/my;rm -rf").is_none());
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/own$er/mypkg").is_none());
+        // Underscores, dots, hyphens in owner/repo stay valid.
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/pat-s/my_pkg.v2").is_some());
     }
 
     // All token lookup tests are combined into a single test to avoid races
