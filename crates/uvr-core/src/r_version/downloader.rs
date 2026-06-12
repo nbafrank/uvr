@@ -710,21 +710,21 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
 
     // Step 8: fix libR.dylib's embedded install-name so packages compiled against
     // it can find the library at its new location without needing DYLD_LIBRARY_PATH.
-    fix_libr_install_name(dest);
+    fix_libr_install_name(dest)?;
 
     // Step 9(a): patch ALL sibling dylibs (libRlapack, libRblas, libgfortran, …)
     // so they reference each other via managed-R paths rather than the original
     // CRAN framework paths.  Without this, symbols like `_dgebal_` (LAPACK) that
     // live in libRlapack/libRblas are invisible to R and packages like Matrix fail
     // to load with "Symbol not found: _dgebal_".
-    patch_r_dylibs(dest);
+    patch_r_dylibs(dest)?;
 
     // Step 9(a.5): patch bin/exec/R (and siblings). R 4.6+ ships these with
     // hardened-runtime signatures pointing at the framework path; without
     // rewriting those load commands and re-signing ad-hoc, dyld can't find
     // libR.dylib and the process is SIGKILLed at startup. (Pre-4.6 used
     // ad-hoc signing so DYLD_LIBRARY_PATH was enough — 4.6 changed that.)
-    patch_r_executables(dest);
+    patch_r_executables(dest)?;
 
     // Step 9(b): write etc/Renviron.site so that DYLD_LIBRARY_PATH is set for every
     // R process this installation spawns — including the fresh `R --slave` sessions
@@ -848,10 +848,10 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
 /// signature afterwards. The ad-hoc re-sign also strips the original hardened
 /// runtime flag (set by CRAN's Developer ID signing on R 4.6+) — without that
 /// strip, macOS would refuse to load the dylib through DYLD_LIBRARY_PATH.
-fn fix_libr_install_name(dest: &Path) {
+fn fix_libr_install_name(dest: &Path) -> Result<()> {
     let libr = dest.join("lib").join("libR.dylib");
     if !libr.exists() {
-        return;
+        return Ok(());
     }
     let new_id = libr.to_string_lossy().to_string();
     let _ = Command::new("install_name_tool")
@@ -860,7 +860,7 @@ fn fix_libr_install_name(dest: &Path) {
     // Always re-sign — even if install_name_tool was a no-op, the original
     // CRAN signature has the hardened runtime flag set on R 4.6+, which makes
     // DYLD_LIBRARY_PATH ineffective for the executables that load this dylib.
-    resign_adhoc(&libr);
+    resign_adhoc(&libr)
 }
 
 /// Patch executable Mach-O binaries under `<r_home>/bin/exec/` so they load
@@ -875,28 +875,29 @@ fn fix_libr_install_name(dest: &Path) {
 ///
 /// Fix: rewrite the load command to point at our `lib/libR.dylib`, then re-sign
 /// ad-hoc (which also clears the hardened-runtime flag).
-pub fn patch_r_executables(r_home: &Path) {
+pub fn patch_r_executables(r_home: &Path) -> Result<()> {
     let exec_dir = r_home.join("bin").join("exec");
     if !exec_dir.exists() {
-        return;
+        return Ok(());
     }
     let lib_dir = r_home.join("lib");
     let Ok(entries) = std::fs::read_dir(&exec_dir) else {
-        return;
+        return Ok(());
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        rewrite_framework_loads(&path, &lib_dir);
+        rewrite_framework_loads(&path, &lib_dir)?;
     }
+    Ok(())
 }
 
 /// Rewrite every `/Library/Frameworks/R.framework/...` load command in `binary`
 /// to point at the corresponding file in `lib_dir` (matched by basename), then
 /// re-sign ad-hoc.
-fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
+fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) -> Result<()> {
     let path_str = binary.to_string_lossy().to_string();
     let deps_out = match Command::new("otool").args(["-L", &path_str]).output() {
         Ok(o) => o,
@@ -906,15 +907,15 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
                  Install Xcode Command Line Tools (`xcode-select --install`) so R 4.6+ installs work.",
                 binary.display()
             );
-            return;
+            return Ok(());
         }
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     if !deps_out.status.success() {
-        return;
+        return Ok(());
     }
     let Ok(deps) = String::from_utf8(deps_out.stdout) else {
-        return;
+        return Ok(());
     };
     for line in deps.lines().skip(1) {
         let dep = line.split_whitespace().next().unwrap_or("");
@@ -937,7 +938,7 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) {
     // hardened runtime that suppresses DYLD_LIBRARY_PATH and blocks library
     // validation against ad-hoc dylibs. An ad-hoc re-sign drops the runtime
     // flag so the existing `Renviron.site` workaround actually takes effect.
-    resign_adhoc(binary);
+    resign_adhoc(binary)
 }
 
 /// Entitlements plist embedded in every ad-hoc re-sign.
@@ -1037,7 +1038,7 @@ fn entitlements_path() -> Option<&'static Path> {
 /// rather than silently falling back to an entitlement-free resign: a
 /// silent fallback would produce an install that segfaults later (#99)
 /// instead of one that fails the install step visibly.
-fn resign_adhoc(path: &Path) {
+fn resign_adhoc(path: &Path) -> Result<()> {
     let path_str = path.to_string_lossy().to_string();
     if let Some(ent) = entitlements_path() {
         let ent_str = ent.to_string_lossy().to_string();
@@ -1052,47 +1053,51 @@ fn resign_adhoc(path: &Path) {
             ])
             .output()
         {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                tracing::error!(
-                    "codesign --entitlements failed for {} (exit {}). \
-                     stderr: {}. R install will be broken — abort and retry, \
-                     or report at https://github.com/nbafrank/uvr/issues with \
-                     this stderr.",
-                    path.display(),
-                    o.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::error!(
-                    "codesign not found — skipping ad-hoc re-sign of {}. \
-                     R 4.6+ binaries will SIGKILL at startup until codesign is on PATH.",
-                    path.display()
-                );
-            }
-            Err(e) => {
-                tracing::error!("codesign failed to spawn for {}: {e}", path.display());
-            }
-        }
-        return;
-    }
-    // entitlements_path() returned None — only reached when the plist write
-    // itself failed (already error!-logged). Best effort: plain ad-hoc
-    // resign so the binary is at least loadable on pre-Tahoe macOS.
-    match Command::new("codesign")
-        .args(["--force", "--sign", "-", &path_str])
-        .status()
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::error!(
-                "codesign not found — skipping ad-hoc re-sign of {}. \
-                 R 4.6+ binaries will SIGKILL at startup until codesign is on PATH.",
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(UvrError::Other(format!(
+                "codesign --entitlements failed for {} (exit {}): {}. \
+                 The R install would crash on first dyld load (#99); aborting. \
+                 Report at https://github.com/nbafrank/uvr/issues with this stderr.",
+                path.display(),
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(UvrError::Other(format!(
+                "codesign not found — cannot ad-hoc re-sign {}. R 4.6+ binaries \
+                 SIGKILL at startup without it; install Xcode Command Line Tools \
+                 (`xcode-select --install`) and retry.",
                 path.display()
-            );
+            ))),
+            Err(e) => Err(UvrError::Other(format!(
+                "codesign failed to spawn for {}: {e}",
+                path.display()
+            ))),
         }
-        Err(_) => {}
+    } else {
+        // entitlements_path() returned None — only reached when the plist write
+        // itself failed (already error!-logged). Best effort: plain ad-hoc
+        // resign so the binary is at least loadable on pre-Tahoe macOS.
+        match Command::new("codesign")
+            .args(["--force", "--sign", "-", &path_str])
+            .status()
+        {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(UvrError::Other(format!(
+                "codesign failed for {} (exit {}); aborting install.",
+                path.display(),
+                s.code().unwrap_or(-1)
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(UvrError::Other(format!(
+                "codesign not found — cannot ad-hoc re-sign {}. R 4.6+ binaries \
+                 SIGKILL at startup without it; install Xcode Command Line Tools \
+                 (`xcode-select --install`) and retry.",
+                path.display()
+            ))),
+            Err(e) => Err(UvrError::Other(format!(
+                "codesign failed to spawn for {}: {e}",
+                path.display()
+            ))),
+        }
     }
 }
 
@@ -1109,15 +1114,15 @@ fn resign_adhoc(path: &Path) {
 ///
 /// This function is idempotent: if all paths already point to the managed-R
 /// lib dir the `install_name_tool` calls succeed silently.
-pub fn patch_r_dylibs(r_home: &Path) {
+pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
     let lib_dir = r_home.join("lib");
     if !lib_dir.exists() {
-        return;
+        return Ok(());
     }
     let lib_str = lib_dir.to_string_lossy().to_string();
 
     let Ok(entries) = std::fs::read_dir(&lib_dir) else {
-        return;
+        return Ok(());
     };
 
     for entry in entries.flatten() {
@@ -1179,9 +1184,10 @@ pub fn patch_r_dylibs(r_home: &Path) {
         }
 
         if needs_resign {
-            resign_adhoc(&path);
+            resign_adhoc(&path)?;
         }
     }
+    Ok(())
 }
 
 /// Write `etc/Renviron.site` so every R process from this installation

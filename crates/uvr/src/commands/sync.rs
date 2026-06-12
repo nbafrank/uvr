@@ -558,11 +558,18 @@ pub async fn install_from_lockfile(
             .map(|d| r_home.starts_with(d))
             .unwrap_or(false)
         {
-            // macOS-specific: patch dylib install names and Renviron.site
+            // macOS-specific: patch dylib install names and Renviron.site.
+            // This is a defensive re-patch of an already-installed managed R
+            // (the authoritative patch + validation happened at install time),
+            // so a failure here warns rather than aborting the sync (#111).
             if cfg!(target_os = "macos") {
                 let _ = patch_renviron_site(r_home);
-                patch_r_dylibs(r_home);
-                patch_r_executables(r_home);
+                if let Err(e) = patch_r_dylibs(r_home) {
+                    tracing::warn!("re-patch of managed R dylibs failed: {e}");
+                }
+                if let Err(e) = patch_r_executables(r_home) {
+                    tracing::warn!("re-patch of managed R executables failed: {e}");
+                }
             }
             let libr_name = if cfg!(target_os = "macos") {
                 "libR.dylib"
