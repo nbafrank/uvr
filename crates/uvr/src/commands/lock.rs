@@ -321,9 +321,11 @@ async fn resolve_git_deps(
         // whose winner would otherwise depend on BFS arrival order — surface it
         // as an explicit error naming both candidates rather than guessing (#107).
         if let Some(existing) = pre_resolved.get(&info.name) {
-            let same = existing.version == info.version
-                && existing.checksum == info.checksum
-                && existing.url == info.url;
+            // checksum is the authoritative content identity for a git dep
+            // (`git:<sha>`); the url embeds the same sha, so comparing it too is
+            // redundant. Two specs at the same Version but different commits
+            // have different checksums and are a genuine conflict, not a diamond.
+            let same = existing.version == info.version && existing.checksum == info.checksum;
             if !same {
                 let prev_spec = resolved_from
                     .get(&info.name)

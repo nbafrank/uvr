@@ -178,8 +178,11 @@ fn parse_forgejo_remote(url: &str) -> Option<(String, String, String, String)> {
     let sha = last.strip_suffix(".tar.gz").unwrap_or(&last).to_string();
     // Host is the path segment immediately before `api` — derive it from
     // api_idx so it stays coupled if the URL prefix ever changes (#106).
-    let host = parts.get(api_idx.checked_sub(1)?).copied()?.to_string();
-    Some((host, owner, repo, sha))
+    let host = parts.get(api_idx.checked_sub(1)?).copied()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), owner, repo, sha))
 }
 
 #[derive(Serialize)]

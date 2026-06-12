@@ -98,10 +98,18 @@ jobs:
         run: |
           $exe = "./target/${{ matrix.target }}/release/uvr.exe"
           $bytes = [System.IO.File]::ReadAllBytes($exe)
-          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-          if ($text -match '<dependency' -or $text -match 'Microsoft\.Windows\.Common-Controls') {
-            Write-Error "Embedded manifest declares an SxS <dependency> — regression of #74/#104. build.rs must strip it (remove_dependency)."
-            exit 1
+          # Decode both ASCII and UTF-16LE: PE RT_MANIFEST resources are UTF-8
+          # for this toolchain, but check the Unicode view too so a future
+          # encoding change can't hide the dependency from the scan.
+          $views = @(
+            [System.Text.Encoding]::ASCII.GetString($bytes),
+            [System.Text.Encoding]::Unicode.GetString($bytes)
+          )
+          foreach ($text in $views) {
+            if ($text -match '<dependency' -or $text -match 'Microsoft\.Windows\.Common-Controls') {
+              Write-Error "Embedded manifest declares an SxS <dependency> — regression of #74/#104. build.rs must strip it (remove_dependency)."
+              exit 1
+            }
           }
           Write-Host "OK: embedded manifest declares no SxS <dependency>."
 
