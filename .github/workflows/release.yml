@@ -84,6 +84,27 @@ jobs:
           ./target/${{ matrix.target }}/release/uvr.exe --version
           ./target/${{ matrix.target }}/release/uvr.exe --help | Out-Null
 
+      # Guard the embedded Win32 manifest: v0.3.4 shipped a broken binary
+      # because new_manifest("uvr") silently embedded a SxS <dependency> on
+      # Microsoft.Windows.Common-Controls, which makes Windows refuse the
+      # exe with ERROR_BAD_EXE_FORMAT on machines where SxS activation fails
+      # (#74). build.rs strips it; this asserts no future change re-adds one
+      # before the binary is uploaded and tagged (#104). Scans the exe bytes
+      # for the manifest's <dependency> element and the specific assembly
+      # name — either appearing means the SxS dep is back.
+      - name: Assert no SxS <dependency> in embedded manifest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "./target/${{ matrix.target }}/release/uvr.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -match '<dependency' -or $text -match 'Microsoft\.Windows\.Common-Controls') {
+            Write-Error "Embedded manifest declares an SxS <dependency> — regression of #74/#104. build.rs must strip it (remove_dependency)."
+            exit 1
+          }
+          Write-Host "OK: embedded manifest declares no SxS <dependency>."
+
       - name: Smoke test (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
