@@ -843,6 +843,47 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
 /// Update the embedded install-name of `libR.dylib` to its actual path so that
 /// packages compiled against it can find it at runtime without DYLD_LIBRARY_PATH.
 ///
+/// Run `install_name_tool` with `args`, returning whether it succeeded.
+///
+/// install_name_tool failures used to be discarded with `let _ = …`. Now that
+/// a codesign failure aborts the install (#111), a silently-failed install-name
+/// rewrite would otherwise produce a binary that *passes* the resign but still
+/// points at the nonexistent CRAN framework path — a broken install that looks
+/// successful. We surface the failure as a warning (not a hard error): the tool
+/// being absent is tolerated like otool (Xcode CLT optional), and a non-zero
+/// exit shouldn't fail an install that may not need the rewrite (#112).
+fn run_install_name_tool(args: &[&str], target: &Path) -> bool {
+    match Command::new("install_name_tool").args(args).output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            tracing::warn!(
+                "install_name_tool failed for {} (exit {}): {}. The install may \
+                 still reference the original CRAN framework path and fail to \
+                 load packages.",
+                target.display(),
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                "install_name_tool not found — skipping install-name patch for {}. \
+                 Install Xcode Command Line Tools (`xcode-select --install`) so R 4.6+ installs work.",
+                target.display()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                "install_name_tool failed to spawn for {}: {e}",
+                target.display()
+            );
+            false
+        }
+    }
+}
+
 /// IMPORTANT: `install_name_tool` invalidates the Mach-O code signature.
 /// On Apple Silicon every dylib must be signed; we always re-apply an ad-hoc
 /// signature afterwards. The ad-hoc re-sign also strips the original hardened
@@ -854,9 +895,7 @@ fn fix_libr_install_name(dest: &Path) -> Result<()> {
         return Ok(());
     }
     let new_id = libr.to_string_lossy().to_string();
-    let _ = Command::new("install_name_tool")
-        .args(["-id", &new_id, &new_id])
-        .status();
+    run_install_name_tool(&["-id", &new_id, &new_id], &libr);
     // Always re-sign — even if install_name_tool was a no-op, the original
     // CRAN signature has the hardened runtime flag set on R 4.6+, which makes
     // DYLD_LIBRARY_PATH ineffective for the executables that load this dylib.
@@ -912,6 +951,15 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) -> Result<()> {
         Err(_) => return Ok(()),
     };
     if !deps_out.status.success() {
+        // otool ran but couldn't read the binary. Don't resign a file we
+        // couldn't analyze (codesign would now hard-error on a non-Mach-O,
+        // #111) — but surface it instead of skipping silently (#112).
+        tracing::warn!(
+            "otool -L failed for {} (exit {}): {}. Skipping load-command patch + resign.",
+            binary.display(),
+            deps_out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&deps_out.stderr).trim()
+        );
         return Ok(());
     }
     let Ok(deps) = String::from_utf8(deps_out.stdout) else {
@@ -930,9 +978,7 @@ fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) -> Result<()> {
             continue;
         }
         let new_dep_str = new_dep.to_string_lossy().to_string();
-        let _ = Command::new("install_name_tool")
-            .args(["-change", dep, &new_dep_str, &path_str])
-            .status();
+        run_install_name_tool(&["-change", dep, &new_dep_str, &path_str], binary);
     }
     // Always re-sign — even when no load commands changed, R 4.6+ ships with
     // hardened runtime that suppresses DYLD_LIBRARY_PATH and blocks library
@@ -1125,6 +1171,12 @@ pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
         return Ok(());
     };
 
+    // Collect resign failures across all dylibs rather than aborting on the
+    // first (#114). A codesign failure is usually systemic, but reporting every
+    // affected dylib gives complete diagnostics, and attempting them all means
+    // the install state isn't left half-patched on the first error.
+    let mut resign_errors: Vec<String> = Vec::new();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("dylib") {
@@ -1146,9 +1198,7 @@ pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
 
         let mut needs_resign = false;
         if old_id.contains("/Library/Frameworks/R.framework/") {
-            let _ = Command::new("install_name_tool")
-                .args(["-id", &path_str, &path_str])
-                .status();
+            run_install_name_tool(&["-id", &path_str, &path_str], &path);
             needs_resign = true;
         }
 
@@ -1173,19 +1223,26 @@ pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
                 continue;
             }
             let new_dep = format!("{lib_str}/{filename}");
-            if Command::new("install_name_tool")
-                .args(["-change", dep, &new_dep, &path_str])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-            {
+            if run_install_name_tool(&["-change", dep, &new_dep, &path_str], &path) {
                 needs_resign = true;
             }
         }
 
         if needs_resign {
-            resign_adhoc(&path)?;
+            if let Err(e) = resign_adhoc(&path) {
+                resign_errors.push(format!("{}: {e}", path.display()));
+            }
         }
+    }
+
+    if !resign_errors.is_empty() {
+        return Err(UvrError::Other(format!(
+            "Failed to ad-hoc re-sign {} dylib(s) under {} — install would crash \
+             on first dyld load (#99):\n  {}",
+            resign_errors.len(),
+            lib_dir.display(),
+            resign_errors.join("\n  ")
+        )));
     }
     Ok(())
 }
