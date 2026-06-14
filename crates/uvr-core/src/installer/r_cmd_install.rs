@@ -54,14 +54,19 @@ pub fn cleanup_lock_dir(library: &Path, package_name: &str) {
     }
 }
 
-/// Send a TERM-equivalent signal to a child process by PID. On Unix uses
-/// SIGTERM (graceful), on Windows uses TerminateProcess (immediate). Best-effort.
+/// Gracefully terminate an install child and its descendants. On Unix the
+/// streaming child is its own process-group leader (see `build_cmd`), so we
+/// SIGTERM the whole group (`-pid`) — this reaches the `make`/`cc`/`Rscript`
+/// grandchildren that inherit the stdout pipe. Killing only the direct PID
+/// would leave them holding the pipe open, deadlocking the drain (#52/#113).
+/// On Windows `taskkill /T` already covers the tree. Best-effort.
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
-        // SIGTERM is graceful; the process gets a chance to clean up. If it
-        // ignores TERM, the timeout watchdog can be hardened later with SIGKILL.
-        libc::kill(pid as i32, libc::SIGTERM);
+        // Negative pid → the process group whose leader is `pid`. SIGTERM is
+        // graceful; the watchdog escalates to SIGKILL (`hard_kill_group`) if
+        // the build ignores TERM.
+        libc::kill(-(pid as i32), libc::SIGTERM);
     }
     #[cfg(windows)]
     {
@@ -78,6 +83,16 @@ fn kill_pid(pid: u32) {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid; // suppress unused warning on exotic targets
+    }
+}
+
+/// SIGKILL the install child's process group. Unix-only escalation for a
+/// build that ignored the SIGTERM from `kill_pid`. No-op elsewhere (Windows
+/// `taskkill /F` already force-kills the tree in `kill_pid`).
+#[cfg(unix)]
+fn hard_kill_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
@@ -195,6 +210,24 @@ impl RCmdInstall {
                 if !completed.load(Ordering::SeqCst) {
                     timed_out.store(true, Ordering::SeqCst);
                     kill_pid(pid);
+                    // Escalate to SIGKILL on the group if a TERM-ignoring build
+                    // (or a wedged grandchild) hasn't exited within the grace
+                    // period. `completed` flips once child.wait() returns on the
+                    // install thread, so we only hard-kill if TERM didn't work.
+                    #[cfg(unix)]
+                    {
+                        let grace = Duration::from_secs(2);
+                        let start = Instant::now();
+                        while start.elapsed() < grace {
+                            if completed.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        if !completed.load(Ordering::SeqCst) {
+                            hard_kill_group(pid);
+                        }
+                    }
                 }
             })
         };
@@ -285,6 +318,18 @@ impl RCmdInstall {
             "--no-staged-install",
             &tarball_str,
         ]);
+
+        // Put the child in its own process group so the timeout watchdog can
+        // signal the whole build subtree (R + make + cc + Rscript) at once via
+        // `kill(-pid)`. Without this, killing only R leaves its grandchildren
+        // holding the stdout pipe open and the drain deadlocks (#113). uvr's
+        // own SIGINT handler kills the registered group deliberately, so
+        // detaching from the terminal's foreground group is intended.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
 
         // Neutralize the project / user .Rprofile during install. Project
         // .Rprofiles often contain `source("renv/activate.R")` (renv pattern)
@@ -480,5 +525,53 @@ mod tests {
             |_| {},
         );
         assert!(result.is_ok(), "deadlocked or failed: {result:?}");
+    }
+
+    /// Regression for #113: on timeout, a build's grandchildren (make/cc/Rscript)
+    /// that inherited the stdout pipe must also be killed, or the stdout drain
+    /// thread blocks forever on a pipe nobody closes. The fix makes the child a
+    /// process-group leader and signals the whole group (`kill(-pid)`). This
+    /// fake `R` backgrounds a long-lived grandchild that holds stdout open and
+    /// then hangs; a single-PID kill would orphan the grandchild and the call
+    /// would never return. With the group kill it returns a timeout error
+    /// promptly. The test *returning at all* is the assertion.
+    #[cfg(unix)]
+    #[test]
+    fn streaming_timeout_kills_grandchildren_holding_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fake_r = tmp.path().join("R");
+        // `sleep 60 &` is a grandchild that inherits stdout and outlives a kill
+        // aimed only at the direct child; the parent then blocks on its own
+        // sleep. Both share the child's process group, so a group SIGTERM reaps
+        // them together.
+        std::fs::write(
+            &fake_r,
+            "#!/bin/sh\n\
+             sleep 60 &\n\
+             echo 'building fake 1.0'\n\
+             sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_r, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let tarball = tmp.path().join("fake_1.0.tar.gz");
+        std::fs::write(&tarball, b"not a real tarball").unwrap();
+
+        let installer = RCmdInstall::new(fake_r.to_string_lossy().to_string());
+        let result = installer.install_streaming(
+            &tarball,
+            &lib,
+            "fake",
+            Some(Duration::from_secs(2)),
+            |_| {},
+        );
+        // Must return (not hang) with a timeout error.
+        assert!(result.is_err(), "expected timeout error, got {result:?}");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("timed out"), "unexpected error: {msg}");
     }
 }

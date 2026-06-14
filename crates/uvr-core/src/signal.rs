@@ -63,7 +63,10 @@ pub fn kill_and_cleanup_all() {
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        // Streaming install children are their own process-group leaders (see
+        // r_cmd_install::build_cmd), so signal the whole group (`-pid`) to also
+        // reap the make/cc grandchildren on Ctrl+C, matching the watchdog (#113).
+        libc::kill(-(pid as i32), libc::SIGTERM);
     }
     #[cfg(windows)]
     {
