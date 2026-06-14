@@ -156,6 +156,15 @@ pub struct AddArgs {
     /// there's no fresh lockfile to install from.) (#76)
     #[arg(long)]
     pub no_install: bool,
+
+    /// When missing system libraries are detected, run the platform's
+    /// package manager (`apk add` / `apt-get install` / `dnf install`)
+    /// to install them automatically (#30). Also enabled by setting
+    /// `UVR_INSTALL_SYSREQS=1`. Without this flag, uvr only prints a
+    /// hint with the install command. Interactive sessions are
+    /// prompted for confirmation; non-TTY runs (CI) proceed without.
+    #[arg(long)]
+    pub install_system_deps: bool,
 }
 
 // ────────────────────────────────────────────────────────────

@@ -85,6 +85,13 @@ async fn run() -> Result<()> {
         }
         Commands::Add(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;
+            // #30: mirror the Sync handler — --install-system-deps and
+            // UVR_INSTALL_SYSREQS=1 are equivalent. add::run installs via
+            // install_from_lockfile, which reads the env var to decide
+            // whether to auto-run the system package manager.
+            if args.install_system_deps {
+                std::env::set_var("UVR_INSTALL_SYSREQS", "1");
+            }
             commands::add::run(
                 args.packages,
                 args.dev,
