@@ -11,13 +11,27 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # One matrix entry per portable-r target with a GitHub-hosted runner:
+  # manylinux (glibc) x86_64 + arm64, macOS arm64, Windows x86_64.
+  # musllinux is covered by the `test-musl` job below (no native musl runner).
+  # macOS x86_64 is omitted: the free macos-13 Intel runner is no longer
+  # reliably allocatable (jobs hang awaiting a runner). The portable macOS
+  # x86_64 build is still published; it's just not exercised in CI.
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - target: manylinux-x86_64
+            os: ubuntu-latest
+          - target: manylinux-arm64
+            os: ubuntu-24.04-arm
+          - target: macos-arm64
+            os: macos-latest
+          - target: windows-x86_64
+            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +48,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -51,12 +65,37 @@ jobs:
 
       # End-to-end check of the portable-build download + extract path against
       # the live CDN. `r install` downloads, extracts, and validates `R --version`
-      # internally, so a clean exit means the portable build runs on this OS.
+      # internally, so a clean exit means the portable build runs on this OS/arch.
       - name: Smoke test R install
         shell: bash
         run: |
           cargo run --quiet -- r install 4.4.2
-          cargo run --quiet -- r list --all | head
+          cargo run --quiet -- r list --all
+
+  # musllinux portable build: no GitHub-hosted musl runner exists. Check out on
+  # the glibc host (node-based actions don't run on pure Alpine) and build + smoke
+  # inside an Alpine container via `docker run`. Covers musllinux_1_2 on x86_64
+  # (arm64 musl is not exercised — no free arm64 musl runner).
+  test-musl:
+    name: Test (musllinux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + smoke test in Alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work alpine:3.21 sh -c '
+            set -e
+            # build-base/rustup compile uvr; ca-certificates + fontconfig + ttf-dejavu
+            # are the runtime deps the portable musl R expects on the host.
+            apk add --no-cache build-base musl-dev rustup \
+              ca-certificates fontconfig ttf-dejavu
+            rustup-init -y --default-toolchain stable --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --all
+            cargo run --quiet -- r install 4.4.2
+            cargo run --quiet -- r list --all | head
+          '
 
   audit:
     name: Security audit
