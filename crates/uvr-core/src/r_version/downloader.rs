@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 use tracing::info;
 
@@ -54,118 +53,125 @@ impl Platform {
         matches!(self, Platform::MacOsArm64 | Platform::MacOsX86_64)
     }
 
-    /// Return the download URL for a given R version.
+    /// Return the download URL for the portable R build of `version`.
+    ///
+    /// Every platform pulls a relocatable build from the rstudio/r-builds CDN
+    /// (`cdn.posit.co/r`). These extract-and-run archives need no post-install
+    /// path patching or code-signing — R locates its own `R_HOME` at runtime,
+    /// and the macOS builds ship pre-signed and notarized.
     pub fn download_url(&self, version: &str) -> String {
         match self {
-            Platform::MacOsArm64 => format!(
-                "https://cran.r-project.org/bin/macosx/{}/base/R-{version}-arm64.pkg",
-                macos_arm64_dir()
-            ),
-            Platform::MacOsX86_64 => format!(
-                "https://cran.r-project.org/bin/macosx/{}/base/R-{version}-x86_64.pkg",
-                macos_x86_64_dir()
-            ),
-            Platform::LinuxX86_64 => {
-                let distro = detect_posit_distro_slug();
-                format!("https://cdn.posit.co/r/{distro}/pkgs/r-{version}_1_amd64.deb")
+            Platform::MacOsArm64 => {
+                format!("{PORTABLE_CDN}/macos/R-{version}-macos-arm64.tar.gz")
             }
-            Platform::LinuxArm64 => {
-                let distro = detect_posit_distro_slug();
-                format!("https://cdn.posit.co/r/{distro}/pkgs/r-{version}_1_arm64.deb")
+            Platform::MacOsX86_64 => {
+                format!("{PORTABLE_CDN}/macos/R-{version}-macos.tar.gz")
+            }
+            Platform::LinuxX86_64 | Platform::LinuxArm64 => {
+                let id = linux_portable_id();
+                let arch = if matches!(self, Platform::LinuxArm64) {
+                    "-arm64"
+                } else {
+                    ""
+                };
+                format!("{PORTABLE_CDN}/{id}/R-{version}-{id}{arch}.tar.gz")
             }
             Platform::WindowsX86_64 => {
-                format!("https://cran.r-project.org/bin/windows/base/R-{version}-win.exe")
+                format!("{PORTABLE_CDN}/windows/R-{version}-windows.zip")
             }
         }
     }
+}
 
-    /// Fallback URL when the primary 4xx's.
-    ///
-    /// - Windows: older R releases live at `/base/old/<version>/` (CRAN moves them out of `/base/`).
-    /// - macOS Sonoma+: CRAN also publishes a `big-sur-arm64/` (resp. `big-sur-x86_64/`) dir
-    ///   that holds older R versions not yet rebuilt for Sonoma. We try that as a fallback.
-    /// - macOS pre-Sonoma: no fallback to `sonoma-*` because those binaries require macOS 14+
-    ///   and won't run.
-    /// - Linux uses the Posit CDN which hosts all versions at the same path.
-    pub fn download_url_fallback(&self, version: &str) -> Option<String> {
-        match self {
-            Platform::WindowsX86_64 => Some(format!(
-                "https://cran.r-project.org/bin/windows/base/old/{version}/R-{version}-win.exe"
-            )),
-            Platform::MacOsArm64 if macos_major_version() >= 14 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-{version}-arm64.pkg"
-            )),
-            Platform::MacOsX86_64 if macos_major_version() >= 14 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-{version}-x86_64.pkg"
-            )),
-            Platform::MacOsArm64
-            | Platform::MacOsX86_64
-            | Platform::LinuxX86_64
-            | Platform::LinuxArm64 => None,
-        }
+/// Root of the rstudio/r-builds portable R CDN.
+const PORTABLE_CDN: &str = "https://cdn.posit.co/r";
+
+/// Unified version index for the portable builds.
+const VERSIONS_JSON_URL: &str = "https://cdn.posit.co/r/versions.json";
+
+/// macOS portable builds start at R 4.1.0 (earlier versions 404 on the CDN).
+const MACOS_MIN_R_VERSION: (u32, u32, u32) = (4, 1, 0);
+
+/// manylinux_2_34 portable builds require glibc >= 2.34.
+const MANYLINUX_GLIBC_MIN: (u32, u32) = (2, 34);
+
+/// Portable build platform identifier for the running Linux libc:
+/// `musllinux_1_2` on musl (Alpine), `manylinux_2_34` on glibc.
+fn linux_portable_id() -> &'static str {
+    if linux_is_musl() {
+        "musllinux_1_2"
+    } else {
+        "manylinux_2_34"
     }
+}
 
-    /// Where to find the directory listing for available R versions.
-    /// Used to build a helpful error message when a requested version 404s.
-    pub fn directory_listing_url(&self) -> Option<String> {
-        match self {
-            Platform::MacOsArm64 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/{}/base/",
-                macos_arm64_dir()
-            )),
-            Platform::MacOsX86_64 => Some(format!(
-                "https://cran.r-project.org/bin/macosx/{}/base/",
-                macos_x86_64_dir()
-            )),
-            Platform::WindowsX86_64 => {
-                Some("https://cran.r-project.org/bin/windows/base/".to_string())
+/// True when the host uses musl libc — detected from `/etc/os-release`
+/// (`ID=alpine`) or the presence of a musl dynamic loader under `/lib`.
+fn linux_is_musl() -> bool {
+    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("ID=") {
+                if val.trim_matches('"').eq_ignore_ascii_case("alpine") {
+                    return true;
+                }
             }
-            // Posit CDN doesn't expose a directory listing.
-            Platform::LinuxX86_64 | Platform::LinuxArm64 => None,
         }
     }
+    std::fs::read_dir("/lib")
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
+        })
+        .unwrap_or(false)
 }
 
-/// Detect macOS major version (Sonoma=14, Ventura=13, Big Sur=11). Cached.
-/// Returns 0 on non-macOS platforms; falls back to 11 if `sw_vers` fails on macOS.
-#[cfg(target_os = "macos")]
-fn macos_major_version() -> u32 {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<u32> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().split('.').next()?.parse::<u32>().ok())
-            .unwrap_or(11)
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_major_version() -> u32 {
-    0
-}
-
-/// CRAN subdir for arm64 binaries on the running macOS.
-/// Sonoma (14) and later: `sonoma-arm64`. Earlier: `big-sur-arm64`.
-fn macos_arm64_dir() -> &'static str {
-    if macos_major_version() >= 14 {
-        "sonoma-arm64"
-    } else {
-        "big-sur-arm64"
+/// Parse the host glibc version from `getconf GNU_LIBC_VERSION` (e.g. "glibc 2.39").
+/// Returns `None` when `getconf` is absent or unparseable (treated as "unknown",
+/// so the floor check is skipped rather than failing a possibly-fine host).
+fn detect_glibc_version() -> Option<(u32, u32)> {
+    let out = Command::new("getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let ver = s.split_whitespace().last()?;
+    let mut it = ver.split('.');
+    let maj = it.next()?.parse().ok()?;
+    let min = it.next().unwrap_or("0").parse().ok()?;
+    Some((maj, min))
 }
 
-/// CRAN subdir for x86_64 binaries on the running macOS.
-/// Sonoma (14) and later: `sonoma-x86_64`. Earlier: `big-sur-x86_64`.
-fn macos_x86_64_dir() -> &'static str {
-    if macos_major_version() >= 14 {
-        "sonoma-x86_64"
-    } else {
-        "big-sur-x86_64"
+/// Ensure the host libc is new enough for the portable Linux builds. No-op on
+/// musl and on non-Linux hosts. Returns a clear error on glibc < 2.34, the
+/// floor for the manylinux_2_34 builds (excludes Ubuntu 20.04, RHEL 8, Debian 11).
+fn ensure_linux_libc_supported() -> Result<()> {
+    if !cfg!(target_os = "linux") || linux_is_musl() {
+        return Ok(());
     }
+    if let Some((maj, min)) = detect_glibc_version() {
+        if (maj, min) < MANYLINUX_GLIBC_MIN {
+            let (rmaj, rmin) = MANYLINUX_GLIBC_MIN;
+            return Err(UvrError::UnsupportedPlatform(format!(
+                "glibc {maj}.{min} is too old for portable R builds (need >= {rmaj}.{rmin}). \
+                 Distros below this floor — Ubuntu 20.04, RHEL 8, Debian 11 — are not supported \
+                 by uvr's R installer. Use your system package manager's R, or build R from source."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse an `X.Y.Z` R version into a comparable tuple. Extra components and
+/// non-numeric tails are ignored. Returns `None` if the first component isn't numeric.
+fn parse_r_version(version: &str) -> Option<(u32, u32, u32)> {
+    let mut it = version.split('.');
+    let maj = it.next()?.parse().ok()?;
+    let min = it.next().unwrap_or("0").parse().ok()?;
+    let patch = it.next().unwrap_or("0").parse().ok()?;
+    Some((maj, min, patch))
 }
 
 /// Process-wide override for the Posit CDN distro slug. Set by
@@ -453,36 +459,29 @@ pub async fn download_and_install_r(
         })?;
     }
 
+    // Preflight: portable manylinux builds need glibc >= 2.34.
+    ensure_linux_libc_supported()?;
+
+    // Preflight: macOS portable builds start at R 4.1.0 — fail with a clear
+    // message rather than a bare 403 from the CDN.
+    if platform.is_macos() {
+        if let Some(v) = parse_r_version(version) {
+            if v < MACOS_MIN_R_VERSION {
+                let (mj, mn, p) = MACOS_MIN_R_VERSION;
+                return Err(UvrError::Other(format!(
+                    "macOS portable R builds start at {mj}.{mn}.{p}; R {version} is not available. \
+                     Install {mj}.{mn}.{p} or newer."
+                )));
+            }
+        }
+    }
+
     let url = platform.download_url(version);
     info!("Downloading R {version} from {url}");
 
     let response = client.get(&url).send().await?;
     let bytes = if response.status().is_client_error() {
-        // Older R versions live at a different URL on some mirrors
-        // (e.g. Windows: /base/old/<ver>/).  Try fallback on any 4xx error,
-        // not just 404, because some mirrors redirect to an error page.
-        if let Some(fallback) = platform.download_url_fallback(version) {
-            info!(
-                "Primary URL returned {}, trying {fallback}",
-                response.status()
-            );
-            let fallback_resp = client.get(&fallback).send().await?;
-            if fallback_resp.status().is_success() {
-                fallback_resp.bytes().await?
-            } else {
-                return Err(version_not_found_error(
-                    client,
-                    version,
-                    platform,
-                    fallback_resp.status(),
-                )
-                .await);
-            }
-        } else {
-            return Err(
-                version_not_found_error(client, version, platform, response.status()).await,
-            );
-        }
+        return Err(version_not_found_error(client, version, platform, response.status()).await);
     } else {
         response.error_for_status()?.bytes().await?
     };
@@ -494,17 +493,7 @@ pub async fn download_and_install_r(
         ))
     })?;
 
-    match platform {
-        Platform::MacOsArm64 | Platform::MacOsX86_64 => {
-            install_r_macos(&bytes, version, &install_dir)?;
-        }
-        Platform::LinuxX86_64 | Platform::LinuxArm64 => {
-            install_r_linux(&bytes, version, &install_dir)?;
-        }
-        Platform::WindowsX86_64 => {
-            install_r_windows(&bytes, version, &install_dir)?;
-        }
-    }
+    install_r_portable(&bytes, &install_dir, platform)?;
 
     if !r_binary.exists() {
         return Err(UvrError::Other(format!(
@@ -517,33 +506,27 @@ pub async fn download_and_install_r(
     Ok(install_dir)
 }
 
-/// Build a helpful error when CRAN/Posit returns 4xx for a requested R version.
-/// Tries to list available versions from the platform's directory listing so
-/// users see "latest available is 4.5.3" instead of just "404 Not Found".
+/// Build a helpful error when the portable CDN returns 4xx for a requested R
+/// version. Best-effort: queries `versions.json` so users see "latest available
+/// is 4.5.3" instead of a bare "404 Not Found".
 async fn version_not_found_error(
     client: &reqwest::Client,
     version: &str,
     platform: Platform,
     status: reqwest::StatusCode,
 ) -> UvrError {
-    // Best-effort version enumeration. If the listing fetch fails or the
-    // platform has no listing endpoint, fall back to the generic message.
-    let mut available_hint = String::new();
-    if let Some(listing_url) = platform.directory_listing_url() {
-        if let Ok(resp) = client.get(&listing_url).send().await {
-            if let Ok(body) = resp.text().await {
-                let mut versions: Vec<String> = scan_versions_from_listing(&body);
-                versions.sort_by(|a, b| version_compare(a, b));
-                versions.dedup();
-                if let Some(latest) = versions.last() {
-                    available_hint = format!("\nLatest available for your platform: {latest} (from {listing_url}).\nTry `uvr r install {latest}`, or `uvr r list --all` to see every published version.");
-                }
-            }
+    let available_hint = match fetch_available_versions(client, platform).await {
+        Ok(versions) if !versions.is_empty() => {
+            let latest = versions.last().unwrap();
+            format!(
+                "\nLatest available for your platform: {latest}.\n\
+                 Try `uvr r install {latest}`, or `uvr r list --all` to see every published version."
+            )
         }
-    }
-    if available_hint.is_empty() {
-        available_hint = "\nCheck available versions with `uvr r list --all`. If R was just released, the upstream mirror may not have published the build for your platform yet — try again in a day.".to_string();
-    }
+        _ => "\nCheck available versions with `uvr r list --all`. If R was just released, the \
+              portable build for your platform may not be published yet — try again later."
+            .to_string(),
+    };
     UvrError::Other(format!(
         "R {version} is not published for your platform (HTTP {status}).{available_hint}"
     ))
@@ -571,849 +554,15 @@ fn is_real_r_version(s: &str) -> bool {
         .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Extract R version strings from CRAN's Windows `old/` directory HTML.
-///
-/// The listing has entries like `<a href="4.6.0">R 4.6.0</a>` (no trailing
-/// slash on the href). An earlier "split on the next `/`" scraper matched
-/// the `/` inside `</a>` and captured `4.6.0">R 4.6.0<` as the version,
-/// which `is_real_r_version` rejected — so `r_list(all = TRUE)` surfaced
-/// only the current release from the main page (uvr-r #9, second wave).
-///
-/// Anchored regex `href="<version>"?/?"` handles both formats (with or
-/// without trailing slash), and the digit-only group means parent-dir
-/// links (`href=".."`) are filtered without needing `is_real_r_version`'s
-/// secondary check — kept the second pass anyway as a belt-and-braces
-/// guard against future page-shape drift.
-fn extract_windows_old_versions(html: &str) -> Vec<String> {
-    use regex::Regex;
-    let re = Regex::new(r#"href="(\d+\.\d+\.\d+)/?""#).expect("CRAN windows old/ regex compiles");
-    re.captures_iter(html)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .filter(|v| is_real_r_version(v))
-        .collect()
-}
-
-/// Pull `R-X.Y.Z` version strings out of an HTML directory listing.
-fn scan_versions_from_listing(body: &str) -> Vec<String> {
-    use regex::Regex;
-    let re = Regex::new(r"R-(\d+\.\d+\.\d+)(?:[-_])").unwrap();
-    re.captures_iter(body)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .collect()
-}
-
-/// Numeric comparison of "X.Y.Z" version strings. Non-numeric components
-/// sort lexicographically as a fallback.
-fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse =
-        |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse::<u32>().ok()).collect() };
-    parse(a).cmp(&parse(b))
-}
-
-/// macOS: `.pkg` → xar → Payload (gzip+cpio) → extract
-fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
-    let tmp = tempfile::tempdir()?;
-    let pkg_path = tmp.path().join(format!("R-{version}.pkg"));
-    std::fs::write(&pkg_path, pkg_bytes)?;
-
-    // Step 1: pkgutil --expand R.pkg <expanded_dir>
-    let expanded_dir = tmp.path().join("expanded");
-    let out = Command::new("pkgutil")
-        .args([
-            "--expand",
-            &pkg_path.to_string_lossy(),
-            &expanded_dir.to_string_lossy(),
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(UvrError::Other(format!(
-            "pkgutil --expand failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-
-    // Step 2: find ALL Payload files (the pkg is a product archive with multiple
-    // component packages: R framework, texinfo, tcltk, GUI, …).
-    // We try each Payload until we find one that contains a usable R binary.
-    let payloads = find_all_payload_files(&expanded_dir)?;
-    if payloads.is_empty() {
-        return Err(UvrError::Other(
-            "No Payload files found in expanded pkg".into(),
-        ));
-    }
-
-    // Step 3 + 4: extract each Payload and look for bin/R.
-    // Payloads inside a CRAN .pkg are gzip-compressed cpio archives, not
-    // tarballs. Apple's bsdtar reads cpio transparently; GNU tar does NOT.
-    // Users with Homebrew gnu-tar first on PATH (`which tar` →
-    // …/gnubin/tar) would fail extraction on every Payload with a
-    // misleading "Could not find bin/R" error (#125). This function is
-    // macOS-only, and /usr/bin/tar is always Apple bsdtar there, so pin it.
-    let mut last_tar_err: Option<String> = None;
-    let resources = payloads
-        .iter()
-        .find_map(|payload| {
-            let stage_dir = tmp
-                .path()
-                .join(format!("stage-{}", payload.display().to_string().len()));
-            std::fs::create_dir_all(&stage_dir).ok()?;
-            match Command::new("/usr/bin/tar")
-                .args([
-                    "xf",
-                    &payload.to_string_lossy(),
-                    "-C",
-                    &stage_dir.to_string_lossy(),
-                ])
-                .output()
-            {
-                // Clear any error recorded from an earlier payload: once a
-                // later tar succeeds, a stale message would misattribute the
-                // final "Could not find bin/R" to the wrong component.
-                Ok(o) if o.status.success() => last_tar_err = None,
-                Ok(o) => {
-                    last_tar_err = Some(String::from_utf8_lossy(&o.stderr).trim().to_string());
-                    return None;
-                }
-                Err(e) => {
-                    last_tar_err = Some(e.to_string());
-                    return None;
-                }
-            }
-            find_dir_with_r_binary(&stage_dir, 0)
-        })
-        .ok_or_else(|| {
-            let extra = match &last_tar_err {
-                Some(err) if !err.is_empty() => format!(" (tar error: {err})"),
-                _ => String::new(),
-            };
-            UvrError::Other(format!(
-                "Could not find bin/R in any of {} Payload(s) in the pkg{extra}",
-                payloads.len()
-            ))
-        })?;
-    info!("Found R Resources at {}", resources.display());
-
-    // Step 5: copy Resources contents → dest.
-    // -P: preserve symlinks as-is (don't follow/dereference them).
-    //     fontconfig/fonts/conf.d contains symlinks pointing to system files that
-    //     aren't in the extracted pkg — -P copies the symlink itself, not the target.
-    std::fs::create_dir_all(dest)?;
-    let src = format!("{}/.", resources.to_string_lossy());
-    let out = Command::new("cp")
-        .args(["-rP", &src, &dest.to_string_lossy()])
-        .output()?;
-    if !out.status.success() {
-        return Err(UvrError::Other(format!(
-            "Failed to copy R Resources to {}: {}",
-            dest.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-
-    // Step 6: patch all text files that reference the original R_HOME.
-    // bin/R, etc/Makeconf, etc/ldpaths, etc/R, and others contain absolute
-    // paths hardcoded at build time. R 4.5 builds use the Versions-prefixed
-    // path everywhere (`/Library/Frameworks/R.framework/Versions/4.5-arm64/
-    // Resources`); R 4.6 uses TWO prefixes — Versions-prefixed for
-    // `R_HOME_DIR` and the bare `/Library/Frameworks/R.framework/Resources`
-    // (the framework's `Current` symlink target) for `R_SHARE_DIR`,
-    // `R_INCLUDE_DIR`, `R_DOC_DIR`. We patch both so that `R.home("share")`
-    // resolves to our managed install at runtime — without it, source-package
-    // installs on R 4.6 fail in `tools::makeLazyLoading` because
-    // `nspackloader.R` is looked up under the framework path that doesn't
-    // exist in our copy.
-    let original_r_home = extract_r_home_dir(dest)?;
-    let dest_str = dest.to_string_lossy();
-    info!("Patching R_HOME: {} → {}", original_r_home, dest_str);
-
-    // Iterate the set of known framework prefixes that CRAN bakes into bin/R
-    // and friends. R 4.5 and earlier use only `R_HOME_DIR`'s
-    // Versions-prefixed form everywhere; R 4.6 added the bare-Resources
-    // form for the SHARE/INCLUDE/DOC env vars (the framework's
-    // `Current`-symlink target). If a future CRAN build introduces a
-    // third prefix variant, append it to this slice — guard against a
-    // self-rewrite via the `dest_str` comparison.
-    let prefixes: &[&str] = &[
-        original_r_home.as_str(),
-        "/Library/Frameworks/R.framework/Resources",
-    ];
-    let mut seen = std::collections::HashSet::new();
-    for prefix in prefixes {
-        if !seen.insert(*prefix) || *prefix == dest_str.as_ref() {
-            continue;
-        }
-        patch_text_files(dest, prefix, &dest_str)?;
-    }
-
-    // Step 7: fix the LIBR line in etc/Makeconf.
-    // After the text substitution above, LIBR still contains the framework path
-    // (e.g. `-F/Library/Frameworks/R.framework/.. -framework R`) because it uses
-    // the framework ROOT, not the Resources subdirectory.
-    // Replace it with a plain `-L<dest>/lib -lR` that works from any location.
-    patch_makeconf_libr(dest)?;
-
-    // Step 7.5: redirect the CRAN build-toolchain prefix (/opt/R/<arch>) baked
-    // into Makeconf to Homebrew when that toolchain isn't installed, so source
-    // builds of packages linking external libs (e.g. flowCore → libssl) can find
-    // them instead of failing on the absent /opt/R/<arch>/lib.
-    patch_makeconf_toolchain_paths(dest)?;
-
-    // Step 8: fix libR.dylib's embedded install-name so packages compiled against
-    // it can find the library at its new location without needing DYLD_LIBRARY_PATH.
-    fix_libr_install_name(dest)?;
-
-    // Step 9(a): patch ALL sibling dylibs (libRlapack, libRblas, libgfortran, …)
-    // so they reference each other via managed-R paths rather than the original
-    // CRAN framework paths.  Without this, symbols like `_dgebal_` (LAPACK) that
-    // live in libRlapack/libRblas are invisible to R and packages like Matrix fail
-    // to load with "Symbol not found: _dgebal_".
-    patch_r_dylibs(dest)?;
-
-    // Step 9(a.5): patch bin/exec/R (and siblings). R 4.6+ ships these with
-    // hardened-runtime signatures pointing at the framework path; without
-    // rewriting those load commands and re-signing ad-hoc, dyld can't find
-    // libR.dylib and the process is SIGKILLed at startup. (Pre-4.6 used
-    // ad-hoc signing so DYLD_LIBRARY_PATH was enough — 4.6 changed that.)
-    patch_r_executables(dest)?;
-
-    // Step 9(b): write etc/Renviron.site so that DYLD_LIBRARY_PATH is set for every
-    // R process this installation spawns — including the fresh `R --slave` sessions
-    // used by R CMD INSTALL for byte-compilation.  On macOS 15+ (SIP), DYLD_*
-    // variables are stripped when inherited through /bin/sh, so setting the env
-    // var on the parent process alone is not sufficient.
-    // R expands ${R_HOME} in Renviron.site before any package code runs.
-    write_renviron_site(dest)?;
-
-    Ok(())
-}
-
-/// Read `<dest>/bin/R` and extract the value of `R_HOME_DIR=...`.
-fn extract_r_home_dir(dest: &Path) -> Result<String> {
-    let r_script = dest.join("bin").join("R");
-    let content = std::fs::read_to_string(&r_script)?;
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("R_HOME_DIR=") {
-            return Ok(val.trim().to_string());
-        }
-    }
-    // Fallback: standard macOS R framework path.
-    Ok("/Library/Frameworks/R.framework/Resources".to_string())
-}
-
-/// Recursively replace `old` with `new` in every text file under `dir`.
-/// Symlinks are skipped (they can't be patched and may be dangling).
-///
-/// Binary files are detected by the presence of a null byte and skipped entirely.
-/// This prevents accidentally corrupting (and invalidating the code signature of)
-/// Mach-O binaries or dylibs that may embed the path string as a constant.
-fn patch_text_files(dir: &Path, old: &str, new: &str) -> Result<()> {
-    let entries = std::fs::read_dir(dir).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to read directory {} during path patching: {e}",
-            dir.display()
-        ))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to read entry in {} during path patching: {e}",
-                dir.display()
-            ))
-        })?;
-        let path = entry.path();
-        let ft = entry.file_type().map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to stat {} during path patching: {e}",
-                path.display()
-            ))
-        })?;
-        if ft.is_symlink() {
-            continue;
-        }
-        if ft.is_dir() {
-            patch_text_files(&path, old, new)?;
-        } else if ft.is_file() {
-            if let Ok(bytes) = std::fs::read(&path) {
-                // Skip binary files — null bytes are a reliable indicator.
-                if bytes.contains(&0) {
-                    continue;
-                }
-                if let Ok(content) = String::from_utf8(bytes) {
-                    if content.contains(old) {
-                        std::fs::write(&path, content.replace(old, new)).map_err(|e| {
-                            UvrError::Other(format!(
-                                "Failed to write patched {} during path patching: {e}",
-                                path.display()
-                            ))
-                        })?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Rewrite the `LIBR = …` line in `<dest>/etc/Makeconf` to use `-lR` instead
-/// of the macOS `-framework R` flag, which only works from the original install path.
-fn patch_makeconf_libr(dest: &Path) -> Result<()> {
-    let makeconf = dest.join("etc").join("Makeconf");
-    if !makeconf.exists() {
-        return Ok(());
-    }
-    let content = std::fs::read_to_string(&makeconf)
-        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", makeconf.display())))?;
-    let dest_str = dest.to_string_lossy();
-    let patched = content
-        .lines()
-        .map(|line| {
-            let t = line.trim_start();
-            if t.starts_with("LIBR =") || t.starts_with("LIBR=") {
-                format!("LIBR = -L{dest_str}/lib -lR")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let patched = if content.ends_with('\n') {
-        patched + "\n"
-    } else {
-        patched
-    };
-    std::fs::write(&makeconf, patched).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to write patched {}: {e}",
-            makeconf.display()
-        ))
-    })?;
-    Ok(())
-}
-
-/// Redirect the CRAN macOS build-toolchain prefix in Makeconf content to the
-/// Homebrew prefix. Returns the rewritten content, or `None` if `cran_dir`
-/// doesn't appear (nothing to do). Pure string transform — the caller decides
-/// whether redirecting is appropriate.
-fn redirect_makeconf_toolchain(content: &str, cran_dir: &str, brew_prefix: &str) -> Option<String> {
-    // Anchor on the trailing slash. Every real reference is a directory prefix
-    // (`-L/opt/R/arm64/lib`, `-I/opt/R/arm64/include`, pkgconfig/tcl paths), so
-    // matching `<cran_dir>/` rewrites them all while leaving a longer component
-    // like `/opt/R/arm64-apple-darwin` untouched (a bare `str::replace` would
-    // corrupt it to `/opt/homebrew-apple-darwin`).
-    let needle = format!("{cran_dir}/");
-    if !content.contains(&needle) {
-        return None;
-    }
-    Some(content.replace(&needle, &format!("{brew_prefix}/")))
-}
-
-/// CRAN's macOS R bakes its separately-shipped build-toolchain prefix
-/// (`/opt/R/<arch>`) into `etc/Makeconf` as `LDFLAGS = -L/opt/R/<arch>/lib`,
-/// `CPPFLAGS = -I/opt/R/<arch>/include`, etc. A uvr-managed install doesn't ship
-/// that bundle, so source builds of packages that link external libraries (e.g.
-/// flowCore → libssl) fail with "library not found" even when the library is
-/// present via Homebrew — the Makeconf assignment overrides any env LDFLAGS we
-/// inject at build time.
-///
-/// When the CRAN toolchain dir is absent but a Homebrew prefix exists, redirect
-/// those references to Homebrew so source builds find Homebrew-provided
-/// libraries. Best-effort and deliberately conditional: if the CRAN toolchain IS
-/// installed we leave Makeconf alone (its setup is correct), and if Homebrew is
-/// absent too we don't point at another missing dir — the link error then guides
-/// the user to install a toolchain.
-fn patch_makeconf_toolchain_paths(dest: &Path) -> Result<()> {
-    let makeconf = dest.join("etc").join("Makeconf");
-    if !makeconf.exists() {
-        return Ok(());
-    }
-    // cfg!(target_arch) reflects uvr's own build arch, not the installed R's.
-    // That's fine: a cross-arch install (e.g. x86_64 R under an arm64 uvr via
-    // Rosetta) simply won't contain the arm64 toolchain prefix, so
-    // redirect_makeconf_toolchain returns None and the patch is skipped — no
-    // corruption, just a missed (rare) optimization.
-    let (cran_dir, brew_prefix) = if cfg!(target_arch = "aarch64") {
-        ("/opt/R/arm64", "/opt/homebrew")
-    } else {
-        ("/opt/R/x86_64", "/usr/local")
-    };
-    // Only redirect when CRAN's toolchain is missing and Homebrew is present.
-    if Path::new(cran_dir).exists() || !Path::new(brew_prefix).exists() {
-        return Ok(());
-    }
-    let content = std::fs::read_to_string(&makeconf)
-        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", makeconf.display())))?;
-    let Some(patched) = redirect_makeconf_toolchain(&content, cran_dir, brew_prefix) else {
-        return Ok(());
-    };
-    std::fs::write(&makeconf, patched).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to write patched {}: {e}",
-            makeconf.display()
-        ))
-    })?;
-    tracing::info!(
-        "Patched etc/Makeconf: redirected {cran_dir} → {brew_prefix} (CRAN macOS build \
-         toolchain not installed; using Homebrew for source-build libraries)."
-    );
-    Ok(())
-}
-
-/// Update the embedded install-name of `libR.dylib` to its actual path so that
-/// packages compiled against it can find it at runtime without DYLD_LIBRARY_PATH.
-///
-/// Run `install_name_tool` with `args`, returning whether it succeeded.
-///
-/// install_name_tool failures used to be discarded with `let _ = …`. Now that
-/// a codesign failure aborts the install (#111), a silently-failed install-name
-/// rewrite would otherwise produce a binary that *passes* the resign but still
-/// points at the nonexistent CRAN framework path — a broken install that looks
-/// successful. We surface the failure as a warning (not a hard error): the tool
-/// being absent is tolerated like otool (Xcode CLT optional), and a non-zero
-/// exit shouldn't fail an install that may not need the rewrite (#112).
-fn run_install_name_tool(args: &[&str], target: &Path) -> bool {
-    match Command::new("install_name_tool").args(args).output() {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            tracing::warn!(
-                "install_name_tool failed for {} (exit {}): {}. The install may \
-                 still reference the original CRAN framework path and fail to \
-                 load packages.",
-                target.display(),
-                o.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&o.stderr).trim()
-            );
-            false
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(
-                "install_name_tool not found — skipping install-name patch for {}. \
-                 Install Xcode Command Line Tools (`xcode-select --install`) so R 4.6+ installs work.",
-                target.display()
-            );
-            false
-        }
-        Err(e) => {
-            tracing::warn!(
-                "install_name_tool failed to spawn for {}: {e}",
-                target.display()
-            );
-            false
-        }
-    }
-}
-
-/// IMPORTANT: `install_name_tool` invalidates the Mach-O code signature.
-/// On Apple Silicon every dylib must be signed; we always re-apply an ad-hoc
-/// signature afterwards. The ad-hoc re-sign also strips the original hardened
-/// runtime flag (set by CRAN's Developer ID signing on R 4.6+) — without that
-/// strip, macOS would refuse to load the dylib through DYLD_LIBRARY_PATH.
-fn fix_libr_install_name(dest: &Path) -> Result<()> {
-    let libr = dest.join("lib").join("libR.dylib");
-    if !libr.exists() {
-        return Ok(());
-    }
-    let new_id = libr.to_string_lossy().to_string();
-    run_install_name_tool(&["-id", &new_id, &new_id], &libr);
-    // Always re-sign — even if install_name_tool was a no-op, the original
-    // CRAN signature has the hardened runtime flag set on R 4.6+, which makes
-    // DYLD_LIBRARY_PATH ineffective for the executables that load this dylib.
-    resign_adhoc(&libr)
-}
-
-/// Patch executable Mach-O binaries under `<r_home>/bin/exec/` so they load
-/// our managed `lib/libR.dylib` instead of the framework path baked in by CRAN.
-///
-/// Without this, R 4.6+ (which CRAN signs with hardened runtime) silently
-/// SIGKILLs at startup because:
-///   1. `bin/exec/R` has a load command for `/Library/Frameworks/R.framework/Versions/4.6/Resources/lib/libR.dylib`.
-///   2. The framework path doesn't exist in our extracted install.
-///   3. Hardened runtime causes macOS to strip `DYLD_LIBRARY_PATH`, so the
-///      `Renviron.site` hint we set has no effect on the dyld lookup.
-///
-/// Fix: rewrite the load command to point at our `lib/libR.dylib`, then re-sign
-/// ad-hoc (which also clears the hardened-runtime flag).
-pub fn patch_r_executables(r_home: &Path) -> Result<()> {
-    let exec_dir = r_home.join("bin").join("exec");
-    if !exec_dir.exists() {
-        return Ok(());
-    }
-    let lib_dir = r_home.join("lib");
-    let Ok(entries) = std::fs::read_dir(&exec_dir) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        rewrite_framework_loads(&path, &lib_dir)?;
-    }
-    Ok(())
-}
-
-/// Rewrite every `/Library/Frameworks/R.framework/...` load command in `binary`
-/// to point at the corresponding file in `lib_dir` (matched by basename), then
-/// re-sign ad-hoc.
-fn rewrite_framework_loads(binary: &Path, lib_dir: &Path) -> Result<()> {
-    let path_str = binary.to_string_lossy().to_string();
-    let deps_out = match Command::new("otool").args(["-L", &path_str]).output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(
-                "otool not found — skipping load-command patch for {}. \
-                 Install Xcode Command Line Tools (`xcode-select --install`) so R 4.6+ installs work.",
-                binary.display()
-            );
-            return Ok(());
-        }
-        Err(_) => return Ok(()),
-    };
-    if !deps_out.status.success() {
-        // otool ran but couldn't read the binary. Don't resign a file we
-        // couldn't analyze (codesign would now hard-error on a non-Mach-O,
-        // #111) — but surface it instead of skipping silently (#112).
-        tracing::warn!(
-            "otool -L failed for {} (exit {}): {}. Skipping load-command patch + resign.",
-            binary.display(),
-            deps_out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&deps_out.stderr).trim()
-        );
-        return Ok(());
-    }
-    let Ok(deps) = String::from_utf8(deps_out.stdout) else {
-        return Ok(());
-    };
-    for line in deps.lines().skip(1) {
-        let dep = line.split_whitespace().next().unwrap_or("");
-        if !dep.contains("/Library/Frameworks/R.framework/") {
-            continue;
-        }
-        let Some(filename) = std::path::Path::new(dep).file_name() else {
-            continue;
-        };
-        let new_dep = lib_dir.join(filename);
-        if !new_dep.exists() {
-            continue;
-        }
-        let new_dep_str = new_dep.to_string_lossy().to_string();
-        run_install_name_tool(&["-change", dep, &new_dep_str, &path_str], binary);
-    }
-    // Always re-sign — even when no load commands changed, R 4.6+ ships with
-    // hardened runtime that suppresses DYLD_LIBRARY_PATH and blocks library
-    // validation against ad-hoc dylibs. An ad-hoc re-sign drops the runtime
-    // flag so the existing `Renviron.site` workaround actually takes effect.
-    resign_adhoc(binary)
-}
-
-/// Entitlements plist embedded in every ad-hoc re-sign.
-///
-/// macOS Tahoe (26.x) tightened the default library-validation enforcement
-/// applied to ad-hoc signed binaries. Without an entitlement that explicitly
-/// relaxes it, R's `methods` package crashes during `initMethodDispatch` with
-/// `invalid permissions` the first time it dyld-loads an S4 method table
-/// (#99, @mvuorre). Pre-Tahoe macOS does not check these entitlements for
-/// ad-hoc binaries, so adding them is a no-op there.
-///
-/// - `disable-library-validation`: lets R load `.so`/`.dylib` files that
-///   weren't signed by the same identity (R packages compile arbitrary
-///   shared objects at install time — they will never match the ad-hoc
-///   identity).
-/// - `allow-unsigned-executable-memory`: R's bytecode compiler and a
-///   handful of packages (Rcpp/RcppParallel via TBB, JIT-using packages)
-///   allocate executable memory at runtime.
-/// - `allow-dyld-environment-variables`: keeps `Renviron.site`'s
-///   `DYLD_LIBRARY_PATH` workaround functioning even if hardened runtime
-///   is ever enabled for ad-hoc signing in a future macOS release.
-const ENTITLEMENTS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-    <true/>
-</dict>
-</plist>
-"#;
-
-/// Write the entitlements plist with a private file mode. On Unix the file is
-/// created `0o600` via `O_CREAT|O_EXCL` so no other local process can read or
-/// replace it between write and the `codesign` invocation that consumes it
-/// (#110). Any stale same-PID file is removed first so the exclusive create
-/// gets a fresh inode rather than failing on leftover state; `create_new`
-/// still refuses to follow a symlink planted in the gap.
-fn write_entitlements(path: &Path) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(path);
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(ENTITLEMENTS_PLIST.as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, ENTITLEMENTS_PLIST)
-    }
-}
-
-/// Lazy-initialized path to the entitlements plist on disk.
-///
-/// Written once per process to `$TMPDIR/uvr-entitlements-<pid>.plist` so
-/// `resign_adhoc` can reference it without paying the write cost on every
-/// dylib it processes. Returns `None` if the temp write failed — callers
-/// fall back to a plain ad-hoc resign in that case (degraded but still
-/// works on pre-Tahoe systems).
-fn entitlements_path() -> Option<&'static Path> {
-    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let path =
-            std::env::temp_dir().join(format!("uvr-entitlements-{}.plist", std::process::id()));
-        match write_entitlements(&path) {
-            Ok(()) => Some(path),
-            Err(e) => {
-                tracing::error!(
-                    "Failed to write entitlements plist to {}: {e}. \
-                     Ad-hoc resign will proceed without entitlements; the \
-                     resulting R install will crash on macOS Tahoe 26.x when \
-                     R loads dynamic packages (#99).",
-                    path.display()
-                );
-                None
-            }
-        }
-    })
-    .as_deref()
-}
-
-/// Re-sign a Mach-O ad-hoc, clearing any prior hardened-runtime flag and
-/// embedding the entitlements needed for R to load packages on Tahoe.
-///
-/// If the entitlements plist couldn't be written (already loudly errored in
-/// `entitlements_path`), we still attempt a plain ad-hoc resign — the binary
-/// at least loads on pre-Tahoe macOS that way. If `codesign` itself rejects
-/// the entitlements arg or fails for any other reason, we surface the error
-/// rather than silently falling back to an entitlement-free resign: a
-/// silent fallback would produce an install that segfaults later (#99)
-/// instead of one that fails the install step visibly.
-fn resign_adhoc(path: &Path) -> Result<()> {
-    let path_str = path.to_string_lossy().to_string();
-    if let Some(ent) = entitlements_path() {
-        let ent_str = ent.to_string_lossy().to_string();
-        match Command::new("codesign")
-            .args([
-                "--force",
-                "--sign",
-                "-",
-                "--entitlements",
-                &ent_str,
-                &path_str,
-            ])
-            .output()
-        {
-            Ok(o) if o.status.success() => Ok(()),
-            Ok(o) => Err(UvrError::Other(format!(
-                "codesign --entitlements failed for {} (exit {}): {}. \
-                 The R install would crash on first dyld load (#99); aborting. \
-                 Report at https://github.com/nbafrank/uvr/issues with this stderr.",
-                path.display(),
-                o.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&o.stderr).trim()
-            ))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(UvrError::Other(format!(
-                "codesign not found — cannot ad-hoc re-sign {}. R 4.6+ binaries \
-                 SIGKILL at startup without it; install Xcode Command Line Tools \
-                 (`xcode-select --install`) and retry.",
-                path.display()
-            ))),
-            Err(e) => Err(UvrError::Other(format!(
-                "codesign failed to spawn for {}: {e}",
-                path.display()
-            ))),
-        }
-    } else {
-        // entitlements_path() returned None — only reached when the plist write
-        // itself failed (already error!-logged). Best effort: plain ad-hoc
-        // resign so the binary is at least loadable on pre-Tahoe macOS.
-        match Command::new("codesign")
-            .args(["--force", "--sign", "-", &path_str])
-            .status()
-        {
-            Ok(s) if s.success() => Ok(()),
-            Ok(s) => Err(UvrError::Other(format!(
-                "codesign failed for {} (exit {}); aborting install.",
-                path.display(),
-                s.code().unwrap_or(-1)
-            ))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(UvrError::Other(format!(
-                "codesign not found — cannot ad-hoc re-sign {}. R 4.6+ binaries \
-                 SIGKILL at startup without it; install Xcode Command Line Tools \
-                 (`xcode-select --install`) and retry.",
-                path.display()
-            ))),
-            Err(e) => Err(UvrError::Other(format!(
-                "codesign failed to spawn for {}: {e}",
-                path.display()
-            ))),
-        }
-    }
-}
-
-/// Patch all `.dylib` install names in `<r_home>/lib/` to use the managed-R
-/// path instead of the original CRAN framework path.
-///
-/// The CRAN macOS `.pkg` compiles every dylib with an install name pointing
-/// to `/Library/Frameworks/R.framework/…`. After extraction to
-/// `~/.uvr/r-versions/<ver>/`, those absolute paths don't exist, so
-/// `libRblas`/`libRlapack`/`libgfortran` are never found by the dynamic linker.
-/// Packages compiled against system R (e.g. `Matrix`) expect LAPACK symbols
-/// from `libR.dylib`'s load chain — if `libRlapack.dylib` is never loaded,
-/// those symbols are absent and `dlopen` fails.
-///
-/// This function is idempotent: if all paths already point to the managed-R
-/// lib dir the `install_name_tool` calls succeed silently.
-pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
-    let lib_dir = r_home.join("lib");
-    if !lib_dir.exists() {
-        return Ok(());
-    }
-    let lib_str = lib_dir.to_string_lossy().to_string();
-
-    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
-        return Ok(());
-    };
-
-    // Collect resign failures across all dylibs rather than aborting on the
-    // first (#114). A codesign failure is usually systemic, but reporting every
-    // affected dylib gives complete diagnostics, and attempting them all means
-    // the install state isn't left half-patched on the first error.
-    let mut resign_errors: Vec<String> = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("dylib") {
-            continue;
-        }
-        let path_str = path.to_string_lossy().to_string();
-
-        // Fix the dylib's own install name if it still points to the framework.
-        let old_id = Command::new("otool")
-            .args(["-D", &path_str])
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .and_then(|t| t.lines().nth(1).map(|l| l.trim().to_string()))
-            })
-            .unwrap_or_default();
-
-        let mut needs_resign = false;
-        if old_id.contains("/Library/Frameworks/R.framework/")
-            && run_install_name_tool(&["-id", &path_str, &path_str], &path)
-        {
-            // Only resign if the install-name actually changed. Resigning after
-            // a failed rewrite would bless a dylib that still points at the
-            // nonexistent CRAN framework path — signed-but-broken, which looks
-            // healthy but fails at load. Matches the `-change` gate below.
-            needs_resign = true;
-        }
-
-        // Fix all dependency paths pointing into the R framework.
-        let deps = Command::new("otool")
-            .args(["-L", &path_str])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .unwrap_or_default();
-
-        for line in deps.lines().skip(1) {
-            let dep = line.split_whitespace().next().unwrap_or("");
-            if !dep.contains("/Library/Frameworks/R.framework/") {
-                continue;
-            }
-            let filename = std::path::Path::new(dep)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if filename.is_empty() {
-                continue;
-            }
-            let new_dep = format!("{lib_str}/{filename}");
-            if run_install_name_tool(&["-change", dep, &new_dep, &path_str], &path) {
-                needs_resign = true;
-            }
-        }
-
-        if needs_resign {
-            if let Err(e) = resign_adhoc(&path) {
-                resign_errors.push(format!("{}: {e}", path.display()));
-            }
-        }
-    }
-
-    if !resign_errors.is_empty() {
-        return Err(UvrError::Other(format!(
-            "Failed to ad-hoc re-sign {} dylib(s) under {} — install would crash \
-             on first dyld load (#99):\n  {}",
-            resign_errors.len(),
-            lib_dir.display(),
-            resign_errors.join("\n  ")
-        )));
-    }
-    Ok(())
-}
-
-/// Write `etc/Renviron.site` so every R process from this installation
-pub fn patch_renviron_site(r_home: &Path) -> Result<()> {
-    write_renviron_site(r_home)
-}
-
-/// Write `etc/Renviron.site` so every R process from this installation
-/// automatically has `DYLD_LIBRARY_PATH` pointing at its own lib directory.
-///
-/// R reads this file at startup (before user code) and expands `${R_HOME}`.
-/// This survives the `DYLD_*` stripping that macOS applies to sub-processes
-/// spawned through SIP-protected shells like `/bin/sh`.
-fn write_renviron_site(dest: &Path) -> Result<()> {
-    let renviron = dest.join("etc").join("Renviron.site");
-    // Append only if our line isn't already present (idempotent for re-installs).
-    let existing = std::fs::read_to_string(&renviron).unwrap_or_default();
-    if existing.contains("DYLD_LIBRARY_PATH=${R_HOME}/lib") {
-        return Ok(());
-    }
-    // Ensure the etc/ directory exists. Some .deb payloads or partial extracts
-    // can leave `etc/` missing — without this guard, `fs::write` would fire a
-    // bare ENOENT with no hint at which path was missing.
-    if let Some(parent) = renviron.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to create {} for Renviron.site: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-    let content = format!(
-        "{existing}# Added by uvr: ensure libR.dylib is always findable by sub-processes.\n\
-         DYLD_LIBRARY_PATH=${{R_HOME}}/lib\n\
-         LD_LIBRARY_PATH=${{R_HOME}}/lib\n"
-    );
-    std::fs::write(&renviron, content)
-        .map_err(|e| UvrError::Other(format!("Failed to write {}: {e}", renviron.display())))?;
-    Ok(())
-}
-
+/// Locate the directory containing `bin/R` (or `bin/R.exe` on Windows) within an
+/// extracted portable archive. Portable tarballs may nest R under a top-level
+/// `R-<version>/` directory, so we recurse to find the real `R_HOME` root.
 fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     if depth > 12 {
         return None; // guard against symlink loops
     }
-    if dir.join("bin").join("R").exists() {
+    let bin = dir.join("bin");
+    if bin.join("R").exists() || bin.join("R.exe").exists() {
         return Some(dir.to_path_buf());
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1434,287 +583,139 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     None
 }
 
-fn find_all_payload_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
-    collect_payloads(dir, &mut found)?;
-    Ok(found)
-}
-
-fn collect_payloads(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
-        if e.file_type()?.is_dir() {
-            collect_payloads(&e.path(), out)?;
-        } else if e.file_name().to_string_lossy() == "Payload" {
-            out.push(e.path());
-        }
-    }
-    Ok(())
-}
-
-/// Windows: Inno Setup `.exe` → silent install to `dest` without admin rights.
+/// Fetch the list of available R versions from the portable build index
+/// (`cdn.posit.co/r/versions.json`).
 ///
-/// The `/CURRENTUSER` flag tells Inno Setup to install for the current user only,
-/// avoiding the need for admin/UAC elevation — a key differentiator over rig.
-fn install_r_windows(exe_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
-    let tmp = tempfile::tempdir()?;
-    let exe_path = tmp.path().join(format!("R-{version}-win.exe"));
-    std::fs::write(&exe_path, exe_bytes)?;
-
-    info!("Installing R {version} silently to {}", dest.display());
-
-    // Inno Setup log for diagnosing install failures
-    let log_path = tmp.path().join("r-install.log");
-
-    // Do NOT embed extra quotes around the /DIR= path — Rust's Command API
-    // already quotes arguments when building the Windows command line.
-    // Embedding quotes causes double-escaping that Inno Setup rejects (exit 1).
-    let dir_arg = format!("/DIR={}", dest.to_string_lossy());
-    let log_arg = format!("/LOG={}", log_path.to_string_lossy());
-    // /MERGETASKS="!recordversion": the R Inno Setup installer exposes a
-    // `recordversion` task which writes `HKCU\Software\R-core\R\<ver>\InstallPath`
-    // to the Windows registry. That key is what RStudio (and other registry-aware
-    // R GUIs) reads to pick its "default" R version — so writing it every time
-    // `uvr r install` runs silently clobbers the user's RStudio choice on every
-    // install. Since uvr manages its own R resolution, we never want this side
-    // effect. The `!` prefix disables the task while leaving other defaults intact.
-    let output = Command::new(&exe_path)
-        .args([
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            &dir_arg,
-            "/CURRENTUSER",
-            "/NOICONS",
-            "/NORESTART",
-            "/MERGETASKS=!recordversion",
-            &log_arg,
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        let mut detail = format!(
-            "R {version} silent installer failed (exit {})",
-            output.status.code().unwrap_or(-1)
-        );
-
-        // Include Inno Setup log if available
-        if let Ok(log) = std::fs::read_to_string(&log_path) {
-            let lines: Vec<&str> = log.lines().collect();
-            let start = lines.len().saturating_sub(20);
-            let last_lines = lines[start..].join("\n");
-            detail.push_str(&format!("\n\nInstaller log (last 20 lines):\n{last_lines}"));
-        }
-
-        // Include stdout/stderr if any
-        if !output.stdout.is_empty() {
-            if let Ok(stdout) = String::from_utf8(output.stdout) {
-                detail.push_str(&format!("\n\nstdout: {stdout}"));
-            }
-        }
-        if !output.stderr.is_empty() {
-            if let Ok(stderr) = String::from_utf8(output.stderr) {
-                detail.push_str(&format!("\n\nstderr: {stderr}"));
-            }
-        }
-
-        return Err(UvrError::Other(detail));
-    }
-
-    Ok(())
-}
-
-/// Linux: `.deb` → `ar x` → `data.tar.gz` → extract
-fn install_r_linux(deb_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
-    // Pre-flight: `ar` (binutils) and `tar` are required. Some minimal Ubuntu
-    // / Debian images and stripped-down container bases ship without binutils;
-    // raw ENOENT from Command::status() reads as "I/O error: No such file or
-    // directory" with no hint at the cause. Surface a clear message before
-    // we even try to download.
-    require_tool(
-        "ar",
-        &[
-            "Debian/Ubuntu: sudo apt install binutils",
-            "RHEL/Fedora:  sudo dnf install binutils",
-            "Alpine:       sudo apk add binutils",
-        ],
-    )?;
-    require_tool(
-        "tar",
-        &[
-            "Debian/Ubuntu: sudo apt install tar",
-            "Alpine:       sudo apk add tar",
-        ],
-    )?;
-
-    let tmp = tempfile::tempdir().map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to create temp directory for .deb extraction: {e}. Check $TMPDIR or disk space."
-        ))
-    })?;
-    let deb_path = tmp.path().join(format!("r-{version}.deb"));
-    std::fs::write(&deb_path, deb_bytes).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to write .deb to {}: {e}",
-            deb_path.display()
-        ))
-    })?;
-
-    // ar x <deb>
-    let status = Command::new("ar")
-        .args(["x", &deb_path.to_string_lossy()])
-        .current_dir(tmp.path())
-        .status()
-        .map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to run `ar x` on the downloaded .deb ({e}). Install binutils."
-            ))
-        })?;
-    if !status.success() {
-        return Err(UvrError::Other("ar x failed on .deb".into()));
-    }
-
-    // Find data.tar.*
-    let data_tar = find_data_tar(tmp.path())?;
-
-    let status = Command::new("tar")
-        .args([
-            "xf",
-            &data_tar.to_string_lossy(),
-            "-C",
-            &dest.to_string_lossy(),
-            "--strip-components=4", // strip ./opt/R/<version>/
-        ])
-        .status()
-        .map_err(|e| {
-            UvrError::Other(format!(
-                "Failed to run `tar` to extract the .deb payload ({e}). Install tar."
-            ))
-        })?;
-    if !status.success() {
-        return Err(UvrError::Other(
-            "tar extraction of Linux R .deb failed".into(),
-        ));
-    }
-
-    // Patch hardcoded /opt/R/<version> paths to the actual install dir.
-    // The Posit .deb is built with /opt/R/<version> baked into bin/R,
-    // etc/Makeconf, etc/ldpaths, etc. We replace them all so R_HOME resolves
-    // correctly from ~/.uvr/r-versions/<version>/.
-    let original_prefix = format!("/opt/R/{version}");
-    patch_text_files(dest, &original_prefix, &dest.to_string_lossy())?;
-
-    // Write Renviron.site so LD_LIBRARY_PATH is set for every R process
-    // spawned from this installation. The .so files in lib/ have their RPATH
-    // pointing to /opt/R/<version>/lib; setting LD_LIBRARY_PATH at the R
-    // level is the simplest way to ensure they resolve without patchelf.
-    write_renviron_site(dest)?;
-
-    Ok(())
-}
-
-/// Verify a CLI tool is present on `PATH`. Returns a clear error including
-/// platform-specific install hints if it isn't, so users see actionable
-/// diagnostics instead of "I/O error: No such file or directory".
-fn require_tool(tool: &str, install_hints: &[&str]) -> Result<()> {
-    if which::which(tool).is_ok() {
-        return Ok(());
-    }
-    let hints = install_hints.join("\n  ");
-    Err(UvrError::Other(format!(
-        "`{tool}` not found on PATH — required to extract the R .deb. Install with:\n  {hints}"
-    )))
-}
-
-fn find_data_tar(dir: &Path) -> Result<PathBuf> {
-    for ext in &["data.tar.gz", "data.tar.xz", "data.tar.zst", "data.tar.bz2"] {
-        let p = dir.join(ext);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    Err(UvrError::Other("data.tar.* not found in .deb".into()))
-}
-
-/// Fetch the list of available R versions for `platform` from the CRAN CDN.
-///
-/// Returns versions sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`).
+/// Returns versions sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`),
+/// dropping the rolling `next`/`devel` channels. On macOS the list is clamped
+/// to R >= 4.1.0 (the floor for the portable macOS builds).
 pub async fn fetch_available_versions(
     client: &reqwest::Client,
     platform: Platform,
 ) -> Result<Vec<String>> {
-    // Use the platform-specific binary index when possible; fall back to the
-    // CRAN source index (which lists every released version) for Linux.
-    let macos_arm64_listing = format!(
-        "https://cran.r-project.org/bin/macosx/{}/base/",
-        macos_arm64_dir()
-    );
-    let macos_x86_64_listing = format!(
-        "https://cran.r-project.org/bin/macosx/{}/base/",
-        macos_x86_64_dir()
-    );
-    let (url, prefix, suffix): (&str, &str, &str) = match platform {
-        Platform::MacOsArm64 => (macos_arm64_listing.as_str(), "R-", "-arm64.pkg"),
-        Platform::MacOsX86_64 => (macos_x86_64_listing.as_str(), "R-", "-x86_64.pkg"),
-        Platform::LinuxX86_64 | Platform::LinuxArm64 => {
-            // CRAN's `/src/base/` lists subdirs (R-1, R-2, R-3, R-4) — not
-            // tarballs. Point at `R-4/` directly to enumerate current-major
-            // releases. Pre-R-4 versions are out of scope for uvr (R 3.x
-            // pre-dates the supported R 4.0+ ABI).
-            ("https://cran.r-project.org/src/base/R-4/", "R-", ".tar.gz")
-        }
-        Platform::WindowsX86_64 => (
-            "https://cran.r-project.org/bin/windows/base/",
-            "R-",
-            "-win.exe",
-        ),
-    };
-
-    let html = client
-        .get(url)
+    let body = client
+        .get(VERSIONS_JSON_URL)
         .send()
         .await?
         .error_for_status()?
-        .text()
+        .bytes()
         .await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| UvrError::Other(format!("Failed to parse versions.json: {e}")))?;
+    let arr = json
+        .get("r_versions")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| UvrError::Other("versions.json missing `r_versions` array".into()))?;
 
-    // Parse href="R-<version><suffix>" fragments from the directory listing HTML.
-    let needle = format!("href=\"{prefix}");
-    let mut versions: Vec<String> = html
-        .split(needle.as_str())
-        .skip(1)
-        .filter_map(|chunk| {
-            let end = chunk.find(suffix)?;
-            let ver = &chunk[..end];
-            if is_real_r_version(ver) {
-                Some(ver.to_string())
-            } else {
-                None
-            }
+    let macos_floor = platform.is_macos();
+    let mut versions: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        // Drop rolling channels ("next", "devel") and any non-X.Y.Z label.
+        .filter(|s| is_real_r_version(s))
+        .filter(|s| {
+            !macos_floor
+                || parse_r_version(s)
+                    .map(|v| v >= MACOS_MIN_R_VERSION)
+                    .unwrap_or(false)
         })
+        .map(|s| s.to_string())
         .collect();
 
-    // On Windows, also scrape the "old" directory for archived versions.
-    if matches!(platform, Platform::WindowsX86_64) {
-        let old_url = "https://cran.r-project.org/bin/windows/base/old/";
-        if let Ok(old_html) = client
-            .get(old_url)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-        {
-            if let Ok(text) = old_html.text().await {
-                versions.extend(extract_windows_old_versions(&text));
-            }
-        }
-    }
-
-    // Sort numerically by component (not lexicographically).
-    versions.sort_by(|a, b| {
-        let parse = |s: &str| -> Vec<u64> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
-        parse(a).cmp(&parse(b))
-    });
+    versions.sort_by_key(|a| parse_r_version(a));
     versions.dedup();
     Ok(versions)
+}
+
+/// Install a portable R build by extracting `bytes` into `dest`.
+///
+/// The rstudio/r-builds portable archives are relocatable: R resolves its own
+/// `R_HOME` at runtime and bundles its dependency libraries, and the macOS
+/// builds are pre-signed and notarized. So there is no path patching, no
+/// install-name rewriting, and no code-signing — we extract the archive and
+/// flatten the `R_HOME` directory into `dest`.
+fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<()> {
+    let tmp = tempfile::tempdir()
+        .map_err(|e| UvrError::Other(format!("Failed to create temp dir for R extraction: {e}")))?;
+    let stage = tmp.path();
+
+    if platform.is_windows() {
+        extract_zip_to(bytes, stage)?;
+    } else {
+        extract_tar_gz_to(bytes, stage)?;
+    }
+
+    // Portable archives may nest R under a top-level `R-<version>/` dir.
+    let r_home = find_dir_with_r_binary(stage, 0).ok_or_else(|| {
+        UvrError::Other(
+            "Extracted R archive did not contain a bin/R — the download may be corrupt".into(),
+        )
+    })?;
+
+    std::fs::create_dir_all(dest)
+        .map_err(|e| UvrError::Other(format!("Failed to create {}: {e}", dest.display())))?;
+    for entry in std::fs::read_dir(&r_home)
+        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", r_home.display())))?
+    {
+        let entry = entry.map_err(|e| UvrError::Other(format!("Failed to read entry: {e}")))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        // `rename` fails across filesystems (TMPDIR on a different mount than
+        // ~/.uvr); fall back to a symlink-preserving recursive copy.
+        if std::fs::rename(&from, &to).is_err() {
+            copy_dir_recursive(&from, &to).map_err(|e| {
+                UvrError::Other(format!(
+                    "Failed to copy {} -> {}: {e}",
+                    from.display(),
+                    to.display()
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Extract a `.tar.gz` into `dest`, preserving symlinks and unix permissions.
+fn extract_tar_gz_to(bytes: &[u8], dest: &Path) -> Result<()> {
+    let dec = flate2::read::GzDecoder::new(bytes);
+    let mut ar = tar::Archive::new(dec);
+    ar.set_preserve_permissions(true);
+    ar.set_overwrite(true);
+    ar.unpack(dest)
+        .map_err(|e| UvrError::Other(format!("Failed to extract R tarball: {e}")))?;
+    Ok(())
+}
+
+/// Extract a `.zip` into `dest` (Windows portable builds).
+fn extract_zip_to(bytes: &[u8], dest: &Path) -> Result<()> {
+    let reader = std::io::Cursor::new(bytes);
+    let mut zip = zip::ZipArchive::new(reader)
+        .map_err(|e| UvrError::Other(format!("Failed to open R zip: {e}")))?;
+    zip.extract(dest)
+        .map_err(|e| UvrError::Other(format!("Failed to extract R zip: {e}")))?;
+    Ok(())
+}
+
+/// Recursively copy `from` to `to`, recreating symlinks rather than following
+/// them (the R framework relies on relative symlinks within `R_HOME`).
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    let ft = meta.file_type();
+    #[cfg(unix)]
+    if ft.is_symlink() {
+        let target = std::fs::read_link(from)?;
+        return std::os::unix::fs::symlink(target, to);
+    }
+    if ft.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_dir_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -1755,14 +756,40 @@ mod tests {
     #[test]
     fn download_url_macos_arm64() {
         let url = Platform::MacOsArm64.download_url("4.4.2");
-        assert!(url.contains("arm64"));
-        assert!(url.contains("4.4.2"));
-        assert!(url.ends_with(".pkg"));
-        // Must be one of the two known CRAN dirs.
-        assert!(
-            url.contains("/sonoma-arm64/") || url.contains("/big-sur-arm64/"),
-            "unexpected dir in {url}"
+        assert_eq!(
+            url,
+            "https://cdn.posit.co/r/macos/R-4.4.2-macos-arm64.tar.gz"
         );
+    }
+
+    #[test]
+    fn download_url_macos_x86() {
+        let url = Platform::MacOsX86_64.download_url("4.3.1");
+        assert_eq!(url, "https://cdn.posit.co/r/macos/R-4.3.1-macos.tar.gz");
+    }
+
+    #[test]
+    fn download_url_linux_x86_is_portable() {
+        let url = Platform::LinuxX86_64.download_url("4.4.2");
+        // The libc infix (manylinux_2_34 vs musllinux_1_2) is host-dependent,
+        // so assert the portable shape rather than the exact infix.
+        assert!(url.starts_with("https://cdn.posit.co/r/"));
+        assert!(url.contains("/R-4.4.2-"));
+        assert!(url.ends_with(".tar.gz"));
+        assert!(!url.contains("-arm64"));
+    }
+
+    #[test]
+    fn download_url_linux_arm64_is_portable() {
+        let url = Platform::LinuxArm64.download_url("4.4.2");
+        assert!(url.contains("/R-4.4.2-"));
+        assert!(url.ends_with("-arm64.tar.gz"));
+    }
+
+    #[test]
+    fn download_url_windows() {
+        let url = Platform::WindowsX86_64.download_url("4.4.2");
+        assert_eq!(url, "https://cdn.posit.co/r/windows/R-4.4.2-windows.zip");
     }
 
     #[test]
@@ -1773,12 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn is_real_r_version_rejects_directory_listing_noise() {
-        // Reproduces uvr-r #9 — the Windows `/base/old/` directory listing
-        // includes `href="../"` (parent dir). Without this guard the `..`
-        // string passed the all-digits-and-dots check and ended up in the
-        // version list, surfacing as a `..` row in `uvr r list --all` and
-        // `uvr::r_list(all = TRUE)`.
+    fn is_real_r_version_rejects_noise() {
         assert!(!is_real_r_version(".."));
         assert!(!is_real_r_version("."));
         assert!(!is_real_r_version(""));
@@ -1787,143 +809,19 @@ mod tests {
         assert!(!is_real_r_version("4..5"));
         assert!(!is_real_r_version("v4.5.3"));
         assert!(!is_real_r_version("4.5.3-rc"));
-        // CRAN's R 4+ doesn't ship 2-component releases. Reject so any
-        // future scrape changes that produce 2-part strings flag
-        // visibly rather than slipping into the list.
         assert!(!is_real_r_version("4.6"));
+        // Rolling channels in versions.json must be filtered out.
+        assert!(!is_real_r_version("next"));
+        assert!(!is_real_r_version("devel"));
     }
 
     #[test]
-    fn extract_windows_old_versions_handles_no_trailing_slash() {
-        // Sample of CRAN's current `/bin/windows/base/old/` HTML — the
-        // `href` values do NOT have trailing slashes anymore. uvr-r #9
-        // second wave: previous scraper matched the `/` inside `</a>`
-        // and captured garbage, surfacing only the current release on
-        // `r_list(all = TRUE)`.
-        let html = r#"
-            <a href="..">here</a>.
-            <a href="4.6.0">R 4.6.0</a> (April, 2026)<br>
-            <a href="4.5.3">R 4.5.3</a> (March, 2026)<br>
-            <a href="4.5.2">R 4.5.2</a> (November, 2025)<br>
-            <a href="4.4.2">R 4.4.2</a> (November, 2024)<br>
-        "#;
-        let versions = extract_windows_old_versions(html);
-        assert!(versions.contains(&"4.6.0".to_string()));
-        assert!(versions.contains(&"4.5.3".to_string()));
-        assert!(versions.contains(&"4.5.2".to_string()));
-        assert!(versions.contains(&"4.4.2".to_string()));
-        // Parent-dir link must not show up.
-        assert!(!versions.contains(&"..".to_string()));
-        assert!(versions.len() == 4);
-    }
-
-    #[test]
-    fn extract_windows_old_versions_handles_trailing_slash() {
-        // Belt-and-braces: if CRAN ever brings the trailing slash back,
-        // the regex still matches.
-        let html = r#"<a href="4.6.0/">R 4.6.0</a><a href="4.5.3/">R 4.5.3</a>"#;
-        let versions = extract_windows_old_versions(html);
-        assert_eq!(versions, vec!["4.6.0", "4.5.3"]);
-    }
-
-    #[test]
-    fn extract_windows_old_versions_skips_non_versions() {
-        // Non-version hrefs in the page (parent dir, CSS, etc) shouldn't
-        // be matched as versions.
-        let html = r#"
-            <link rel="stylesheet" href="http://cran.r-project.org/R.css">
-            <a href="..">here</a>
-            <a href="https://cran.r-project.org">main</a>
-        "#;
-        assert!(extract_windows_old_versions(html).is_empty());
-    }
-
-    #[test]
-    fn macos_arm64_dir_is_expected() {
-        let d = macos_arm64_dir();
-        assert!(
-            d == "sonoma-arm64" || d == "big-sur-arm64",
-            "unexpected macos_arm64_dir: {d}"
-        );
-    }
-
-    #[test]
-    fn macos_fallback_only_on_sonoma() {
-        let fb = Platform::MacOsArm64.download_url_fallback("4.5.3");
-        if macos_major_version() >= 14 {
-            let fb = fb.expect("Sonoma+ should provide big-sur fallback");
-            assert!(fb.contains("/big-sur-arm64/"), "{fb}");
-        } else {
-            assert!(
-                fb.is_none(),
-                "non-Sonoma must not return sonoma fallback (binary won't run): {fb:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn directory_listing_matches_primary() {
-        let listing = Platform::MacOsArm64.directory_listing_url().unwrap();
-        let url = Platform::MacOsArm64.download_url("4.4.2");
-        // Listing dir should be the same arch dir as the download URL uses.
-        let dir = macos_arm64_dir();
-        assert!(listing.contains(dir));
-        assert!(url.contains(dir));
-    }
-
-    #[test]
-    fn download_url_macos_x86() {
-        let url = Platform::MacOsX86_64.download_url("4.3.1");
-        assert!(url.contains("x86_64"));
-        assert!(url.contains("4.3.1"));
-        assert!(url.ends_with(".pkg"));
-    }
-
-    #[test]
-    fn download_url_linux_x86() {
-        let url = Platform::LinuxX86_64.download_url("4.4.2");
-        assert!(url.contains("amd64"));
-        assert!(url.contains("4.4.2"));
-        assert!(url.ends_with(".deb"));
-    }
-
-    #[test]
-    fn download_url_linux_arm64() {
-        let url = Platform::LinuxArm64.download_url("4.4.2");
-        assert!(url.contains("arm64"));
-        assert!(url.ends_with(".deb"));
-    }
-
-    #[test]
-    fn download_url_windows() {
-        let url = Platform::WindowsX86_64.download_url("4.4.2");
-        assert!(url.contains("windows"));
-        assert!(url.contains("4.4.2"));
-        assert!(url.ends_with(".exe"));
-    }
-
-    #[test]
-    fn extract_r_home_from_script() {
-        let dir = TempDir::new().unwrap();
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(
-            bin_dir.join("R"),
-            "#!/bin/sh\nR_HOME_DIR=/custom/path/to/R\nexport R_HOME\n",
-        )
-        .unwrap();
-        let result = extract_r_home_dir(dir.path()).unwrap();
-        assert_eq!(result, "/custom/path/to/R");
-    }
-
-    #[test]
-    fn extract_r_home_fallback() {
-        let dir = TempDir::new().unwrap();
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::write(bin_dir.join("R"), "#!/bin/sh\necho hello\n").unwrap();
-        let result = extract_r_home_dir(dir.path()).unwrap();
-        assert_eq!(result, "/Library/Frameworks/R.framework/Resources");
+    fn parse_r_version_orders_correctly() {
+        assert_eq!(parse_r_version("4.4.2"), Some((4, 4, 2)));
+        assert_eq!(parse_r_version("4.4"), Some((4, 4, 0)));
+        assert!(parse_r_version("4.1.0") >= Some(MACOS_MIN_R_VERSION));
+        assert!(parse_r_version("4.0.5") < Some(MACOS_MIN_R_VERSION));
+        assert!(parse_r_version("next").is_none());
     }
 
     #[test]
@@ -1963,150 +861,38 @@ mod tests {
     }
 
     #[test]
-    fn find_data_tar_gz() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("data.tar.gz"), "").unwrap();
-        let result = find_data_tar(dir.path()).unwrap();
-        assert!(result.to_string_lossy().contains("data.tar.gz"));
-    }
+    fn install_r_portable_flattens_nested_tarball() {
+        // Build a .tar.gz whose R_HOME is nested under `R-4.4.2/` (as the
+        // portable archives are), then verify install_r_portable flattens it
+        // so `<dest>/bin/R` exists.
+        let mut tar_buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(enc);
+            let script = b"#!/bin/sh\necho R\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(script.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "R-4.4.2/bin/R", &script[..])
+                .unwrap();
+            let lib = b"libR";
+            let mut h2 = tar::Header::new_gnu();
+            h2.set_size(lib.len() as u64);
+            h2.set_mode(0o644);
+            h2.set_cksum();
+            builder
+                .append_data(&mut h2, "R-4.4.2/lib/libR.so", &lib[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
 
-    #[test]
-    fn find_data_tar_xz() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("data.tar.xz"), "").unwrap();
-        let result = find_data_tar(dir.path()).unwrap();
-        assert!(result.to_string_lossy().contains("data.tar.xz"));
-    }
-
-    #[test]
-    fn find_data_tar_missing() {
-        let dir = TempDir::new().unwrap();
-        let result = find_data_tar(dir.path());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn collect_payloads_finds_files() {
-        let dir = TempDir::new().unwrap();
-        let sub = dir.path().join("R-fw.pkg");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("Payload"), "data").unwrap();
-        let payloads = find_all_payload_files(dir.path()).unwrap();
-        assert_eq!(payloads.len(), 1);
-    }
-
-    #[test]
-    fn collect_payloads_empty_dir() {
-        let dir = TempDir::new().unwrap();
-        let payloads = find_all_payload_files(dir.path()).unwrap();
-        assert!(payloads.is_empty());
-    }
-
-    #[test]
-    fn patch_makeconf_libr_rewrites() {
-        let dir = TempDir::new().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
-        std::fs::write(
-            etc.join("Makeconf"),
-            "CC = gcc\nLIBR = -F/Library/Frameworks/R.framework/.. -framework R\nCFLAGS = -O2\n",
-        )
-        .unwrap();
-        patch_makeconf_libr(dir.path()).unwrap();
-        let content = std::fs::read_to_string(etc.join("Makeconf")).unwrap();
-        assert!(content.contains(&format!("LIBR = -L{}/lib -lR", dir.path().display())));
-        assert!(content.contains("CC = gcc"));
-        assert!(content.contains("CFLAGS = -O2"));
-    }
-
-    #[test]
-    fn patch_makeconf_missing_file() {
-        let dir = TempDir::new().unwrap();
-        // Should be a no-op, not an error
-        patch_makeconf_libr(dir.path()).unwrap();
-    }
-
-    #[test]
-    fn redirect_makeconf_toolchain_rewrites_all_refs() {
-        let content = "LDFLAGS = -L/opt/R/arm64/lib\n\
-                       CPPFLAGS = -I/opt/R/arm64/include\n\
-                       FC = /opt/gfortran/bin/gfortran\n";
-        let out = redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").unwrap();
-        assert!(out.contains("-L/opt/homebrew/lib"));
-        assert!(out.contains("-I/opt/homebrew/include"));
-        // Unrelated prefixes (gfortran) are left intact.
-        assert!(out.contains("/opt/gfortran/bin/gfortran"));
-        assert!(!out.contains("/opt/R/arm64"));
-    }
-
-    #[test]
-    fn redirect_makeconf_toolchain_noop_when_absent() {
-        // No /opt/R/<arch> reference → None (nothing to rewrite).
-        let content = "LDFLAGS = -L/opt/homebrew/lib\nCC = clang\n";
-        assert!(redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").is_none());
-    }
-
-    #[test]
-    fn redirect_makeconf_toolchain_does_not_corrupt_longer_paths() {
-        // A longer component sharing the prefix must NOT be rewritten — the
-        // anchor is the trailing slash, so `/opt/R/arm64-apple-darwin` (no
-        // following slash) is left intact while real `/opt/R/arm64/...` refs
-        // are redirected.
-        let content = "LDFLAGS = -L/opt/R/arm64/lib\nFOO = /opt/R/arm64-apple-darwin\n";
-        let out = redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").unwrap();
-        assert!(out.contains("-L/opt/homebrew/lib"));
-        assert!(out.contains("/opt/R/arm64-apple-darwin"));
-        assert!(!out.contains("/opt/homebrew-apple-darwin"));
-    }
-
-    #[test]
-    fn write_renviron_site_creates_file() {
-        let dir = TempDir::new().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
-        write_renviron_site(dir.path()).unwrap();
-        let content = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
-        assert!(content.contains("DYLD_LIBRARY_PATH=${R_HOME}/lib"));
-        assert!(content.contains("LD_LIBRARY_PATH=${R_HOME}/lib"));
-    }
-
-    #[test]
-    fn write_renviron_site_idempotent() {
-        let dir = TempDir::new().unwrap();
-        let etc = dir.path().join("etc");
-        std::fs::create_dir_all(&etc).unwrap();
-        write_renviron_site(dir.path()).unwrap();
-        let first = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
-        write_renviron_site(dir.path()).unwrap();
-        let second = std::fs::read_to_string(etc.join("Renviron.site")).unwrap();
-        assert_eq!(first, second, "write_renviron_site should be idempotent");
-    }
-
-    #[test]
-    fn patch_text_files_replaces_in_text() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("test.txt"),
-            "path=/old/location\nother=/old/location/sub\n",
-        )
-        .unwrap();
-        patch_text_files(dir.path(), "/old/location", "/new/location").unwrap();
-        let content = std::fs::read_to_string(dir.path().join("test.txt")).unwrap();
-        assert!(content.contains("/new/location"));
-        assert!(!content.contains("/old/location\n"));
-    }
-
-    #[test]
-    fn patch_text_files_skips_binary() {
-        let dir = TempDir::new().unwrap();
-        let mut data = b"/old/location".to_vec();
-        data.push(0); // null byte → binary file
-        data.extend_from_slice(b"more data");
-        std::fs::write(dir.path().join("binary.so"), &data).unwrap();
-        patch_text_files(dir.path(), "/old/location", "/new/location").unwrap();
-        let content = std::fs::read(dir.path().join("binary.so")).unwrap();
-        // Should be unchanged — binary files are skipped
-        assert_eq!(content, data);
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.2");
+        install_r_portable(&tar_buf, &dest, Platform::LinuxX86_64).unwrap();
+        assert!(dest.join("bin").join("R").exists());
+        assert!(dest.join("lib").join("libR.so").exists());
     }
 
     #[test]

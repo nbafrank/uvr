@@ -49,6 +49,15 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      # End-to-end check of the portable-build download + extract path against
+      # the live CDN. `r install` downloads, extracts, and validates `R --version`
+      # internally, so a clean exit means the portable build runs on this OS.
+      - name: Smoke test R install
+        shell: bash
+        run: |
+          cargo run --quiet -- r install 4.4.2
+          cargo run --quiet -- r list --all | head
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest

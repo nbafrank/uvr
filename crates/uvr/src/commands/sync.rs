@@ -12,9 +12,7 @@ use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
-use uvr_core::r_version::downloader::{
-    patch_r_dylibs, patch_r_executables, patch_renviron_site, Platform,
-};
+use uvr_core::r_version::downloader::Platform;
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
@@ -542,11 +540,10 @@ pub async fn install_from_lockfile(
             anyhow::anyhow!("R not found. Install R or use `uvr r install <version>`")
         })?;
 
-    // For uvr-managed R installs:
-    // 1. Ensure etc/Renviron.site has DYLD_LIBRARY_PATH set so that sub-R processes
-    //    spawned by R CMD INSTALL can find libR.dylib (macOS SIP strips DYLD_* vars).
-    // 2. Compute the path to libR.dylib so binary packages extracted from P3M can be
-    //    patched to reference the managed R's libR instead of the CRAN framework path.
+    // For uvr-managed R installs, compute the path to libR.dylib so binary
+    // packages extracted from P3M can be patched to reference the managed R's
+    // libR instead of the CRAN framework path baked into their `.so` files.
+    // (The portable R runtime itself is relocatable and needs no patching.)
     let r_home_opt = r_binary
         .parent()
         .and_then(|p| p.parent())
@@ -558,19 +555,6 @@ pub async fn install_from_lockfile(
             .map(|d| r_home.starts_with(d))
             .unwrap_or(false)
         {
-            // macOS-specific: patch dylib install names and Renviron.site.
-            // This is a defensive re-patch of an already-installed managed R
-            // (the authoritative patch + validation happened at install time),
-            // so a failure here warns rather than aborting the sync (#111).
-            if cfg!(target_os = "macos") {
-                let _ = patch_renviron_site(r_home);
-                if let Err(e) = patch_r_dylibs(r_home) {
-                    tracing::warn!("re-patch of managed R dylibs failed: {e}");
-                }
-                if let Err(e) = patch_r_executables(r_home) {
-                    tracing::warn!("re-patch of managed R executables failed: {e}");
-                }
-            }
             let libr_name = if cfg!(target_os = "macos") {
                 "libR.dylib"
             } else if cfg!(target_os = "windows") {

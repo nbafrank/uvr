@@ -229,7 +229,7 @@ uvr tree
 | `uvr run --with pkg` | Run with extra packages available (not added to manifest) |
 | `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` |
 | `uvr r list` | Show installed R versions |
-| `uvr r list --all` | Show all available R versions (fetched from CRAN) |
+| `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
 | `uvr r use <ver>` | Set R version constraint in `uvr.toml` |
 | `uvr r pin <ver>` | Write exact version to `.r-version` |
 | `uvr export` | Export lockfile to renv.lock format |
@@ -281,7 +281,7 @@ uvr r use ">=4.3.0"
 uvr r pin 4.4.2
 ```
 
-R versions are installed to `~/.uvr/r-versions/` and managed independently of any system R installation. On Windows, the CRAN installer runs with `/CURRENTUSER` — no admin elevation required, making it ideal for corporate and university environments where users cannot install software system-wide.
+R versions are installed to `~/.uvr/r-versions/` and managed independently of any system R installation. uvr downloads **portable, relocatable R builds** from the [rstudio/r-builds](https://github.com/rstudio/r-builds) project ([`cdn.posit.co/r`](https://cdn.posit.co/r/versions.json)): each is a self-contained archive that detects its own location at runtime — no system-wide install, no admin/`sudo`, and no post-install patching. This makes it ideal for corporate and university environments where users cannot install software system-wide.
 
 ---
 
@@ -386,13 +386,14 @@ Cache
 
 | Platform | Binary packages | Source install | R version management |
 |----------|----------------|----------------|----------------------|
-| macOS ARM64 (Apple Silicon) | P3M | Y | Y |
-| macOS x86-64 | P3M | Y | Y |
-| Linux x86-64 | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y (Ubuntu 22.04+) |
-| Linux ARM64 | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y (Ubuntu 22.04+) |
+| macOS ARM64 (Apple Silicon) | P3M | Y | Y (R 4.1.0+) |
+| macOS x86-64 | P3M | Y | Y (R 4.1.0+) |
+| Linux x86-64 (glibc ≥ 2.34) | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y |
+| Linux ARM64 (glibc ≥ 2.34) | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y |
+| Linux (musl / Alpine) | source | Y | Y |
 | Windows x86-64 | P3M | Y (with Rtools) | Y (no admin required) |
 
-P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). Linux R binaries are sourced from [Posit CDN](https://cdn.posit.co/) (Ubuntu 22.04+ only); macOS R binaries from CRAN; Windows R from the CRAN Inno Setup installer.
+P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). R itself is installed from the **portable, relocatable builds** published by [rstudio/r-builds](https://github.com/rstudio/r-builds) on [Posit CDN](https://cdn.posit.co/r/versions.json) — `manylinux_2_34` tarballs on glibc Linux (requires **glibc ≥ 2.34**; excludes Ubuntu 20.04, RHEL 8, Debian 11), `musllinux_1_2` on Alpine, notarized `.tar.gz` on macOS (R 4.1.0+), and `.zip` on Windows. The portable Linux builds bundle their own libraries but expect `ca-certificates` and `fontconfig` (plus `ttf-dejavu` on Alpine) to be present on the host.
 
 ---
 
