@@ -22,6 +22,18 @@ fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
     }
 }
 
+/// Map an R version string (e.g. `"4.4.1"`) to its paired Bioconductor release
+/// (e.g. `"3.20"`). Unparseable or unrecognized versions fall back to the
+/// newest known release. Public wrapper over the internal major/minor mapping
+/// so callers outside resolution (e.g. the `uvr add` not-found diagnostic) can
+/// pick the same release without duplicating the table.
+pub fn default_release_for_r(r_version: &str) -> &'static str {
+    let parts: Vec<&str> = r_version.split('.').collect();
+    let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
+    bioc_release_for_r(major, minor)
+}
+
 /// Bioconductor ships packages in four parallel indexes. A software package
 /// like DESeq2 may depend on a data/annotation package like GenomeInfoDbData,
 /// so we fetch and merge all four.
@@ -39,11 +51,7 @@ pub struct BiocRegistry {
 impl BiocRegistry {
     /// Fetch the Bioconductor package index for the release matching `r_version`.
     pub async fn fetch(client: &reqwest::Client, r_version: &str) -> Result<Self> {
-        let parts: Vec<&str> = r_version.split('.').collect();
-        let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
-        let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
-        let bioc_release = bioc_release_for_r(major, minor);
-        Self::fetch_release(client, bioc_release).await
+        Self::fetch_release(client, default_release_for_r(r_version)).await
     }
 
     /// Fetch the Bioconductor package index for a specific release (e.g. `"3.18"`).
@@ -96,6 +104,12 @@ impl BiocRegistry {
     /// The Bioconductor release version this registry was fetched for (e.g. `"3.18"`).
     pub fn release(&self) -> &str {
         &self.bioc_release
+    }
+
+    /// Whether this Bioconductor release contains a package with the given name
+    /// (across software, data, and workflow sub-repos).
+    pub fn contains(&self, name: &str) -> bool {
+        self.packages.contains_key(name)
     }
 }
 
@@ -374,5 +388,27 @@ mod tests {
             bioc_release: "3.20".to_string(),
         };
         assert_eq!(registry.release(), "3.20");
+    }
+
+    #[test]
+    fn default_release_maps_r_to_bioc() {
+        assert_eq!(default_release_for_r("4.5.1"), "3.21");
+        assert_eq!(default_release_for_r("4.4.0"), "3.20");
+        assert_eq!(default_release_for_r("4.3"), "3.18");
+        // Unparseable major/minor fall back to 4.4 (→ 3.20), matching the
+        // prior inline `unwrap_or(4)` behavior; an unknown but parseable
+        // version falls through to the newest known release.
+        assert_eq!(default_release_for_r("garbage"), "3.20");
+        assert_eq!(default_release_for_r("9.9.9"), "3.21");
+    }
+
+    #[test]
+    fn contains_reports_membership() {
+        // Empty registry contains nothing; non-empty path is exercised live.
+        let registry = BiocRegistry {
+            packages: HashMap::new(),
+            bioc_release: "3.20".to_string(),
+        };
+        assert!(!registry.contains("DESeq2"));
     }
 }

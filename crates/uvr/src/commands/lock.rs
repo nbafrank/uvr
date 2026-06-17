@@ -90,21 +90,7 @@ async fn resolve_lockfile(
             Some(locked_bioc.to_string())
         } else {
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-            let parts: Vec<&str> = r_ver.split('.').collect();
-            let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
-            let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
-            Some(
-                match (major, minor) {
-                    (4, 5) => "3.21",
-                    (4, 4) => "3.20",
-                    (4, 3) => "3.18",
-                    (4, 2) => "3.16",
-                    (4, 1) => "3.14",
-                    (4, 0) => "3.12",
-                    _ => "3.21",
-                }
-                .to_string(),
-            )
+            Some(uvr_core::registry::bioconductor::default_release_for_r(r_ver).to_string())
         }
     } else {
         None
