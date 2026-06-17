@@ -173,6 +173,22 @@ impl RCmdInstall {
         let mut cmd = self.build_cmd(tarball, library);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        // Put the streaming child in its own process group (pre-exec setpgid)
+        // so the timeout watchdog can signal the whole build subtree (R + make
+        // + cc + Rscript) at once via `kill(-pid)`. Without this, killing only R
+        // leaves its grandchildren holding the stdout pipe open and the drain
+        // deadlocks (#113). This child is registered with the signal handler
+        // below, so detaching it from the terminal's foreground group is safe —
+        // uvr's own SIGINT handler kills the group deliberately. Applied only
+        // here, NOT in the shared build_cmd: the quiet `install()` path isn't
+        // registered for signal cleanup and must stay in the terminal group so
+        // Ctrl+C still reaches it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
         let mut child = cmd.spawn()?;
         let pid = child.id();
 
@@ -318,18 +334,6 @@ impl RCmdInstall {
             "--no-staged-install",
             &tarball_str,
         ]);
-
-        // Put the child in its own process group so the timeout watchdog can
-        // signal the whole build subtree (R + make + cc + Rscript) at once via
-        // `kill(-pid)`. Without this, killing only R leaves its grandchildren
-        // holding the stdout pipe open and the drain deadlocks (#113). uvr's
-        // own SIGINT handler kills the registered group deliberately, so
-        // detaching from the terminal's foreground group is intended.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
 
         // Neutralize the project / user .Rprofile during install. Project
         // .Rprofiles often contain `source("renv/activate.R")` (renv pattern)

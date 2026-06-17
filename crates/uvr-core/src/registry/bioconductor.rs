@@ -41,7 +41,10 @@ fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
 pub fn default_release_for_r(r_version: &str) -> &'static str {
     let parts: Vec<&str> = r_version.split('.').collect();
     let major: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(4);
-    let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4);
+    // Unparseable/missing minor → a value outside the table so it falls through
+    // to the newest-known release, matching the "unrecognized → newest" intent
+    // (rather than silently landing on a specific old release).
+    let minor: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(99);
     bioc_release_for_r(major, minor)
 }
 
@@ -414,10 +417,10 @@ mod tests {
         assert_eq!(default_release_for_r("4.5.1"), "3.21");
         assert_eq!(default_release_for_r("4.4.0"), "3.20");
         assert_eq!(default_release_for_r("4.3"), "3.18");
-        // Unparseable major/minor fall back to 4.4 (→ 3.20), matching the
-        // prior inline `unwrap_or(4)` behavior; an unknown but parseable
-        // version falls through to the newest known release.
-        assert_eq!(default_release_for_r("garbage"), "3.20");
+        // Unparseable / partial versions fall through to the newest known
+        // release (the minor fallback is deliberately outside the table).
+        assert_eq!(default_release_for_r("garbage"), "3.23");
+        assert_eq!(default_release_for_r("4"), "3.23");
         assert_eq!(default_release_for_r("9.9.9"), "3.23");
     }
 

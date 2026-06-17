@@ -53,6 +53,12 @@ pub fn drain() -> Vec<ActiveInstall> {
 
 /// Kill every in-flight install and remove its `00LOCK-<pkg>/` dir.
 /// Call from the SIGINT handler before exiting.
+///
+/// Sends only SIGTERM (no SIGKILL escalation, unlike the timeout watchdog).
+/// That asymmetry is intentional: we're already on the way out, so we don't
+/// block the handler waiting to escalate — the OS reaps any TERM-ignoring
+/// stragglers as orphans. Do NOT add a blocking grace-then-SIGKILL loop here;
+/// blocking in a signal-driven exit path is a worse bug than a rare orphan.
 pub fn kill_and_cleanup_all() {
     for info in drain() {
         kill_pid(info.pid);
@@ -64,8 +70,9 @@ fn kill_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
         // Streaming install children are their own process-group leaders (see
-        // r_cmd_install::build_cmd), so signal the whole group (`-pid`) to also
-        // reap the make/cc grandchildren on Ctrl+C, matching the watchdog (#113).
+        // r_cmd_install::install_streaming_inner), so signal the whole group
+        // (`-pid`) to also reap make/cc grandchildren on Ctrl+C, matching the
+        // timeout watchdog (#113).
         libc::kill(-(pid as i32), libc::SIGTERM);
     }
     #[cfg(windows)]

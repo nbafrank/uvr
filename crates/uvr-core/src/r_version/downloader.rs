@@ -1197,8 +1197,13 @@ pub fn patch_r_dylibs(r_home: &Path) -> Result<()> {
             .unwrap_or_default();
 
         let mut needs_resign = false;
-        if old_id.contains("/Library/Frameworks/R.framework/") {
-            run_install_name_tool(&["-id", &path_str, &path_str], &path);
+        if old_id.contains("/Library/Frameworks/R.framework/")
+            && run_install_name_tool(&["-id", &path_str, &path_str], &path)
+        {
+            // Only resign if the install-name actually changed. Resigning after
+            // a failed rewrite would bless a dylib that still points at the
+            // nonexistent CRAN framework path — signed-but-broken, which looks
+            // healthy but fails at load. Matches the `-change` gate below.
             needs_resign = true;
         }
 
