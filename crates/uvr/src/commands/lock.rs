@@ -85,12 +85,30 @@ async fn resolve_lockfile(
 
     let bioc_release: Option<String> = if has_bioc {
         if let Some(ref bioc_ver) = project.manifest.project.bioc_version {
+            // Explicit project pin always wins — the user chose this release.
             Some(bioc_ver.clone())
-        } else if let Some(locked_bioc) = existing.and_then(|lf| lf.r.bioc_version.as_deref()) {
-            Some(locked_bioc.to_string())
         } else {
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-            Some(uvr_core::registry::bioconductor::default_release_for_r(r_ver).to_string())
+            let derived = uvr_core::registry::bioconductor::default_release_for_r(r_ver);
+            // Reuse the lockfile's recorded Bioc release only if it still agrees
+            // with the release the active R maps to. A lock can carry a release
+            // paired with a different R — R was upgraded since locking, or the
+            // lock was written by an older uvr with a stale R→Bioc table (e.g.
+            // R 4.6 + Bioc 3.21, #119). Honoring that pulls package sources for
+            // the wrong R that fail to compile, so on mismatch we re-derive and
+            // warn rather than silently reusing it.
+            match existing.and_then(|lf| lf.r.bioc_version.as_deref()) {
+                Some(locked) if locked == derived => Some(locked.to_string()),
+                Some(locked) => {
+                    tracing::warn!(
+                        "Lockfile pins Bioconductor {locked}, but R {r_ver} uses Bioconductor \
+                         {derived}; re-resolving against {derived}. Pin `bioc_version` in \
+                         uvr.toml to force a specific release."
+                    );
+                    Some(derived.to_string())
+                }
+                None => Some(derived.to_string()),
+            }
         }
     } else {
         None
