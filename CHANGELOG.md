@@ -7,6 +7,43 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.11 (2026-06-17)
+
+Bioconductor and macOS-install reliability: fixes a real breakage for R 4.6
+users installing Bioconductor packages, makes wrong-channel `uvr add` errors
+actionable, and hardens the source-build and macOS code-signing paths.
+
+### Fixes
+
+- **R 4.6 + Bioconductor now resolves the right release** (#119): uvr's
+  R→Bioconductor mapping had no entry for R 4.6 and fell back to the R 4.5
+  release (3.21). On R 4.6 that pulled package sources written against the
+  R 4.5 C API — e.g. S4Vectors 0.46.0 — which fail to compile against R 4.6
+  headers (`PRENV`/`Rf_findVar` errors under the current macOS toolchain).
+  R 4.6 now maps to Bioconductor 3.23 (which ships compatible versions and
+  prebuilt binaries), and the fallback for unrecognized R versions is the
+  newest known release rather than a stale one.
+- **`uvr add` gives channel-aware "not found" guidance** (#118): when a
+  package isn't found, uvr now checks Bioconductor and, if it's there,
+  suggests `--bioc`; a `--bioc` add that isn't in the current Bioconductor
+  release is explained as such instead of showing the CRAN-archive hint that
+  doesn't apply. Works even offline (never shows the wrong-channel hint).
+- **Source builds: kill the whole build process group on timeout** (#113):
+  a timed-out build now terminates R *and* its `make`/`cc`/`Rscript`
+  grandchildren, which otherwise survived and held the output pipe open —
+  a follow-on to the v0.3.10 hang fix (#52). Ctrl+C does the same.
+- **macOS install surfaces patch-pipeline failures** (#112, #114): a failed
+  `install_name_tool`/`otool` step is now reported instead of silently
+  swallowed, and `uvr r install` reports every dylib it couldn't re-sign
+  rather than aborting on the first — avoiding installs that look healthy
+  but crash on first load.
+
+### Features
+
+- **`uvr add --install-system-deps`** (#115, thanks @pat-s): the
+  auto-install of detected system libraries, previously only on `uvr sync`,
+  is now available on `uvr add` too (same `UVR_INSTALL_SYSREQS` mechanism).
+
 ## v0.3.10 (2026-06-12)
 
 Fixes a long-standing source-build hang on Linux plus a batch of
