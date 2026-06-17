@@ -387,6 +387,17 @@ impl RCmdInstall {
             cmd.env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
                 .env("LD_LIBRARY_PATH", r_lib_str.as_ref());
 
+            // Put the managed R's `bin` on PATH so package build scripts that
+            // shell out to `Rscript` / `R` resolve them — e.g. cytolib /
+            // RProtoBufLib emit their link flags via `Rscript` during flowCore's
+            // build, which otherwise fails with "Rscript: No such file or
+            // directory" since uvr's R isn't on the user's PATH. Windows handles
+            // its PATH (Rtools) in the branch above.
+            if let Some(r_bin_dir) = std::path::Path::new(&self.r_binary).parent() {
+                let existing = std::env::var("PATH").unwrap_or_default();
+                cmd.env("PATH", format!("{}:{existing}", r_bin_dir.display()));
+            }
+
             if cfg!(target_os = "macos") {
                 let (brew_lib, brew_inc, brew_pkgconfig) = if cfg!(target_arch = "aarch64") {
                     (

@@ -708,6 +708,12 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
     // Replace it with a plain `-L<dest>/lib -lR` that works from any location.
     patch_makeconf_libr(dest)?;
 
+    // Step 7.5: redirect the CRAN build-toolchain prefix (/opt/R/<arch>) baked
+    // into Makeconf to Homebrew when that toolchain isn't installed, so source
+    // builds of packages linking external libs (e.g. flowCore → libssl) can find
+    // them instead of failing on the absent /opt/R/<arch>/lib.
+    patch_makeconf_toolchain_paths(dest)?;
+
     // Step 8: fix libR.dylib's embedded install-name so packages compiled against
     // it can find the library at its new location without needing DYLD_LIBRARY_PATH.
     fix_libr_install_name(dest)?;
@@ -837,6 +843,63 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
             makeconf.display()
         ))
     })?;
+    Ok(())
+}
+
+/// Redirect the CRAN macOS build-toolchain prefix in Makeconf content to the
+/// Homebrew prefix. Returns the rewritten content, or `None` if `cran_dir`
+/// doesn't appear (nothing to do). Pure string transform — the caller decides
+/// whether redirecting is appropriate.
+fn redirect_makeconf_toolchain(content: &str, cran_dir: &str, brew_prefix: &str) -> Option<String> {
+    if !content.contains(cran_dir) {
+        return None;
+    }
+    Some(content.replace(cran_dir, brew_prefix))
+}
+
+/// CRAN's macOS R bakes its separately-shipped build-toolchain prefix
+/// (`/opt/R/<arch>`) into `etc/Makeconf` as `LDFLAGS = -L/opt/R/<arch>/lib`,
+/// `CPPFLAGS = -I/opt/R/<arch>/include`, etc. A uvr-managed install doesn't ship
+/// that bundle, so source builds of packages that link external libraries (e.g.
+/// flowCore → libssl) fail with "library not found" even when the library is
+/// present via Homebrew — the Makeconf assignment overrides any env LDFLAGS we
+/// inject at build time.
+///
+/// When the CRAN toolchain dir is absent but a Homebrew prefix exists, redirect
+/// those references to Homebrew so source builds find Homebrew-provided
+/// libraries. Best-effort and deliberately conditional: if the CRAN toolchain IS
+/// installed we leave Makeconf alone (its setup is correct), and if Homebrew is
+/// absent too we don't point at another missing dir — the link error then guides
+/// the user to install a toolchain.
+fn patch_makeconf_toolchain_paths(dest: &Path) -> Result<()> {
+    let makeconf = dest.join("etc").join("Makeconf");
+    if !makeconf.exists() {
+        return Ok(());
+    }
+    let (cran_dir, brew_prefix) = if cfg!(target_arch = "aarch64") {
+        ("/opt/R/arm64", "/opt/homebrew")
+    } else {
+        ("/opt/R/x86_64", "/usr/local")
+    };
+    // Only redirect when CRAN's toolchain is missing and Homebrew is present.
+    if Path::new(cran_dir).exists() || !Path::new(brew_prefix).exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&makeconf)
+        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", makeconf.display())))?;
+    let Some(patched) = redirect_makeconf_toolchain(&content, cran_dir, brew_prefix) else {
+        return Ok(());
+    };
+    std::fs::write(&makeconf, patched).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to write patched {}: {e}",
+            makeconf.display()
+        ))
+    })?;
+    tracing::info!(
+        "Patched etc/Makeconf: redirected {cran_dir} → {brew_prefix} (CRAN macOS build \
+         toolchain not installed; using Homebrew for source-build libraries)."
+    );
     Ok(())
 }
 
@@ -1906,6 +1969,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Should be a no-op, not an error
         patch_makeconf_libr(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn redirect_makeconf_toolchain_rewrites_all_refs() {
+        let content = "LDFLAGS = -L/opt/R/arm64/lib\n\
+                       CPPFLAGS = -I/opt/R/arm64/include\n\
+                       FC = /opt/gfortran/bin/gfortran\n";
+        let out = redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").unwrap();
+        assert!(out.contains("-L/opt/homebrew/lib"));
+        assert!(out.contains("-I/opt/homebrew/include"));
+        // Unrelated prefixes (gfortran) are left intact.
+        assert!(out.contains("/opt/gfortran/bin/gfortran"));
+        assert!(!out.contains("/opt/R/arm64"));
+    }
+
+    #[test]
+    fn redirect_makeconf_toolchain_noop_when_absent() {
+        // No /opt/R/<arch> reference → None (nothing to rewrite).
+        let content = "LDFLAGS = -L/opt/homebrew/lib\nCC = clang\n";
+        assert!(redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").is_none());
     }
 
     #[test]
