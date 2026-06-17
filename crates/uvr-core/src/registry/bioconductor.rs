@@ -10,15 +10,26 @@ use crate::registry::cran::{parse_dcf_block, CranPackageEntry};
 use crate::registry::PackageInfo;
 use crate::resolver::PackageRegistry;
 
+/// Map an R major.minor to its paired Bioconductor release, per Bioconductor's
+/// own `r_ver_for_bioc_ver` table (https://bioconductor.org/config.yaml). Each
+/// entry must name a release built for *that* R — installing a release paired
+/// with a different R version pulls package sources written against the wrong R
+/// C API, which fail to compile (e.g. S4Vectors' `PRENV`/`Rf_findVar` against
+/// R 4.6 headers). The fallback is the newest known release, so a newer-than-
+/// known R errs toward the latest API rather than a stale one.
+///
+/// NOTE: this table is hardcoded and must be extended each R/Bioc release.
 fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
     match (r_major, r_minor) {
+        (4, 6) => "3.23",
         (4, 5) => "3.21",
         (4, 4) => "3.20",
         (4, 3) => "3.18",
         (4, 2) => "3.16",
         (4, 1) => "3.14",
         (4, 0) => "3.12",
-        _ => "3.21",
+        // Unknown/newer R: newest known release beats a hardcoded old one.
+        _ => "3.23",
     }
 }
 
@@ -306,8 +317,12 @@ mod tests {
 
     #[test]
     fn bioc_release_fallback() {
-        assert_eq!(bioc_release_for_r(5, 0), "3.21");
-        assert_eq!(bioc_release_for_r(3, 6), "3.21");
+        // Unknown R versions fall back to the newest known release, not a
+        // stale one — a future R should err toward the latest Bioc API.
+        assert_eq!(bioc_release_for_r(5, 0), "3.23");
+        assert_eq!(bioc_release_for_r(3, 6), "3.23");
+        // R 4.6 is now mapped explicitly to its paired release.
+        assert_eq!(bioc_release_for_r(4, 6), "3.23");
     }
 
     #[test]
@@ -392,6 +407,10 @@ mod tests {
 
     #[test]
     fn default_release_maps_r_to_bioc() {
+        // R 4.6 must map to its own Bioc release (3.23), not the 4.5 fallback —
+        // pulling 3.21 here ships R-4.5-API package sources that fail to compile
+        // against R 4.6 headers (the S4Vectors PRENV/Rf_findVar bug).
+        assert_eq!(default_release_for_r("4.6.0"), "3.23");
         assert_eq!(default_release_for_r("4.5.1"), "3.21");
         assert_eq!(default_release_for_r("4.4.0"), "3.20");
         assert_eq!(default_release_for_r("4.3"), "3.18");
@@ -399,7 +418,7 @@ mod tests {
         // prior inline `unwrap_or(4)` behavior; an unknown but parseable
         // version falls through to the newest known release.
         assert_eq!(default_release_for_r("garbage"), "3.20");
-        assert_eq!(default_release_for_r("9.9.9"), "3.21");
+        assert_eq!(default_release_for_r("9.9.9"), "3.23");
     }
 
     #[test]
