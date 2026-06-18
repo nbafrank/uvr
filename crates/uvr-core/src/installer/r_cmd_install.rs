@@ -394,8 +394,14 @@ impl RCmdInstall {
             // directory" since uvr's R isn't on the user's PATH. Windows handles
             // its PATH (Rtools) in the branch above.
             if let Some(r_bin_dir) = std::path::Path::new(&self.r_binary).parent() {
-                let existing = std::env::var("PATH").unwrap_or_default();
-                cmd.env("PATH", format!("{}:{existing}", r_bin_dir.display()));
+                let bin = r_bin_dir.display().to_string();
+                // Avoid a trailing colon when PATH is unset/empty — on POSIX an
+                // empty PATH entry resolves to the cwd, which we must not add.
+                let new_path = match std::env::var("PATH") {
+                    Ok(p) if !p.is_empty() => format!("{bin}:{p}"),
+                    _ => bin,
+                };
+                cmd.env("PATH", new_path);
             }
 
             if cfg!(target_os = "macos") {

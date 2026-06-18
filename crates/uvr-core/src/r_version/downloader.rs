@@ -851,10 +851,16 @@ fn patch_makeconf_libr(dest: &Path) -> Result<()> {
 /// doesn't appear (nothing to do). Pure string transform — the caller decides
 /// whether redirecting is appropriate.
 fn redirect_makeconf_toolchain(content: &str, cran_dir: &str, brew_prefix: &str) -> Option<String> {
-    if !content.contains(cran_dir) {
+    // Anchor on the trailing slash. Every real reference is a directory prefix
+    // (`-L/opt/R/arm64/lib`, `-I/opt/R/arm64/include`, pkgconfig/tcl paths), so
+    // matching `<cran_dir>/` rewrites them all while leaving a longer component
+    // like `/opt/R/arm64-apple-darwin` untouched (a bare `str::replace` would
+    // corrupt it to `/opt/homebrew-apple-darwin`).
+    let needle = format!("{cran_dir}/");
+    if !content.contains(&needle) {
         return None;
     }
-    Some(content.replace(cran_dir, brew_prefix))
+    Some(content.replace(&needle, &format!("{brew_prefix}/")))
 }
 
 /// CRAN's macOS R bakes its separately-shipped build-toolchain prefix
@@ -876,6 +882,11 @@ fn patch_makeconf_toolchain_paths(dest: &Path) -> Result<()> {
     if !makeconf.exists() {
         return Ok(());
     }
+    // cfg!(target_arch) reflects uvr's own build arch, not the installed R's.
+    // That's fine: a cross-arch install (e.g. x86_64 R under an arm64 uvr via
+    // Rosetta) simply won't contain the arm64 toolchain prefix, so
+    // redirect_makeconf_toolchain returns None and the patch is skipped — no
+    // corruption, just a missed (rare) optimization.
     let (cran_dir, brew_prefix) = if cfg!(target_arch = "aarch64") {
         ("/opt/R/arm64", "/opt/homebrew")
     } else {
@@ -1989,6 +2000,19 @@ mod tests {
         // No /opt/R/<arch> reference → None (nothing to rewrite).
         let content = "LDFLAGS = -L/opt/homebrew/lib\nCC = clang\n";
         assert!(redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").is_none());
+    }
+
+    #[test]
+    fn redirect_makeconf_toolchain_does_not_corrupt_longer_paths() {
+        // A longer component sharing the prefix must NOT be rewritten — the
+        // anchor is the trailing slash, so `/opt/R/arm64-apple-darwin` (no
+        // following slash) is left intact while real `/opt/R/arm64/...` refs
+        // are redirected.
+        let content = "LDFLAGS = -L/opt/R/arm64/lib\nFOO = /opt/R/arm64-apple-darwin\n";
+        let out = redirect_makeconf_toolchain(content, "/opt/R/arm64", "/opt/homebrew").unwrap();
+        assert!(out.contains("-L/opt/homebrew/lib"));
+        assert!(out.contains("/opt/R/arm64-apple-darwin"));
+        assert!(!out.contains("/opt/homebrew-apple-darwin"));
     }
 
     #[test]
