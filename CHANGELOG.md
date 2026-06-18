@@ -7,6 +7,37 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.12 (2026-06-18)
+
+Follow-ups to the v0.3.11 Bioconductor work plus macOS source-build fixes —
+together these get the full Bioconductor/flow-cytometry stack (S4Vectors,
+flowCore, …) installing on R 4.6 / macOS arm64.
+
+### Fixes
+
+- **Stale Bioconductor pin in the lockfile no longer wins** (#119): a lockfile
+  could record a Bioconductor release paired with a different R than the one
+  now active — e.g. R 4.6 with `bioc_version = "3.21"`, written by a pre-v0.3.11
+  uvr — and resolution reused it verbatim, so the v0.3.11 mapping fix never
+  applied and packages kept resolving against the wrong R's API. uvr now reuses
+  a locked release only when it matches the release the active R maps to;
+  otherwise it re-derives the correct one and warns (the lockfile self-heals on
+  that run). Explicit `bioc_version` pins in `uvr.toml` are still honored.
+- **macOS source builds find their libraries again** (#121): the CRAN macOS R
+  bakes its separately-shipped build-toolchain prefix (`/opt/R/<arch>`) into
+  `etc/Makeconf`. uvr doesn't ship that bundle, so source builds of packages
+  linking external libraries (e.g. `flowCore` → `libssl`) failed with "library
+  not found" even when the library was installed via Homebrew. When the CRAN
+  toolchain is absent and Homebrew is present, uvr now redirects those Makeconf
+  paths to the Homebrew prefix at install time.
+- **`Rscript` is on PATH during source builds** (#121): packages that shell out
+  to `Rscript`/`R` from their build (e.g. cytolib/RProtoBufLib for `flowCore`)
+  failed with "Rscript: No such file or directory" on macOS/Linux. uvr now adds
+  the managed R's `bin` to `PATH` for `R CMD INSTALL` (previously Windows-only).
+
+> Note: the Makeconf fix applies at `uvr r install` time. R versions installed
+> before v0.3.12 need a reinstall (`uvr r install <ver>`) to pick it up.
+
 ## v0.3.11 (2026-06-17)
 
 Bioconductor and macOS-install reliability: fixes a real breakage for R 4.6
