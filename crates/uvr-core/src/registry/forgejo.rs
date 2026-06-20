@@ -402,6 +402,8 @@ mod tests {
     // from env-mutation across parallel test threads (std::env is global).
     #[test]
     fn token_lookup() {
+        // Serialize with all other env-mutating tests (process-global env).
+        let _env = crate::env_vars::env_lock();
         // --- sub-test: per-host var takes precedence over global ---
         let host = "lookup-test-host.example";
         let per_host_var = "UVR_FORGEJO_TOKEN_LOOKUP_TEST_HOST_EXAMPLE";

@@ -135,6 +135,23 @@ fn derive_name_from_url(url: &str) -> String {
     }
 }
 
+/// Serializes every test that mutates process-global environment variables.
+/// Env vars are shared across the whole test binary, so tests touching the
+/// same var (e.g. `test_env_vars` and `test_env_repos` both on `UVR_REPOS`, or
+/// `test_env_vars` vs `r_cmd_install`'s timeout test on `UVR_INSTALL_TIMEOUT`)
+/// race under the parallel runner and fail intermittently. Any env-mutating
+/// test must hold this lock for its whole body. Crate-visible so tests in other
+/// modules can share it.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`ENV_LOCK`], recovering from a poisoned mutex (a prior test panic
+/// shouldn't cascade into "lock poisoned" failures for every other env test).
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +187,7 @@ mod tests {
     // since environment variables are global per process.
     #[test]
     fn test_env_vars() {
+        let _env = env_lock();
         // Backup original env vars if present so we don't permanently mess up the test runner environment
         let vars_to_test = [
             "UVR_CACHE_DIR",
@@ -251,6 +269,7 @@ mod tests {
     // the parallel test runner mutating the same env var.
     #[test]
     fn test_env_repos() {
+        let _env = env_lock();
         let _guard = EnvGuard::new(&["UVR_REPOS"]);
 
         // unset → None

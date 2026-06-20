@@ -479,6 +479,9 @@ mod tests {
 
     #[test]
     fn effective_default_when_none() {
+        // Serialize against other UVR_INSTALL_TIMEOUT-mutating tests (env_vars'
+        // test_env_vars sets it) — env vars are process-global (#flaky-ci).
+        let _env = crate::env_vars::env_lock();
         // Don't tamper with env in this test — just ensure default kicks in
         // when neither explicit nor a parseable env var is set.
         std::env::remove_var("UVR_INSTALL_TIMEOUT");
