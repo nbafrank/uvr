@@ -433,12 +433,35 @@ fn test_import_help() {
 // (Built:/Path: extraction, is_binary_capable, etc.) on all platforms.
 
 #[cfg(not(target_os = "windows"))]
+/// Guard returned by [`spawn_rpkgs_stub`]. Dropping it (at the end of the test)
+/// signals the server thread to stop and joins it, so the server's lifetime is
+/// exactly the test's scope — no wall-clock self-destruct that can expire while
+/// a slow parallel run is still connecting (which surfaced as flaky
+/// "Connection refused" / hangs).
+struct StubGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Drop for StubGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 /// Spin up a tiny HTTP server in a thread that serves files from
 /// `tests/fixtures/rpkgs-stub/`. Returns the bound URL (`http://127.0.0.1:PORT`)
-/// and a join handle that the caller drops to shut the server down.
-fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
+/// and a [`StubGuard`]; the server runs until the guard is dropped.
+fn spawn_rpkgs_stub() -> (String, StubGuard) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
@@ -453,11 +476,17 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
 
     listener.set_nonblocking(true).expect("set_nonblocking");
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
     let handle = std::thread::spawn(move || {
-        // Tiny accept loop. Stops after 30s of no work to avoid leaking on test panic.
+        // Serve until the guard signals stop. A generous wall-clock backstop
+        // guards against a leak only if Drop somehow never runs (it does, even
+        // on unwind) — it's NOT the primary shutdown, so it can't expire mid-test.
         let start = std::time::Instant::now();
         loop {
-            if start.elapsed() > std::time::Duration::from_secs(30) {
+            if stop_thread.load(Ordering::SeqCst)
+                || start.elapsed() > std::time::Duration::from_secs(120)
+            {
                 break;
             }
             match listener.accept() {
@@ -509,7 +538,13 @@ fn spawn_rpkgs_stub() -> (String, std::thread::JoinHandle<()>) {
         }
     });
 
-    (url, handle)
+    (
+        url,
+        StubGuard {
+            stop,
+            handle: Some(handle),
+        },
+    )
 }
 
 #[cfg(not(target_os = "windows"))]
