@@ -7,6 +7,28 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.13 (2026-06-24)
+
+A correctness fix for a silent wrong-R-version binary install when projects
+on different R minors share the download cache.
+
+### Fixes
+
+- **`uvr sync` no longer installs a binary built for the wrong R version**
+  (#122, thanks @svraka): the download cache keyed entries on the URL basename
+  alone. On Linux, Posit Package Manager serves a *different* R-version binary
+  at the *same URL* (it selects by the R version in the request's User-Agent),
+  so two projects on different R minors sharing `~/.uvr/cache/` collided on one
+  entry — installing a binary compiled for the other R, which then failed at
+  `library()` with a cryptic `dlopen`/`LoadLibrary` "symbol not found" error.
+  Cache entries are now keyed on a hash of the URL **and** User-Agent, so the
+  two R versions get distinct entries. Windows/macOS were also affected in
+  principle (R-minor in the URL path) and are likewise disambiguated.
+
+  > If you already hit this, a one-time `uvr cache clean` clears the
+  > already-poisoned extracted-package cache; upgrading alone doesn't repair
+  > entries written before the fix.
+
 ## v0.3.12 (2026-06-18)
 
 Follow-ups to the v0.3.11 Bioconductor work plus macOS source-build fixes —
