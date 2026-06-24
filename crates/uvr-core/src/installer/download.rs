@@ -175,6 +175,33 @@ fn cran_archive_url(url: &str) -> Option<String> {
     Some(format!("{base}/src/contrib/Archive/{pkg_name}/{filename}"))
 }
 
+/// Build the download-cache filename for a package fetch (#122).
+///
+/// = short hash of (URL + User-Agent) prefixed onto the URL basename. The
+/// basename alone is NOT a unique key for the bytes the server returns: on
+/// Linux, PPM serves a *different* R-version binary at the *same URL*, selecting
+/// it by the R version in the User-Agent — so two R minors share a basename and
+/// would collide, installing a wrong-ABI binary that fails cryptically at
+/// `library()` time. Folding the UA into the key disambiguates the Linux case;
+/// on Windows/macOS the UA is `None` and the R-minor lives in the URL path, so
+/// the URL alone already distinguishes them. The basename suffix preserves the
+/// `.tar.gz`/`.tgz` extension (source vs binary) and keeps entries recognizable.
+fn cache_filename(url: &str, user_agent: Option<&str>, fallback_name: &str) -> String {
+    let basename = url
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_name);
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    if let Some(ua) = user_agent {
+        hasher.update(b"|");
+        hasher.update(ua.as_bytes());
+    }
+    let url_tag = hex::encode(hasher.finalize());
+    format!("{}-{basename}", &url_tag[..8])
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_one(
     client: &reqwest::Client,
@@ -187,14 +214,18 @@ async fn download_one(
     auth_header: Option<&str>,
     mp: &MultiProgress,
 ) -> Result<PathBuf> {
-    // Derive the cache filename from the URL so that source tarballs (.tar.gz)
-    // and binary tarballs (.tgz) get distinct cache entries and never collide.
-    let filename = url
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&format!("{name}_{version}.tar.gz"))
-        .to_string();
+    // Cache filename = short hash of (URL + User-Agent) prefixed onto the URL
+    // basename. The basename alone is NOT a unique key for the bytes P3M
+    // returns (#122): on Linux, PPM serves a *different* R-version binary at the
+    // *same URL*, selecting it by the R version in the User-Agent — so two R
+    // minors share a basename and collide, installing a wrong-ABI binary that
+    // fails cryptically at library() time. Folding the UA into the key
+    // disambiguates the Linux case; on Windows/macOS the UA is None and the
+    // R-minor lives in the URL path, so the URL alone already distinguishes
+    // them. Keeping the basename suffix preserves the .tar.gz/.tgz extension
+    // (source vs binary) and keeps cache entries human-recognizable.
+    let fallback_name = format!("{name}_{version}.tar.gz");
+    let filename = cache_filename(url, user_agent, &fallback_name);
     let dest = cache_dir.join(&filename);
 
     if dest.exists() {
@@ -341,7 +372,52 @@ async fn download_one(
 
 #[cfg(test)]
 mod tests {
-    use super::cran_archive_url;
+    use super::{cache_filename, cran_archive_url};
+
+    // #122: the Linux collision. PPM serves a different-R-ABI binary at the
+    // SAME url, selected by the R version in the User-Agent. Two R minors must
+    // therefore get distinct cache entries even though url + basename match.
+    #[test]
+    fn cache_filename_distinguishes_user_agents_on_same_url() {
+        let url = "https://packagemanager.posit.co/cran/__linux__/jammy/latest/src/contrib/data.table_1.18.4.tar.gz";
+        let fb = "data.table_1.18.4.tar.gz";
+        let k45 = cache_filename(url, Some("R (4.5.3 x86_64-pc-linux-gnu)"), fb);
+        let k46 = cache_filename(url, Some("R (4.6.0 x86_64-pc-linux-gnu)"), fb);
+        assert_ne!(
+            k45, k46,
+            "different UAs must not collide on one cache entry"
+        );
+        // The human-readable basename is preserved as a suffix.
+        assert!(k45.ends_with("-data.table_1.18.4.tar.gz"));
+    }
+
+    #[test]
+    fn cache_filename_is_stable_for_same_url_and_ua() {
+        let url = "https://cran.r-project.org/src/contrib/curl_7.0.0.tar.gz";
+        assert_eq!(
+            cache_filename(url, None, "curl_7.0.0.tar.gz"),
+            cache_filename(url, None, "curl_7.0.0.tar.gz"),
+        );
+    }
+
+    #[test]
+    fn cache_filename_distinguishes_source_from_binary() {
+        // Source .tar.gz and binary .tgz of the same package (distinct URLs)
+        // get distinct entries — preserves the pre-#122 collision guarantee.
+        let src = cache_filename(
+            "https://cran.r-project.org/src/contrib/ggplot2_3.5.1.tar.gz",
+            None,
+            "ggplot2_3.5.1.tar.gz",
+        );
+        let bin = cache_filename(
+            "https://p3m.dev/cran/latest/bin/macosx/big-sur-arm64/contrib/4.5/ggplot2_3.5.1.tgz",
+            None,
+            "ggplot2_3.5.1.tar.gz",
+        );
+        assert_ne!(src, bin);
+        assert!(src.ends_with("-ggplot2_3.5.1.tar.gz"));
+        assert!(bin.ends_with("-ggplot2_3.5.1.tgz"));
+    }
 
     #[test]
     fn archive_url_rewrites_cran_src_contrib() {
