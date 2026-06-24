@@ -186,6 +186,15 @@ fn cran_archive_url(url: &str) -> Option<String> {
 /// on Windows/macOS the UA is `None` and the R-minor lives in the URL path, so
 /// the URL alone already distinguishes them. The basename suffix preserves the
 /// `.tar.gz`/`.tgz` extension (source vs binary) and keeps entries recognizable.
+///
+/// The 32-bit (8 hex) tag is ample: a collision needs both a hash collision
+/// AND an identical basename, and the per-basename population is O(active R
+/// minor / distro count) — a handful, so birthday-paradox risk is negligible.
+/// The `|` separator between URL and UA can't cause aliasing in practice: URLs
+/// always start with `https://` and UAs with `R (`, so no input bridges across
+/// it. On the CRAN-Archive retry the entry is keyed on the *primary* URL even
+/// though the bytes came from the Archive URL — harmless, because Archive is a
+/// bitwise copy of the original and the checksum re-read would catch any drift.
 fn cache_filename(url: &str, user_agent: Option<&str>, fallback_name: &str) -> String {
     let basename = url
         .rsplit('/')
@@ -198,6 +207,7 @@ fn cache_filename(url: &str, user_agent: Option<&str>, fallback_name: &str) -> S
         hasher.update(b"|");
         hasher.update(ua.as_bytes());
     }
+    // hex::encode of a SHA-256 digest is always 64 chars, so [..8] never panics.
     let url_tag = hex::encode(hasher.finalize());
     format!("{}-{basename}", &url_tag[..8])
 }
@@ -398,6 +408,25 @@ mod tests {
             cache_filename(url, None, "curl_7.0.0.tar.gz"),
             cache_filename(url, None, "curl_7.0.0.tar.gz"),
         );
+    }
+
+    #[test]
+    fn cache_filename_archive_url_keys_distinctly_from_primary() {
+        // The CRAN-Archive retry fetches from a different URL than the primary;
+        // that URL gets its own key. (download_one stores Archive bytes under
+        // the *primary* key on retry — see cache_filename docs — but a direct
+        // fetch of the Archive URL is correctly a distinct entry.)
+        let primary = cache_filename(
+            "https://cran.r-project.org/src/contrib/curl_7.0.0.tar.gz",
+            None,
+            "curl_7.0.0.tar.gz",
+        );
+        let archive = cache_filename(
+            "https://cran.r-project.org/src/contrib/Archive/curl/curl_7.0.0.tar.gz",
+            None,
+            "curl_7.0.0.tar.gz",
+        );
+        assert_ne!(primary, archive);
     }
 
     #[test]
