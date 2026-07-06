@@ -642,7 +642,14 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
         ));
     }
 
-    // Step 3 + 4: extract each Payload and look for bin/R
+    // Step 3 + 4: extract each Payload and look for bin/R.
+    // Payloads inside a CRAN .pkg are gzip-compressed cpio archives, not
+    // tarballs. Apple's bsdtar reads cpio transparently; GNU tar does NOT.
+    // Users with Homebrew gnu-tar first on PATH (`which tar` →
+    // …/gnubin/tar) would fail extraction on every Payload with a
+    // misleading "Could not find bin/R" error (#125). This function is
+    // macOS-only, and /usr/bin/tar is always Apple bsdtar there, so pin it.
+    let mut last_tar_err: Option<String> = None;
     let resources = payloads
         .iter()
         .find_map(|payload| {
@@ -650,7 +657,7 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
                 .path()
                 .join(format!("stage-{}", payload.display().to_string().len()));
             std::fs::create_dir_all(&stage_dir).ok()?;
-            let ok = Command::new("tar")
+            match Command::new("/usr/bin/tar")
                 .args([
                     "xf",
                     &payload.to_string_lossy(),
@@ -658,16 +665,29 @@ fn install_r_macos(pkg_bytes: &[u8], version: &str, dest: &Path) -> Result<()> {
                     &stage_dir.to_string_lossy(),
                 ])
                 .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !ok {
-                return None;
+            {
+                // Clear any error recorded from an earlier payload: once a
+                // later tar succeeds, a stale message would misattribute the
+                // final "Could not find bin/R" to the wrong component.
+                Ok(o) if o.status.success() => last_tar_err = None,
+                Ok(o) => {
+                    last_tar_err = Some(String::from_utf8_lossy(&o.stderr).trim().to_string());
+                    return None;
+                }
+                Err(e) => {
+                    last_tar_err = Some(e.to_string());
+                    return None;
+                }
             }
             find_dir_with_r_binary(&stage_dir, 0)
         })
         .ok_or_else(|| {
+            let extra = match &last_tar_err {
+                Some(err) if !err.is_empty() => format!(" (tar error: {err})"),
+                _ => String::new(),
+            };
             UvrError::Other(format!(
-                "Could not find bin/R in any of {} Payload(s) in the pkg",
+                "Could not find bin/R in any of {} Payload(s) in the pkg{extra}",
                 payloads.len()
             ))
         })?;
