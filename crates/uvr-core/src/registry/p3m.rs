@@ -344,8 +344,11 @@ fn platform_info(
             // R prints UA as `R (<ver> <triple> <arch> <os>-gnu)`. PPM
             // currently sniffs the "R " prefix and the linux-gnu marker;
             // pass the actual r_minor so the UA stays plausibly current
-            // if PPM tightens its sniffing rules.
-            let user_agent = format!("R ({r_minor}.0 {arch}-pc-linux-gnu {arch} linux-gnu)");
+            // if PPM tightens its sniffing rules. The version part MUST use
+            // the same canonical form as the tarball-download UA
+            // (downloader::user_agent) — see #124.
+            let ver = crate::r_version::downloader::normalize_ua_r_version(r_minor);
+            let user_agent = format!("R ({ver} {arch}-pc-linux-gnu {arch} linux-gnu)");
             Some(PlatformInfo {
                 url_segment: String::new(),
                 cache_key: format!("linux-{codename}-{arch}"),

@@ -365,6 +365,23 @@ pub fn host_info(r_version: &str) -> HostInfo {
     host_info_from_os_release(content.as_deref(), platform, r_version)
 }
 
+/// Normalize an R version for use in a User-Agent string (#124).
+///
+/// Real R always reports a full three-part version (`4.5.1`); uvr callers
+/// often hold only the minor series (`4.5`). Pad a bare `X.Y` to `X.Y.0` so
+/// every UA uvr sends uses one canonical form — the PPM index fetch
+/// (`registry/p3m.rs`) and the tarball download (`host_info` →
+/// [`user_agent`]) must agree, because the download cache key folds the UA
+/// in (#122): divergent forms would mean spurious re-downloads if the two
+/// paths ever fed the same URL.
+pub fn normalize_ua_r_version(v: &str) -> String {
+    if v.split('.').count() == 2 {
+        format!("{v}.0")
+    } else {
+        v.to_string()
+    }
+}
+
 /// Construct a User-Agent string matching what real R sends via
 /// `getOption("HTTPUserAgent")`:
 ///
@@ -388,7 +405,14 @@ pub fn user_agent(info: &HostInfo) -> String {
     } = &info.triple;
     format!(
         "R ({} {}-{}-{}-{} {} {}-{})",
-        info.r_version, arch, vendor, os, abi, arch, os, abi
+        normalize_ua_r_version(&info.r_version),
+        arch,
+        vendor,
+        os,
+        abi,
+        arch,
+        os,
+        abi
     )
 }
 
@@ -2151,6 +2175,32 @@ VERSION_ID=3.23
             distro_label: "Ubuntu 22.04".into(),
             r_version: "4.5.0".into(),
         };
+        assert_eq!(
+            user_agent(&info),
+            "R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)"
+        );
+    }
+
+    #[test]
+    fn user_agent_normalizes_minor_only_r_version() {
+        // #124: sync.rs feeds host_info() the minor series ("4.5") while
+        // p3m.rs builds its index UA as "{r_minor}.0". Both must emit the
+        // same canonical three-part form, or the download cache key (which
+        // folds the UA in, #122) diverges between paths.
+        assert_eq!(normalize_ua_r_version("4.5"), "4.5.0");
+        assert_eq!(normalize_ua_r_version("4.5.1"), "4.5.1");
+
+        let info = HostInfo {
+            triple: HostTriple {
+                arch: "x86_64".into(),
+                vendor: "pc".into(),
+                os: "linux".into(),
+                abi: "gnu".into(),
+            },
+            distro_label: "Ubuntu 22.04".into(),
+            r_version: "4.5".into(), // minor-only, as passed by sync.rs
+        };
+        // Must exactly match the p3m.rs index-fetch UA for the same R.
         assert_eq!(
             user_agent(&info),
             "R (4.5.0 x86_64-pc-linux-gnu x86_64 linux-gnu)"
