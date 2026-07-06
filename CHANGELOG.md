@@ -7,6 +7,44 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.3.14 (2026-07-06)
+
+Small-fix batch: two environment-sensitivity bugs on macOS/Linux and two
+output-correctness issues.
+
+### Fixes
+
+- **`uvr r install` on macOS works with Homebrew GNU tar on PATH** (#125,
+  thanks @zorbax): CRAN `.pkg` Payloads are gzip-compressed *cpio* archives.
+  Apple's `/usr/bin/tar` (bsdtar) reads them; GNU tar does not — so with
+  Homebrew's `gnu-tar` first on PATH, every Payload failed to extract and the
+  install died with a misleading "Could not find bin/R in any Payload(s)"
+  error. The extractor now pins Apple's `/usr/bin/tar` (this code path is
+  macOS-only, where that binary is always bsdtar) and surfaces the underlying
+  tar error in the message when extraction is the real culprit.
+
+- **`uvr run script.R` no longer echoes the script source** (#117, thanks
+  @svraka): script mode passed `--quiet`, which only suppresses the startup
+  banner — R still echoed every parsed line back with a `> ` prompt.
+  It now passes `--no-echo`, matching what `Rscript` does under the hood,
+  so only the script's actual output reaches stdout. Interactive
+  `uvr run` (no script) is unchanged.
+
+- **Consistent User-Agent between PPM index fetch and tarball download**
+  (#124): the Linux index request sent `R (4.5.0 …)` while the download sent
+  `R (4.5 …)`. Both now derive from one normalizer (`X.Y` → `X.Y.0`), closing
+  a latent divergence hazard with the UA-keyed download cache introduced for
+  #122. First sync after upgrading re-downloads Linux binaries once (cache
+  keys change form); no action needed.
+
+- **macOS libR patch failures are no longer silent**: when redirecting a
+  binary package's `R.framework` library references to uvr-managed R failed,
+  the error was discarded and the package would later fail at `library()`
+  with a cryptic `dyld: Library not loaded` error. The install still
+  completes (the tree is intact and works where a system R is present), but
+  uvr now prints a warning naming the package and the likely load-time
+  symptom.
+
 ## v0.3.13 (2026-06-24)
 
 A correctness fix for a silent wrong-R-version binary install when projects
