@@ -132,7 +132,20 @@ pub fn install_binary_package(
         if let Some(libr) = libr_path {
             if libr.exists() {
                 let pkg_dir = library.join(package_name);
-                let _ = patch_so_libr_refs(&pkg_dir, libr);
+                if let Err(e) = patch_so_libr_refs(&pkg_dir, libr) {
+                    // Don't fail the install: the extracted tree is intact and
+                    // loads fine wherever the embedded R.framework paths still
+                    // resolve (e.g. a system R is also present). But under
+                    // managed R alone, an unpatched .so dies at load time with
+                    // a cryptic dyld error — so surface the failure instead of
+                    // swallowing it (previously `let _ =`).
+                    tracing::warn!(
+                        "Failed to patch libR references in '{}': {e}. The package \
+                         may fail to load with a 'Library not loaded: …R.framework…' \
+                         error under uvr-managed R.",
+                        package_name
+                    );
+                }
             }
         }
     }
@@ -596,7 +609,16 @@ pub fn detect_built_from_tarball(
 /// Called by `uvr sync` to fix packages that were extracted before patching
 /// support was added. Idempotent: no-op if the `.so` already points to `libr_path`.
 pub fn patch_installed_so_files(pkg_dir: &Path, libr_path: &Path) {
-    let _ = patch_so_libr_refs(pkg_dir, libr_path);
+    if let Err(e) = patch_so_libr_refs(pkg_dir, libr_path) {
+        // Best-effort retro-patch, but not silently so (previously `let _ =`):
+        // an unpatched .so under managed R fails at load time with a cryptic
+        // dyld error the user can't trace back to this step.
+        tracing::warn!(
+            "Failed to patch libR references in '{}': {e}. The package may fail \
+             to load under uvr-managed R.",
+            pkg_dir.display()
+        );
+    }
 }
 
 /// Walk `<pkg_dir>/libs/` and redirect every R-framework library reference
