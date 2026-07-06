@@ -92,12 +92,14 @@ pub async fn run(
     cmd.arg("--no-environ");
 
     if let Some(script_path) = &script {
-        // Script mode — suppress the R session intro banner. Without
-        // --quiet, every `uvr run script.R` dumps the "R version 4.6.0
-        // (2026-…) -- 'Because it was There'" preamble to stdout before
-        // the script starts (#81). --quiet keeps prompts visible (so
-        // interactive `browser()` still works) while dropping the banner.
-        cmd.arg("--quiet");
+        // Script mode — run as quietly as Rscript does. `Rscript foo.R` is
+        // effectively `R --no-echo --no-restore --file=foo.R`; --no-echo
+        // suppresses both the startup banner (#81) and R's echoing of every
+        // parsed source line back to stdout with a `> ` prompt (#117).
+        // (--quiet, used previously, only dropped the banner. The old
+        // rationale — keeping prompts visible for browser() — doesn't hold:
+        // --file mode is non-interactive, so browser() is a no-op either way.)
+        cmd.arg("--no-echo");
         cmd.arg("--no-save");
         cmd.arg("--no-restore");
         cmd.arg(format!("--file={script_path}"));
