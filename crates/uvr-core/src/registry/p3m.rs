@@ -295,19 +295,21 @@ fn platform_info(
     r_minor: &str,
 ) -> Option<PlatformInfo> {
     match platform {
-        // #72 / #53: P3M's `macosx/big-sur-arm64` URL was serving
-        // x86_64 .tgz binaries — confirmed by downloading
-        // `bin/macosx/big-sur-arm64/contrib/4.6/rlang_1.2.0.tgz` and
-        // running `file rlang/libs/rlang.so`: it reported `x86_64`.
-        // The actual arm64 binaries live at `macosx/sonoma-arm64`.
-        // Apple Silicon users on R 4.6 (built for Sonoma SDK) got
-        // unloadable libraries until this routing fix.
-        // x86_64 macOS keeps `big-sur-x86_64` since that path actually
-        // serves x86_64 binaries; both `sonoma-x86_64` and
-        // `big-sur-x86_64` exist but `big-sur-x86_64` is the broader
-        // back-compat target.
+        // #72 / #53 / #102: the correct arm64 channel depends on the R
+        // minor, because CRAN builds arm64 R <= 4.5 against the Big Sur
+        // SDK and R >= 4.6 against Sonoma. Each channel silently serves
+        // x86_64 fallback .tgz binaries outside its native range
+        // (verified 2026-07-09 by downloading jsonlite from both
+        // channels for 4.4/4.5/4.6 and running `file` on libs/*.so):
+        //   big-sur-arm64: arm64 for <=4.5, x86_64 for 4.6
+        //   sonoma-arm64:  x86_64 for <=4.5, arm64 for 4.6
+        // The #72 fix hardcoded sonoma-arm64, which repaired R 4.6 but
+        // routed every R <= 4.5 Apple Silicon user to x86_64 binaries —
+        // the root cause of #102/#98.
+        // x86_64 macOS keeps `big-sur-x86_64` for all versions; both
+        // Intel channels serve x86_64 across 4.5/4.6 (same verification).
         Platform::MacOsArm64 => Some(PlatformInfo {
-            url_segment: "macosx/sonoma-arm64".to_string(),
+            url_segment: format!("macosx/{}", macos_arm64_channel(r_minor)),
             cache_key: "macos-arm64".to_string(),
             pkg_ext: "tgz",
             is_linux: false,
@@ -358,6 +360,20 @@ fn platform_info(
                 user_agent: Some(user_agent),
             })
         }
+    }
+}
+
+/// P3M macOS arm64 channel for a given R minor (`"4.5"`): Big Sur SDK
+/// builds through 4.5, Sonoma SDK builds from 4.6 on. See the routing
+/// comment in `platform_info`. Unparseable input falls back to the
+/// Sonoma channel, matching current and future R versions.
+fn macos_arm64_channel(r_minor: &str) -> &'static str {
+    let mut parts = r_minor.split('.').map(|p| p.parse::<u32>().ok());
+    let major = parts.next().flatten();
+    let minor = parts.next().flatten();
+    match (major, minor) {
+        (Some(maj), Some(min)) if (maj, min) < (4, 6) => "big-sur-arm64",
+        _ => "sonoma-arm64",
     }
 }
 
@@ -499,10 +515,26 @@ Version: 1.1.4
 
     #[test]
     fn platform_info_macos_arm64() {
+        // #102: R <= 4.5 arm64 binaries live on the Big Sur channel,
+        // R >= 4.6 on the Sonoma channel.
         let info = platform_info(Platform::MacOsArm64, None, "4.5").unwrap();
-        assert_eq!(info.url_segment, "macosx/sonoma-arm64");
+        assert_eq!(info.url_segment, "macosx/big-sur-arm64");
         assert_eq!(info.pkg_ext, "tgz");
         assert!(!info.is_linux);
+
+        let info = platform_info(Platform::MacOsArm64, None, "4.6").unwrap();
+        assert_eq!(info.url_segment, "macosx/sonoma-arm64");
+    }
+
+    #[test]
+    fn macos_arm64_channel_routing() {
+        assert_eq!(macos_arm64_channel("4.1"), "big-sur-arm64");
+        assert_eq!(macos_arm64_channel("4.5"), "big-sur-arm64");
+        assert_eq!(macos_arm64_channel("4.6"), "sonoma-arm64");
+        assert_eq!(macos_arm64_channel("4.7"), "sonoma-arm64");
+        assert_eq!(macos_arm64_channel("5.0"), "sonoma-arm64");
+        // Unparseable input falls back to the current-era channel.
+        assert_eq!(macos_arm64_channel("garbage"), "sonoma-arm64");
     }
 
     #[test]
