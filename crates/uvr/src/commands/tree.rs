@@ -49,7 +49,7 @@ pub fn run(depth: Option<usize>) -> Result<()> {
         "{} {} {}",
         palette::bold(&project.manifest.project.name),
         palette::dim(ui::glyph::bullet()),
-        palette::dim(format!("R {}", &lockfile.r.version)),
+        palette::dim(format!("R {}", lockfile.r.version)),
     );
     println!();
 
