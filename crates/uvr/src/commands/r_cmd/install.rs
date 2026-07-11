@@ -9,18 +9,19 @@ use crate::ui::palette;
 pub async fn run(version: String, distribution: Option<String>) -> Result<()> {
     let platform = Platform::detect().context("Unsupported platform")?;
 
-    // #54: when `--distribution` is set, override the Posit CDN slug used
-    // by the Linux URL builder. No-op on macOS / Windows since they don't
-    // hit the Posit CDN.
-    if let Some(slug) = distribution {
-        let slug = slug.trim().to_string();
-        if !slug.is_empty() {
-            ui::bullet_dim(format!(
-                "Using distribution override: {}",
-                palette::info(&slug)
-            ));
-            uvr_core::r_version::downloader::set_posit_distro_override(slug);
-        }
+    // `--distribution` is deprecated: portable R builds are selected purely by
+    // libc (glibc -> manylinux, musl -> musllinux) and architecture, so the
+    // per-distro Posit CDN slug no longer affects R installation.
+    if distribution
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty())
+    {
+        ui::bullet_dim(
+            "`--distribution` is deprecated and ignored: portable R builds are \
+             selected automatically by libc and architecture."
+                .to_string(),
+        );
     }
 
     ui::info(format!(

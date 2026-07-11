@@ -9,15 +9,36 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # R versions exercised by every smoke step: the macOS floor (4.1.0, the
+  # oldest portable build the CDN publishes) and the current latest stable.
+  # Both are verified to exist for all portable targets. Bump the latter as
+  # new R releases land.
+  R_VERSIONS: "4.1.0 4.5.1"
+  # Package used to exercise the P3M binary-install + libR-patch path that
+  # survives the portable-build migration. Small, has a compiled component.
+  SMOKE_PKG: jsonlite
 
 jobs:
+  # One matrix entry per portable-r target with a native GitHub-hosted runner:
+  # manylinux (glibc) x86_64 + arm64, macOS arm64, Windows x86_64.
+  # macOS x86_64 (Intel) has no free native runner (macos-13 retired) and is
+  # covered by the `test-macos-x86_64` Rosetta job below. musllinux is covered
+  # by `test-musl` (x86_64) and `test-musl-arm64` (emulated).
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - target: manylinux-x86_64
+            os: ubuntu-latest
+          - target: manylinux-arm64
+            os: ubuntu-24.04-arm
+          - target: macos-arm64
+            os: macos-latest
+          - target: windows-x86_64
+            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +55,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -48,6 +69,147 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+      # End-to-end check of the portable-build download + extract path against
+      # the live CDN, across the oldest and newest published R. `r install`
+      # downloads, extracts, and validates `R --version` internally, so a clean
+      # exit means each portable build runs on this OS/arch.
+      - name: Smoke test R install
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for v in $R_VERSIONS; do
+            cargo run --quiet -- r install "$v"
+          done
+          cargo run --quiet -- r list --all
+
+      # Exercise the P3M binary-package install + libR-path patching that the
+      # portable-build migration keeps (sync.rs). Builds a throwaway project,
+      # installs a package with a compiled component, and loads it under the
+      # project library to prove the patched binary resolves libR at runtime.
+      - name: Smoke test package sync
+        shell: bash
+        run: |
+          set -euxo pipefail
+          latest="${R_VERSIONS##* }"
+          uvr_bin="$PWD/target/debug/uvr"
+          [ -f "$uvr_bin.exe" ] && uvr_bin="$uvr_bin.exe"
+          work="$(mktemp -d)"
+          cd "$work"
+          "$uvr_bin" init --here pkg-smoke --r-version "$latest"
+          "$uvr_bin" add "$SMOKE_PKG"
+          "$uvr_bin" sync
+          # `uvr run` executes an R *file* against the project library; loading
+          # the just-synced package proves its compiled binary resolves libR.
+          printf 'library(%s); cat("pkg-smoke-ok\\n")\n' "$SMOKE_PKG" > check.R
+          "$uvr_bin" run check.R
+
+  # macOS x86_64 (Intel): no free native runner since GitHub retired macos-13.
+  # Build uvr for x86_64-apple-darwin on the arm64 runner and run it under
+  # Rosetta 2 — the binary is compiled with target_arch = "x86_64", so
+  # Platform::detect() selects the Intel portable tarball, and Rosetta executes
+  # both uvr and the downloaded Intel R. This gives real coverage of the Intel
+  # download/extract path without a native Intel runner.
+  test-macos-x86_64:
+    name: Test (macos-x86_64, Rosetta)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Rosetta 2
+        run: softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install Rust toolchain (x86_64-apple-darwin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-x86_64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-x86_64-cargo-
+
+      - name: Build (x86_64-apple-darwin)
+        run: cargo build --target x86_64-apple-darwin -p uvr
+
+      - name: Smoke test Intel R install under Rosetta
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bin=./target/x86_64-apple-darwin/debug/uvr
+          for v in $R_VERSIONS; do
+            "$bin" r install "$v"
+          done
+          "$bin" r list --all
+
+  # musllinux_1_2 x86_64 portable build: no GitHub-hosted musl runner exists.
+  # Check out on the glibc host (node-based actions don't run on pure Alpine)
+  # and build + smoke inside an Alpine container via `docker run`.
+  test-musl:
+    name: Test (musllinux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build + smoke test in Alpine
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e "R_VERSIONS=${R_VERSIONS}" alpine:3.21 sh -c '
+            set -euxo pipefail
+            # build-base/rustup compile uvr; ca-certificates + fontconfig + ttf-dejavu
+            # are the runtime deps the portable musl R expects on the host.
+            apk add --no-cache build-base musl-dev rustup \
+              ca-certificates fontconfig ttf-dejavu
+            rustup-init -y --default-toolchain stable --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --all
+            for v in $R_VERSIONS; do
+              cargo run --quiet -- r install "$v"
+            done
+            cargo run --quiet -- r list --all
+          '
+
+  # musllinux_1_2 arm64 portable build: no free arm64 musl runner. Cross-compile
+  # uvr for aarch64-unknown-linux-musl at native speed (cross uses a toolchain
+  # image, not emulation), then run the static binary in an emulated arm64 Alpine
+  # via QEMU/binfmt. Only uvr + the downloaded arm64 R execute under emulation, so
+  # this stays tractable. Marked continue-on-error: emulation is inherently
+  # flakier than the native jobs and must not gate merges.
+  test-musl-arm64:
+    name: Test (musllinux-arm64, QEMU)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cross-build (aarch64-unknown-linux-musl)
+        run: cross build --target aarch64-unknown-linux-musl -p uvr
+
+      - name: Smoke test in emulated arm64 Alpine
+        run: |
+          docker run --rm --platform linux/arm64 -v "$PWD:/work" -w /work \
+            -e "R_VERSIONS=${R_VERSIONS}" arm64v8/alpine:3.21 sh -c '
+            set -euxo pipefail
+            apk add --no-cache ca-certificates fontconfig ttf-dejavu
+            bin=./target/aarch64-unknown-linux-musl/debug/uvr
+            for v in $R_VERSIONS; do
+              "$bin" r install "$v"
+            done
+            "$bin" r list --all
+          '
 
   audit:
     name: Security audit

@@ -400,11 +400,10 @@ pub struct RInstallArgs {
     /// R version to install, e.g. "4.3.2"
     pub version: String,
 
-    /// Override the autodetected Linux distribution for the Posit CDN URL
-    /// (e.g. `ubuntu-2204`, `debian-12`, `rhel-9`). Useful on Ubuntu / Debian
-    /// derivatives that aren't matched by `/etc/os-release` autodetection
-    /// — PopOS, Manjaro, etc. (#54). Ignored on macOS / Windows.
-    #[arg(long, value_name = "SLUG")]
+    /// Deprecated and ignored: R is now installed from portable builds selected
+    /// automatically by libc (glibc/musl) and architecture, so the per-distro
+    /// Posit CDN slug no longer applies. Accepted for backward compatibility.
+    #[arg(long, value_name = "SLUG", hide = true)]
     pub distribution: Option<String>,
 }
 
