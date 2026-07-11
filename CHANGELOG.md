@@ -7,6 +7,57 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.0 (2026-07-10)
+
+Major release: R installation now uses the portable, relocatable builds
+published by [rstudio/r-builds](https://github.com/rstudio/r-builds) on all
+platforms (#116, thanks @gdevenyi), and P3M binary packages install with the
+correct architecture again on Apple Silicon for R ≤ 4.5 (#102, #98).
+
+### Breaking changes
+
+- **Linux now requires glibc ≥ 2.34** for `uvr r install` (the
+  `manylinux_2_34` portable-build floor). Ubuntu 20.04, RHEL 8, and Debian 11
+  are below it and no longer supported by uvr's R installer — use your
+  system package manager's R or build from source. uvr detects an old glibc
+  up front and says so instead of failing mid-download. Alpine/musl is
+  supported via the `musllinux_1_2` builds.
+- **R versions older than 4.1.0 can no longer be installed on macOS and
+  Windows** — the portable-build CDN doesn't publish them (Linux has no
+  floor). uvr errors clearly on a pre-4.1 request and clamps `uvr r list
+  --all` accordingly.
+- **`uvr r install --distribution` is deprecated and ignored** (hidden from
+  help, warns when used). The portable builds make the distro choice moot.
+
+### Features
+
+- **Portable R installs on every platform** (#116, thanks @gdevenyi):
+  extract-and-run archives from `cdn.posit.co/r` replace the CRAN `.pkg`
+  flow on macOS and the distro-installer flow on Linux. No more Mach-O
+  install-name surgery, `Makeconf` prefix patching, or ad-hoc re-signing —
+  R resolves its own `R_HOME` at runtime. Windows installs from a plain
+  `.zip`, no admin rights involved. Supersedes #96 and #100.
+- **Broken R installs self-heal** (#99, thanks @mvuorre): `uvr r install`
+  now validates an existing install by running `R --version` instead of
+  trusting file existence; a half-patched or broken tree is removed and
+  reinstalled instead of wedging every subsequent command.
+- **Atomic R installs**: extraction stages next to the install directory and
+  lands with a single rename, so an interrupted install can never leave a
+  half-populated R that passes the exists check. Failed installs clean up
+  after themselves.
+
+### Fixes
+
+- **P3M served x86_64 binaries to Apple Silicon on R ≤ 4.5** (#102, #98,
+  thanks @connormfrench, @mvuorre): CRAN builds arm64 R ≤ 4.5 against the Big
+  Sur SDK and R ≥ 4.6 against Sonoma, and each P3M channel silently falls
+  back to x86_64 `.tgz` outside its native range. uvr hardcoded the
+  `sonoma-arm64` channel, so every R ≤ 4.5 sync got Intel binaries (caught
+  by the v0.3.9 wrong-arch guard). Binary URLs now route by R version:
+  `big-sur-arm64` for R ≤ 4.5, `sonoma-arm64` for R ≥ 4.6.
+- CI: fixed the Rust 1.97 `useless_borrows_in_formatting` lint and the
+  RUSTSEC-2026-0204 audit failure (crossbeam-epoch 0.9.20).
+
 ## v0.3.14 (2026-07-06)
 
 Small-fix batch: two environment-sensitivity bugs on macOS/Linux and two
