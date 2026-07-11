@@ -391,9 +391,9 @@ Cache
 | Linux x86-64 (glibc ≥ 2.34) | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y |
 | Linux ARM64 (glibc ≥ 2.34) | P3M (Ubuntu, Debian, RHEL, openSUSE) | Y | Y |
 | Linux (musl / Alpine) | source | Y | Y |
-| Windows x86-64 | P3M | Y (with Rtools) | Y (no admin required) |
+| Windows x86-64 | P3M | Y (with Rtools) | Y (R 4.1.0+, no admin required) |
 
-P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). R itself is installed from the **portable, relocatable builds** published by [rstudio/r-builds](https://github.com/rstudio/r-builds) on [Posit CDN](https://cdn.posit.co/r/versions.json) — `manylinux_2_34` tarballs on glibc Linux (requires **glibc ≥ 2.34**; excludes Ubuntu 20.04, RHEL 8, Debian 11), `musllinux_1_2` on Alpine, notarized `.tar.gz` on macOS (R 4.1.0+), and `.zip` on Windows. The portable Linux builds bundle their own libraries but expect `ca-certificates` and `fontconfig` (plus `ttf-dejavu` on Alpine) to be present on the host.
+P3M binary packages are sourced from [Posit Package Manager](https://packagemanager.posit.co/). R itself is installed from the **portable, relocatable builds** published by [rstudio/r-builds](https://github.com/rstudio/r-builds) on [Posit CDN](https://cdn.posit.co/r/versions.json) — `manylinux_2_34` tarballs on glibc Linux (requires **glibc ≥ 2.34**; excludes Ubuntu 20.04, RHEL 8, Debian 11), `musllinux_1_2` on Alpine, ad-hoc-signed `.tar.gz` on macOS (R 4.1.0+), and `.zip` on Windows (R 4.1.0+). The portable Linux builds bundle their own libraries but expect `ca-certificates` and `fontconfig` (plus `ttf-dejavu` on Alpine) to be present on the host.
 
 ---
 

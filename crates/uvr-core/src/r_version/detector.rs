@@ -27,6 +27,12 @@ pub fn find_all() -> Vec<RInstallation> {
     if let Some(versions_dir) = crate::env_vars::r_install_dir() {
         if let Ok(entries) = std::fs::read_dir(&versions_dir) {
             for entry in entries.flatten() {
+                // Skip dot-prefixed dirs: `.uvr-stage-*` extraction dirs
+                // orphaned by a killed install would otherwise be listed as
+                // installed versions.
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
                 let bin = entry.path().join("bin").join(r_name);
                 if bin.exists() {
                     let version = entry.file_name().to_string_lossy().to_string();

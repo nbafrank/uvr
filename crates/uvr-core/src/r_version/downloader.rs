@@ -57,8 +57,10 @@ impl Platform {
     ///
     /// Every platform pulls a relocatable build from the rstudio/r-builds CDN
     /// (`cdn.posit.co/r`). These extract-and-run archives need no post-install
-    /// path patching or code-signing — R locates its own `R_HOME` at runtime,
-    /// and the macOS builds ship pre-signed and notarized.
+    /// path patching — R locates its own `R_HOME` at runtime. Note the macOS
+    /// binaries carry only an ad-hoc code signature (not notarized; verified
+    /// with `codesign -dv`), so download integrity rests on TLS to the CDN —
+    /// the index publishes no checksums to verify against.
     pub fn download_url(&self, version: &str) -> String {
         match self {
             Platform::MacOsArm64 => {
@@ -89,8 +91,16 @@ const PORTABLE_CDN: &str = "https://cdn.posit.co/r";
 /// Unified version index for the portable builds.
 const VERSIONS_JSON_URL: &str = "https://cdn.posit.co/r/versions.json";
 
-/// macOS portable builds start at R 4.1.0 (earlier versions 404 on the CDN).
-const MACOS_MIN_R_VERSION: (u32, u32, u32) = (4, 1, 0);
+/// macOS and Windows portable builds start at R 4.1.0 — the CDN returns 403
+/// for earlier versions on both platforms (verified: R 4.0.5 → 403 on
+/// `macos` and `windows`, 200 on `manylinux_2_34`). Linux builds have no floor.
+const MAC_WIN_MIN_R_VERSION: (u32, u32, u32) = (4, 1, 0);
+
+/// The minimum R version published on the portable CDN for `platform`, or
+/// `None` when the platform has no floor (Linux).
+fn portable_min_r_version(platform: Platform) -> Option<(u32, u32, u32)> {
+    (platform.is_macos() || platform.is_windows()).then_some(MAC_WIN_MIN_R_VERSION)
+}
 
 /// manylinux_2_34 portable builds require glibc >= 2.34.
 const MANYLINUX_GLIBC_MIN: (u32, u32) = (2, 34);
@@ -462,15 +472,15 @@ pub async fn download_and_install_r(
     // Preflight: portable manylinux builds need glibc >= 2.34.
     ensure_linux_libc_supported()?;
 
-    // Preflight: macOS portable builds start at R 4.1.0 — fail with a clear
-    // message rather than a bare 403 from the CDN.
-    if platform.is_macos() {
+    // Preflight: macOS and Windows portable builds start at R 4.1.0 — fail
+    // with a clear message rather than a bare 403 from the CDN.
+    if let Some(floor) = portable_min_r_version(platform) {
         if let Some(v) = parse_r_version(version) {
-            if v < MACOS_MIN_R_VERSION {
-                let (mj, mn, p) = MACOS_MIN_R_VERSION;
+            if v < floor {
+                let (mj, mn, p) = floor;
                 return Err(UvrError::Other(format!(
-                    "macOS portable R builds start at {mj}.{mn}.{p}; R {version} is not available. \
-                     Install {mj}.{mn}.{p} or newer."
+                    "Portable R builds for your platform start at {mj}.{mn}.{p}; R {version} is \
+                     not available. Install {mj}.{mn}.{p} or newer."
                 )));
             }
         }
@@ -486,16 +496,14 @@ pub async fn download_and_install_r(
         response.error_for_status()?.bytes().await?
     };
 
-    std::fs::create_dir_all(&install_dir).map_err(|e| {
-        UvrError::Other(format!(
-            "Failed to create install directory {}: {e}",
-            install_dir.display()
-        ))
-    })?;
-
+    // install_r_portable stages next to install_dir and moves the extracted
+    // tree into place with one atomic rename — install_dir must not pre-exist.
     install_r_portable(&bytes, &install_dir, platform)?;
 
     if !r_binary.exists() {
+        // Don't leave a tree without bin/R behind: it would trip the
+        // exists-but-broken reinstall path on every subsequent run.
+        let _ = std::fs::remove_dir_all(&install_dir);
         return Err(UvrError::Other(format!(
             "R binary not found after installation at {}",
             r_binary.display()
@@ -587,8 +595,8 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
 /// (`cdn.posit.co/r/versions.json`).
 ///
 /// Returns versions sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`),
-/// dropping the rolling `next`/`devel` channels. On macOS the list is clamped
-/// to R >= 4.1.0 (the floor for the portable macOS builds).
+/// dropping the rolling `next`/`devel` channels. On macOS and Windows the
+/// list is clamped to R >= 4.1.0 (the CDN's floor for both platforms).
 pub async fn fetch_available_versions(
     client: &reqwest::Client,
     platform: Platform,
@@ -607,17 +615,15 @@ pub async fn fetch_available_versions(
         .and_then(|v| v.as_array())
         .ok_or_else(|| UvrError::Other("versions.json missing `r_versions` array".into()))?;
 
-    let macos_floor = platform.is_macos();
+    let floor = portable_min_r_version(platform);
     let mut versions: Vec<String> = arr
         .iter()
         .filter_map(|v| v.as_str())
         // Drop rolling channels ("next", "devel") and any non-X.Y.Z label.
         .filter(|s| is_real_r_version(s))
-        .filter(|s| {
-            !macos_floor
-                || parse_r_version(s)
-                    .map(|v| v >= MACOS_MIN_R_VERSION)
-                    .unwrap_or(false)
+        .filter(|s| match floor {
+            Some(f) => parse_r_version(s).map(|v| v >= f).unwrap_or(false),
+            None => true,
         })
         .map(|s| s.to_string())
         .collect();
@@ -630,13 +636,31 @@ pub async fn fetch_available_versions(
 /// Install a portable R build by extracting `bytes` into `dest`.
 ///
 /// The rstudio/r-builds portable archives are relocatable: R resolves its own
-/// `R_HOME` at runtime and bundles its dependency libraries, and the macOS
-/// builds are pre-signed and notarized. So there is no path patching, no
-/// install-name rewriting, and no code-signing — we extract the archive and
-/// flatten the `R_HOME` directory into `dest`.
+/// `R_HOME` at runtime and bundles its dependency libraries. So there is no
+/// path patching and no install-name rewriting — we extract the archive and
+/// move the `R_HOME` directory into `dest` with a single rename.
+///
+/// Extraction stages in a dot-prefixed sibling of `dest`, not the OS temp
+/// dir: `/tmp` is commonly a different filesystem than `~/.uvr`, where a
+/// cross-device rename fails (EXDEV) and a per-directory copy fallback could
+/// be interrupted, leaving `dest` half-populated yet passing the `bin/R`
+/// existence checks. Same-directory staging makes the final rename atomic:
+/// `dest` either doesn't exist or is complete. The staging dir is removed on
+/// every error path (dot-prefixed so version listing skips it if the process
+/// dies uncleanly).
 fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<()> {
-    let tmp = tempfile::tempdir()
-        .map_err(|e| UvrError::Other(format!("Failed to create temp dir for R extraction: {e}")))?;
+    let parent = dest.parent().ok_or_else(|| {
+        UvrError::Other(format!(
+            "Install path {} has no parent directory",
+            dest.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| UvrError::Other(format!("Failed to create {}: {e}", parent.display())))?;
+    let tmp = tempfile::Builder::new()
+        .prefix(".uvr-stage-")
+        .tempdir_in(parent)
+        .map_err(|e| UvrError::Other(format!("Failed to create staging dir for R: {e}")))?;
     let stage = tmp.path();
 
     if platform.is_windows() {
@@ -652,26 +676,13 @@ fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<(
         )
     })?;
 
-    std::fs::create_dir_all(dest)
-        .map_err(|e| UvrError::Other(format!("Failed to create {}: {e}", dest.display())))?;
-    for entry in std::fs::read_dir(&r_home)
-        .map_err(|e| UvrError::Other(format!("Failed to read {}: {e}", r_home.display())))?
-    {
-        let entry = entry.map_err(|e| UvrError::Other(format!("Failed to read entry: {e}")))?;
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-        // `rename` fails across filesystems (TMPDIR on a different mount than
-        // ~/.uvr); fall back to a symlink-preserving recursive copy.
-        if std::fs::rename(&from, &to).is_err() {
-            copy_dir_recursive(&from, &to).map_err(|e| {
-                UvrError::Other(format!(
-                    "Failed to copy {} -> {}: {e}",
-                    from.display(),
-                    to.display()
-                ))
-            })?;
-        }
-    }
+    std::fs::rename(&r_home, dest).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to move extracted R into place ({} -> {}): {e}",
+            r_home.display(),
+            dest.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -694,28 +705,6 @@ fn extract_zip_to(bytes: &[u8], dest: &Path) -> Result<()> {
     zip.extract(dest)
         .map_err(|e| UvrError::Other(format!("Failed to extract R zip: {e}")))?;
     Ok(())
-}
-
-/// Recursively copy `from` to `to`, recreating symlinks rather than following
-/// them (the R framework relies on relative symlinks within `R_HOME`).
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(from)?;
-    let ft = meta.file_type();
-    #[cfg(unix)]
-    if ft.is_symlink() {
-        let target = std::fs::read_link(from)?;
-        return std::os::unix::fs::symlink(target, to);
-    }
-    if ft.is_dir() {
-        std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
-            let entry = entry?;
-            copy_dir_recursive(&entry.path(), &to.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        std::fs::copy(from, to).map(|_| ())
-    }
 }
 
 #[cfg(test)]
@@ -819,9 +808,21 @@ mod tests {
     fn parse_r_version_orders_correctly() {
         assert_eq!(parse_r_version("4.4.2"), Some((4, 4, 2)));
         assert_eq!(parse_r_version("4.4"), Some((4, 4, 0)));
-        assert!(parse_r_version("4.1.0") >= Some(MACOS_MIN_R_VERSION));
-        assert!(parse_r_version("4.0.5") < Some(MACOS_MIN_R_VERSION));
+        assert!(parse_r_version("4.1.0") >= Some(MAC_WIN_MIN_R_VERSION));
+        assert!(parse_r_version("4.0.5") < Some(MAC_WIN_MIN_R_VERSION));
         assert!(parse_r_version("next").is_none());
+    }
+
+    #[test]
+    fn portable_floor_applies_to_macos_and_windows() {
+        // The CDN 403s pre-4.1.0 builds on macOS AND Windows (verified live);
+        // Linux publishes older versions. Regression guard for the floor
+        // check only gating on is_macos().
+        assert!(portable_min_r_version(Platform::MacOsArm64).is_some());
+        assert!(portable_min_r_version(Platform::MacOsX86_64).is_some());
+        assert!(portable_min_r_version(Platform::WindowsX86_64).is_some());
+        assert!(portable_min_r_version(Platform::LinuxX86_64).is_none());
+        assert!(portable_min_r_version(Platform::LinuxArm64).is_none());
     }
 
     #[test]
@@ -893,6 +894,43 @@ mod tests {
         install_r_portable(&tar_buf, &dest, Platform::LinuxX86_64).unwrap();
         assert!(dest.join("bin").join("R").exists());
         assert!(dest.join("lib").join("libR.so").exists());
+        // The sibling staging dir must be gone after a successful install.
+        let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".uvr-stage-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging dir leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn install_r_portable_cleans_stage_on_bad_archive() {
+        // A tarball with no bin/R must error AND leave neither dest nor a
+        // staging dir behind.
+        let mut tar_buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(enc);
+            let junk = b"not R";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(junk.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "R-4.4.2/README", &junk[..])
+                .unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.2");
+        assert!(install_r_portable(&tar_buf, &dest, Platform::LinuxX86_64).is_err());
+        assert!(!dest.exists(), "dest must not exist after a failed install");
+        let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(leftovers.is_empty(), "staging dir leaked: {leftovers:?}");
     }
 
     #[test]
