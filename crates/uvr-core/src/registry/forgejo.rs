@@ -36,6 +36,8 @@ pub struct ForgejoSpec {
 /// - empty host, owner, or repo segments
 /// - anything other than exactly three path segments
 /// - host chars outside `[alnum].-:` or owner/repo chars outside `[alnum].-_`
+/// - refs containing whitespace or URL/git metacharacters (`& # ? * ...`),
+///   per [`crate::registry::github::is_valid_git_ref`] (#152)
 pub fn parse_forgejo_parts(spec: &str) -> Option<ForgejoSpec> {
     let body = spec.strip_prefix("forgejo::").unwrap_or(spec);
 
@@ -45,6 +47,11 @@ pub fn parse_forgejo_parts(spec: &str) -> Option<ForgejoSpec> {
             let git_ref = if r.is_empty() {
                 None
             } else {
+                // Refs with `&`, `#`, `?`, whitespace, etc. would mis-parse
+                // the registry API request — reject at parse time (#152).
+                if !crate::registry::github::is_valid_git_ref(r) {
+                    return None;
+                }
                 Some(r.to_string())
             };
             (&body[..at], git_ref)
@@ -223,7 +230,13 @@ async fn fetch_commit_sha(
     // endpoint with `?sha=<ref>&limit=1` is the supported way to resolve
     // a ref to a SHA — it accepts branches, tags, and SHAs and returns a
     // JSON array of commit objects.
-    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={git_ref}&limit=1");
+    // Percent-encode the ref: it sits in query position (`sha=feat&x`
+    // would inject a second parameter), and refs can reach here without
+    // going through `parse_forgejo_parts` (lockfile revs, `Remotes:`
+    // fields), so encode defensively (#152).
+    let encoded_ref = urlencoding::encode(git_ref);
+    let url =
+        format!("https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={encoded_ref}&limit=1");
     let mut req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
@@ -385,6 +398,38 @@ mod tests {
 
         let p = parse_forgejo_parts("forgejo::codefloe.com/pat-s/mypkg@v1.0").unwrap();
         assert_eq!(p.git_ref.as_deref(), Some("v1.0"));
+    }
+
+    #[test]
+    fn parts_validates_ref_chars() {
+        // #152: a ref with `&` would inject a second query parameter into
+        // `?sha={ref}&limit=1`; `#`, `?`, and whitespace break the URL too.
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/u/r@feat&x").is_none());
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/u/r@v1#frag").is_none());
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/u/r@a b").is_none());
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/u/r@x?y").is_none());
+        // Legitimate ref shapes still pass, including slashed branches.
+        assert_eq!(
+            parse_forgejo_parts("forgejo::codefloe.com/u/r@main")
+                .unwrap()
+                .git_ref
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            parse_forgejo_parts("forgejo::codefloe.com/u/r@v1.2.3")
+                .unwrap()
+                .git_ref
+                .as_deref(),
+            Some("v1.2.3")
+        );
+        assert_eq!(
+            parse_forgejo_parts("forgejo::codefloe.com/u/r@feature/x")
+                .unwrap()
+                .git_ref
+                .as_deref(),
+            Some("feature/x")
+        );
     }
 
     #[test]

@@ -13,13 +13,39 @@ use crate::registry::{Dep, PackageInfo};
 /// be resolved without falling through to CRAN (#84).
 pub type GithubRemote = (String, String, Option<String>);
 
+/// Charset gate for git refs before they reach a URL (#152).
+///
+/// Follows `git check-ref-format` where it matters for us: reject
+/// whitespace, control chars, the metacharacters git itself forbids
+/// (`~ ^ : ? * [ \`), the sequences `..` and `@{`, plus `&` and `#`,
+/// which are legal nowhere in a ref that we'd want to interpolate into
+/// a query string or URL path. Legitimate refs (`main`, `v1.2.3`,
+/// `feature/x`, `release-2024.01_rc+1`) all pass.
+pub(crate) fn is_valid_git_ref(git_ref: &str) -> bool {
+    !git_ref.is_empty()
+        && !git_ref.contains("..")
+        && !git_ref.contains("@{")
+        && git_ref.chars().all(|c| {
+            !c.is_whitespace()
+                && !c.is_control()
+                && !matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\' | '&' | '#')
+        })
+}
+
 /// Parse `"user/repo@ref"` into (user, repo, ref).
+///
+/// Rejects refs that fail [`is_valid_git_ref`] — a ref with `&`, `#`,
+/// `?`, or whitespace would mis-parse the registry API request (#152).
 pub fn parse_github_spec(spec: &str) -> Option<(String, String, String)> {
     let (repo_part, git_ref) = if let Some(at_pos) = spec.rfind('@') {
         (&spec[..at_pos], spec[at_pos + 1..].to_string())
     } else {
         (spec, "HEAD".to_string())
     };
+
+    if !is_valid_git_ref(&git_ref) {
+        return None;
+    }
 
     let parts: Vec<&str> = repo_part.splitn(2, '/').collect();
     if parts.len() != 2 {
@@ -141,7 +167,12 @@ async fn fetch_commit_sha(
     repo: &str,
     git_ref: &str,
 ) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{user}/{repo}/commits/{git_ref}");
+    // Percent-encode the ref: it sits in path position, and refs can reach
+    // here without going through `parse_github_spec` (lockfile revs,
+    // `Remotes:` fields), so encode defensively (#152). GitHub's API
+    // accepts `%2F` for the `/` in refs like `feature/x`.
+    let encoded_ref = urlencoding::encode(git_ref);
+    let url = format!("https://api.github.com/repos/{user}/{repo}/commits/{encoded_ref}");
     let mut req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
@@ -243,6 +274,48 @@ Depends: R (>= 3.5.0)
 
         let (_user, _repo, git_ref) = parse_github_spec("tidyverse/ggplot2").unwrap();
         assert_eq!(git_ref, "HEAD");
+
+        // Slashed branch names stay valid (ref split happens before the
+        // user/repo split, so extra `/` in the ref is fine).
+        let (user, repo, git_ref) = parse_github_spec("user/myrepo@feature/x").unwrap();
+        assert_eq!(user, "user");
+        assert_eq!(repo, "myrepo");
+        assert_eq!(git_ref, "feature/x");
+
+        let (_, _, git_ref) = parse_github_spec("user/myrepo@v1.2.3").unwrap();
+        assert_eq!(git_ref, "v1.2.3");
+    }
+
+    #[test]
+    fn parse_spec_rejects_url_breaking_refs() {
+        // #152: refs with URL metacharacters would mis-parse the
+        // `/commits/{ref}` request — reject them at parse time.
+        assert!(parse_github_spec("user/repo@feat&x").is_none());
+        assert!(parse_github_spec("user/repo@v1#frag").is_none());
+        assert!(parse_github_spec("user/repo@a b").is_none());
+        assert!(parse_github_spec("user/repo@x?y").is_none());
+        assert!(parse_github_spec("user/repo@back\\slash").is_none());
+        // Trailing `@` yields an empty ref — also rejected.
+        assert!(parse_github_spec("user/repo@").is_none());
+    }
+
+    #[test]
+    fn git_ref_charset_gate() {
+        for ok in [
+            "main",
+            "HEAD",
+            "v1.2.3",
+            "feature/x",
+            "release-2024.01_rc+1",
+        ] {
+            assert!(is_valid_git_ref(ok), "should accept {ok:?}");
+        }
+        for bad in [
+            "", "feat&x", "v1#f", "a b", "x?y", "a\\b", "a..b", "@{u}", "a~1", "a^2", "re:f",
+            "a*b", "a[b", "a\tb",
+        ] {
+            assert!(!is_valid_git_ref(bad), "should reject {bad:?}");
+        }
     }
 
     #[test]
