@@ -239,10 +239,10 @@ async fn download_one(
     let dest = cache_dir.join(&filename);
 
     if dest.exists() {
-        // Verify the cached file when we have a checksum — a corrupted or
-        // tampered cache entry must not silently bypass integrity checks.
-        if let Some(expected) = expected_checksum {
-            if expected.starts_with("md5:") || expected.starts_with("sha256:") {
+        // Verify the cached file — a corrupted or tampered cache entry must
+        // not silently bypass integrity checks.
+        match expected_checksum {
+            Some(expected) if expected.starts_with("md5:") || expected.starts_with("sha256:") => {
                 let cached = std::fs::read(&dest)?;
                 if checksum::verify(expected, &cached, name).is_ok() {
                     debug!("Cache hit (verified): {filename}");
@@ -251,30 +251,35 @@ async fn download_one(
                 debug!("Cache corrupt for {name}, re-downloading");
                 let _ = std::fs::remove_file(&dest);
                 // fall through to re-download
-            } else if expected.starts_with("git:") {
-                // GitHub packages: verify against sidecar SHA256 from first download
+            }
+            _ => {
+                // No upstream checksum covers these bytes: `git:` entries (the
+                // lockfile pins a commit, not a tarball hash) and P3M binaries
+                // (the lockfile checksum is for the *source* tarball, checksum
+                // here is None). Verify against the sha256 sidecar pinned on
+                // first download (#129, #140).
                 let checksum_path = dest.with_extension("sha256");
                 if let Ok(stored_checksum) = std::fs::read_to_string(&checksum_path) {
                     let cached = std::fs::read(&dest)?;
                     if checksum::verify(stored_checksum.trim(), &cached, name).is_ok() {
-                        debug!("Cache hit (git, sha256 verified): {filename}");
+                        debug!("Cache hit (sidecar sha256 verified): {filename}");
                         return Ok(dest);
                     }
-                    debug!("Cache corrupt for git package {name}, re-downloading");
+                    debug!("Cache corrupt for {name}, re-downloading");
                     let _ = std::fs::remove_file(&dest);
                     let _ = std::fs::remove_file(&checksum_path);
+                    // fall through to re-download
                 } else {
-                    // No sidecar yet (old cache entry) — accept it this time
-                    debug!("Cache hit (git, unverified): {filename}");
+                    // No sidecar yet (entry from an older uvr, or a crash
+                    // between download and sidecar write). Backfill it from
+                    // the cached bytes so the entry is pinned from now on
+                    // instead of staying permanently unverified (#140).
+                    let cached = std::fs::read(&dest)?;
+                    write_sidecar(&checksum_path, &checksum::sha256_hex(&cached), name);
+                    debug!("Cache hit (sidecar backfilled): {filename}");
                     return Ok(dest);
                 }
-            } else {
-                debug!("Cache hit: {filename}");
-                return Ok(dest);
             }
-        } else {
-            debug!("Cache hit: {filename}");
-            return Ok(dest);
         }
     }
 
@@ -359,11 +364,6 @@ async fn download_one(
                     actual,
                 });
             }
-        } else if expected.starts_with("git:") {
-            // GitHub packages: store SHA256 sidecar for future cache verification
-            let computed = format!("sha256:{sha256_hex}");
-            let checksum_path = dest.with_extension("sha256");
-            let _ = std::fs::write(&checksum_path, &computed);
         }
     }
 
@@ -376,13 +376,162 @@ async fn download_one(
         ))
     })?;
 
+    // Pin bytes that no upstream checksum covers — `git:` tarballs and P3M
+    // binaries (checksum None; P3M publishes no checksums, so first download
+    // is trust-on-first-use). The sha256 sidecar lets every future cache hit
+    // verify against the first-seen bytes (#129, #140). Written after persist
+    // so a sidecar never exists without its tarball.
+    let lockfile_verifiable = matches!(
+        expected_checksum,
+        Some(e) if e.starts_with("md5:") || e.starts_with("sha256:")
+    );
+    if !lockfile_verifiable {
+        write_sidecar(
+            &dest.with_extension("sha256"),
+            &format!("sha256:{sha256_hex}"),
+            name,
+        );
+    }
+
     pb.finish_and_clear();
     Ok(dest)
 }
 
+/// Write a `.sha256` sidecar next to a cached tarball. Failure is non-fatal —
+/// the cache entry still works and the sidecar is backfilled on the next hit —
+/// but it must not be silent (#140): without the sidecar the entry cannot be
+/// integrity-verified.
+fn write_sidecar(checksum_path: &Path, checksum: &str, name: &str) {
+    if let Err(e) = std::fs::write(checksum_path, checksum) {
+        tracing::warn!(
+            "{name}: failed to write checksum sidecar {}: {e} — cached file stays unverified until the sidecar can be written",
+            checksum_path.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cache_filename, cran_archive_url};
+    use super::{cache_filename, cran_archive_url, download_one};
+    use crate::checksum;
+    use std::path::PathBuf;
+
+    /// Seed the cache with a fake tarball for `url` and return its dest path.
+    /// The port-9 (discard) URL refuses connections instantly, so any code
+    /// path that falls through to a real download fails fast with an error —
+    /// which is exactly how the "treated as a miss" tests detect re-download.
+    const UNREACHABLE_URL: &str = "http://127.0.0.1:9/pkg_1.0.0.tar.gz";
+
+    fn seed_cache(cache_dir: &std::path::Path, url: &str, bytes: &[u8]) -> PathBuf {
+        let filename = cache_filename(url, None, "pkg_1.0.0.tar.gz");
+        let dest = cache_dir.join(filename);
+        std::fs::write(&dest, bytes).unwrap();
+        dest
+    }
+
+    async fn run_download_one(
+        cache_dir: &std::path::Path,
+        url: &str,
+        expected_checksum: Option<&str>,
+    ) -> crate::error::Result<PathBuf> {
+        download_one(
+            &reqwest::Client::new(),
+            cache_dir,
+            "pkg",
+            "1.0.0",
+            url,
+            expected_checksum,
+            None,
+            None,
+            &indicatif::MultiProgress::new(),
+        )
+        .await
+    }
+
+    // #129: a binary cache entry (checksum None — the lockfile checksum is for
+    // the source tarball) must be verified against its sha256 sidecar on hit.
+    #[tokio::test]
+    async fn binary_cache_hit_with_matching_sidecar_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"binary tarball bytes";
+        let dest = seed_cache(tmp.path(), UNREACHABLE_URL, bytes);
+        std::fs::write(dest.with_extension("sha256"), checksum::sha256_hex(bytes)).unwrap();
+
+        let got = run_download_one(tmp.path(), UNREACHABLE_URL, None)
+            .await
+            .expect("verified cache hit must succeed without touching the network");
+        assert_eq!(got, dest);
+        assert!(dest.exists());
+    }
+
+    // #129: a binary cache entry whose bytes don't match the sidecar is
+    // corrupt/tampered — treat as a miss (same policy as the git: path):
+    // remove both files and re-download. The unreachable URL makes the
+    // re-download fail, proving the poisoned entry was NOT served.
+    #[tokio::test]
+    async fn binary_cache_hit_with_mismatching_sidecar_is_a_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = seed_cache(tmp.path(), UNREACHABLE_URL, b"tampered bytes");
+        let sidecar = dest.with_extension("sha256");
+        std::fs::write(&sidecar, checksum::sha256_hex(b"original bytes")).unwrap();
+
+        let result = run_download_one(tmp.path(), UNREACHABLE_URL, None).await;
+        assert!(
+            result.is_err(),
+            "mismatch must force a re-download, not serve the cache"
+        );
+        assert!(!dest.exists(), "corrupt cache entry must be removed");
+        assert!(!sidecar.exists(), "stale sidecar must be removed");
+    }
+
+    // #140/#129: a cache entry with no sidecar (old uvr, or crash between
+    // download and sidecar write) is accepted once (trust-on-first-use), but
+    // the sidecar must be backfilled so the entry is verified from then on —
+    // it must not stay permanently exempt from checking.
+    #[tokio::test]
+    async fn cache_hit_without_sidecar_backfills_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"cached without sidecar";
+        let dest = seed_cache(tmp.path(), UNREACHABLE_URL, bytes);
+
+        let got = run_download_one(tmp.path(), UNREACHABLE_URL, None)
+            .await
+            .expect("no-sidecar hit is accepted (TOFU)");
+        assert_eq!(got, dest);
+
+        let sidecar = dest.with_extension("sha256");
+        let stored = std::fs::read_to_string(&sidecar).expect("sidecar must be backfilled");
+        assert_eq!(stored.trim(), checksum::sha256_hex(bytes));
+
+        // And the backfilled pin is enforced: tamper with the bytes and the
+        // next hit must reject the entry instead of serving it.
+        std::fs::write(&dest, b"tampered after backfill").unwrap();
+        let result = run_download_one(tmp.path(), UNREACHABLE_URL, None).await;
+        assert!(
+            result.is_err(),
+            "tampered entry must not be served after backfill"
+        );
+        assert!(!dest.exists());
+        assert!(!sidecar.exists());
+    }
+
+    // #140: same backfill applies to git: entries — the branch that used to
+    // say "accept it this time" must not accept it every time.
+    #[tokio::test]
+    async fn git_cache_hit_without_sidecar_backfills_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"github tarball bytes";
+        let dest = seed_cache(tmp.path(), UNREACHABLE_URL, bytes);
+
+        let got = run_download_one(tmp.path(), UNREACHABLE_URL, Some("git:abc123def"))
+            .await
+            .expect("no-sidecar git hit is accepted (TOFU)");
+        assert_eq!(got, dest);
+
+        let stored = std::fs::read_to_string(dest.with_extension("sha256"))
+            .expect("git sidecar must be backfilled");
+        assert_eq!(stored.trim(), checksum::sha256_hex(bytes));
+    }
 
     // #122: the Linux collision. PPM serves a different-R-ABI binary at the
     // SAME url, selected by the R version in the User-Agent. Two R minors must
