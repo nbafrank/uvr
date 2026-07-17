@@ -43,7 +43,17 @@ pub async fn run(
 
     // Handle --with packages: resolve + install into a cached env.
     let with_library = if !with_packages.is_empty() {
-        let r_ver = query_r_version(&r_binary).unwrap_or_default();
+        // The R version is part of the --with cache key (see ensure_with_env).
+        // Falling back to a default here would collapse every R version into
+        // one cache entry, silently reusing ABI-incompatible compiled
+        // packages — so refuse to proceed without a real version (#160).
+        let r_ver = query_r_version(&r_binary).with_context(|| {
+            format!(
+                "Could not determine the version of R at {}; \
+                 refusing to build a --with environment without a version-scoped cache key",
+                r_binary.display()
+            )
+        })?;
         Some(ensure_with_env(&with_packages, &r_ver).await?)
     } else {
         None
