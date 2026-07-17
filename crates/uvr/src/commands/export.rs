@@ -56,12 +56,36 @@ pub enum ExportFormat {
 /// }
 /// ```
 fn export_renv(lockfile: &Lockfile) -> Result<String> {
+    let mut repositories = vec![RenvRepo {
+        name: "CRAN".into(),
+        url: "https://cloud.r-project.org".into(),
+    }];
+
+    // Emit the Bioconductor pin only when the lockfile actually contains
+    // Bioconductor packages *and* records the release. renv restores
+    // `Source: "Bioconductor"` records via BiocManager repositories that it
+    // reconstructs from the top-level `Bioconductor.Version`; without it renv
+    // falls back to the installed BiocManager's default release, which can
+    // restore from the wrong Bioc version (or fail for older pinned ones).
+    let has_bioc = lockfile
+        .packages
+        .iter()
+        .any(|p| matches!(p.source, PackageSource::Bioconductor));
+    let bioconductor = match (has_bioc, lockfile.r.bioc_version.as_deref()) {
+        (true, Some(version)) => {
+            // Match the repository set renv itself writes for a Bioconductor
+            // project, all derived from the pinned release.
+            repositories.extend(bioc_repositories(version));
+            Some(RenvBioconductor {
+                version: version.to_string(),
+            })
+        }
+        _ => None,
+    };
+
     let r_section = RenvR {
         version: lockfile.r.version.clone(),
-        repositories: vec![RenvRepo {
-            name: "CRAN".into(),
-            url: "https://cloud.r-project.org".into(),
-        }],
+        repositories,
     };
 
     let mut packages = HashMap::new();
@@ -118,10 +142,31 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
 
     let renv_lock = RenvLock {
         r: r_section,
+        bioconductor,
         packages,
     };
 
     serde_json::to_string_pretty(&renv_lock).context("Failed to serialize renv.lock")
+}
+
+/// The Bioconductor repository set renv writes into a lockfile's
+/// `Repositories`, all pinned to `version` (e.g. "3.18"). Mirrors what renv
+/// derives from BiocManager for a Bioconductor project so a restore resolves
+/// against the same release the lockfile was captured on.
+fn bioc_repositories(version: &str) -> Vec<RenvRepo> {
+    [
+        ("BioCsoft", "bioc"),
+        ("BioCann", "data/annotation"),
+        ("BioCexp", "data/experiment"),
+        ("BioCworkflows", "workflows"),
+        ("BioCbooks", "books"),
+    ]
+    .into_iter()
+    .map(|(name, path)| RenvRepo {
+        name: name.into(),
+        url: format!("https://bioconductor.org/packages/{version}/{path}"),
+    })
+    .collect()
 }
 
 /// Map a `PackageSource` to renv's (Source, Repository) string pair for
@@ -189,8 +234,16 @@ fn parse_forgejo_remote(url: &str) -> Option<(String, String, String, String)> {
 struct RenvLock {
     #[serde(rename = "R")]
     r: RenvR,
+    #[serde(rename = "Bioconductor", skip_serializing_if = "Option::is_none")]
+    bioconductor: Option<RenvBioconductor>,
     #[serde(rename = "Packages")]
     packages: HashMap<String, RenvPackage>,
+}
+
+#[derive(Serialize)]
+struct RenvBioconductor {
+    #[serde(rename = "Version")]
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -312,6 +365,111 @@ mod tests {
         assert_eq!(parsed["Packages"]["DESeq2"]["Source"], "Bioconductor");
         // Bioconductor packages don't have Repository field
         assert!(parsed["Packages"]["DESeq2"]["Repository"].is_null());
+        // bioc_version is None here, so no Bioconductor pin can be emitted.
+        assert!(parsed.get("Bioconductor").is_none());
+        // Only the CRAN repo — no Bioc repos without a pinned release.
+        let repos = parsed["R"]["Repositories"].as_array().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["Name"], "CRAN");
+    }
+
+    #[test]
+    fn export_renv_bioc_package_with_version_emits_section() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: Some("3.18".to_string()),
+            },
+            packages: vec![
+                LockedPackage {
+                    name: "jsonlite".to_string(),
+                    version: "1.8.8".to_string(),
+                    raw_version: None,
+                    source: PackageSource::Cran,
+                    checksum: None,
+                    requires: vec![],
+                    url: None,
+                    system_requirements: None,
+                    dev: false,
+                },
+                LockedPackage {
+                    name: "DESeq2".to_string(),
+                    version: "1.42.0".to_string(),
+                    raw_version: None,
+                    source: PackageSource::Bioconductor,
+                    checksum: None,
+                    requires: vec![],
+                    url: None,
+                    system_requirements: None,
+                    dev: false,
+                },
+            ],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Top-level Bioconductor pin present with the lockfile's release.
+        assert_eq!(parsed["Bioconductor"]["Version"], "3.18");
+
+        // Repositories include CRAN plus the pinned Bioc repos.
+        let repos = parsed["R"]["Repositories"].as_array().unwrap();
+        let by_name: std::collections::HashMap<&str, &str> = repos
+            .iter()
+            .map(|r| (r["Name"].as_str().unwrap(), r["URL"].as_str().unwrap()))
+            .collect();
+        assert_eq!(by_name["CRAN"], "https://cloud.r-project.org");
+        assert_eq!(
+            by_name["BioCsoft"],
+            "https://bioconductor.org/packages/3.18/bioc"
+        );
+        assert_eq!(
+            by_name["BioCann"],
+            "https://bioconductor.org/packages/3.18/data/annotation"
+        );
+        assert_eq!(
+            by_name["BioCexp"],
+            "https://bioconductor.org/packages/3.18/data/experiment"
+        );
+        assert_eq!(
+            by_name["BioCworkflows"],
+            "https://bioconductor.org/packages/3.18/workflows"
+        );
+    }
+
+    #[test]
+    fn export_renv_no_bioc_package_omits_section_even_with_version() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
+
+        // bioc_version is set, but there are no Bioconductor packages, so no
+        // spurious Bioconductor section or Bioc repos should be emitted.
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: Some("3.18".to_string()),
+            },
+            packages: vec![LockedPackage {
+                name: "jsonlite".to_string(),
+                version: "1.8.8".to_string(),
+                raw_version: None,
+                source: PackageSource::Cran,
+                checksum: None,
+                requires: vec![],
+                url: None,
+                system_requirements: None,
+                dev: false,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.get("Bioconductor").is_none());
+        let repos = parsed["R"]["Repositories"].as_array().unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["Name"], "CRAN");
     }
 
     #[test]
