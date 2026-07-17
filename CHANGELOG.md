@@ -7,6 +7,39 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Features
+
+- Partial R versions everywhere: `uvr r install 4.5` installs the newest
+  published 4.5.x, and a `4.5` pin in `.r-version` matches the newest
+  installed 4.5.x (#136, #170). Ambiguous partial uninstalls list the
+  candidates instead of guessing.
+- `uvr export renv` pins the Bioconductor release (`Bioconductor.Version` +
+  release-pinned BioC repos) when the lockfile contains Bioc packages (#144).
+
+### Fixes
+
+- `uvr update <pkg>` now validates the update against the packages held at
+  their locked versions instead of silently writing a lockfile where the
+  updated package needs newer deps than the ones locked (#127).
+- `uvr r use`/`pin` reject invalid versions (`--`, `4-5-2`) instead of
+  writing pins that can never match (#171); noise lines can no longer be
+  mistaken for R version output (#159).
+- Binary package cache entries are now integrity-checked on every hit via
+  sha256 sidecars pinned to the first-seen bytes; missing sidecars are
+  backfilled instead of staying permanently unverified (#129, #140).
+- `uvr cache clean` actually removes directories (e.g. `with-envs/`) and
+  reports only what was really deleted (#143).
+- A `Remotes:` override no longer drops the version constraint declared in
+  `Imports`/`Depends` (#132).
+- Git refs are validated and percent-encoded before landing in GitHub or
+  Forgejo API URLs (#152).
+- R downloads time out on stalled connections instead of hanging forever;
+  slow-but-moving downloads are unaffected (#133).
+- Windows: system R is also detected in `ProgramFiles(x86)` and per-user
+  `LOCALAPPDATA\Programs\R` installs (#158).
+- `uvr run --with` refuses to build an environment when the R version can't
+  be determined, instead of silently reusing a version-agnostic cache (#160).
+
 ## v0.4.0 (2026-07-10)
 
 Major release: R installation now uses the portable, relocatable builds
