@@ -7,7 +7,7 @@ use semver::{Version, VersionReq};
 use crate::error::{Result, UvrError};
 use crate::lockfile::{LockedPackage, Lockfile, PackageSource};
 use crate::manifest::Manifest;
-use crate::registry::PackageInfo;
+use crate::registry::{Dep, PackageInfo};
 
 use self::graph::DependencyGraph;
 
@@ -285,7 +285,10 @@ impl<'a> Resolver<'a> {
                     version: r.version.to_string(),
                     source: r.source,
                     raw_version: r.raw_version,
-                    url: Some(r.url),
+                    // Empty url = pinned from a legacy lockfile entry that had
+                    // none (locked_to_package_info) — keep it absent rather
+                    // than round-tripping `""` into the lockfile.
+                    url: (!r.url.is_empty()).then_some(r.url),
                     checksum: r.checksum,
                     requires: r.requires,
                     system_requirements: r.system_requirements,
@@ -303,6 +306,40 @@ impl<'a> Resolver<'a> {
             packages,
         })
     }
+}
+
+/// Convert a locked package back into a `PackageInfo` so it can be injected
+/// into resolution as a pin via `pre_resolved` (selective `uvr update`,
+/// #127). The resolver constraint-checks `pre_resolved` versions (the #84
+/// guard), so a freshly-updated package that needs a newer version of a
+/// pinned one fails with an explicit `VersionConflict` instead of producing
+/// a self-inconsistent lockfile. `requires` carries names only — the
+/// lockfile stores no constraints — which is fine for pins: their deps are
+/// themselves pinned or resolve fresh with real registry constraints.
+pub fn locked_to_package_info(p: &LockedPackage) -> Result<PackageInfo> {
+    let version = Version::parse(&normalize_version(&p.version)).map_err(|e| {
+        UvrError::Other(format!(
+            "Locked version {} of {} is not parseable: {e}",
+            p.version, p.name
+        ))
+    })?;
+    Ok(PackageInfo {
+        name: p.name.clone(),
+        version,
+        source: p.source.clone(),
+        checksum: p.checksum.clone(),
+        requires: p
+            .requires
+            .iter()
+            .map(|n| Dep {
+                name: n.clone(),
+                constraint: None,
+            })
+            .collect(),
+        url: p.url.clone().unwrap_or_default(),
+        raw_version: p.raw_version.clone(),
+        system_requirements: p.system_requirements.clone(),
+    })
 }
 
 /// Walk the resolved dependency graph from non-dev roots using BFS.
@@ -649,6 +686,80 @@ mod tests {
 
         let result = resolver.resolve(&manifest, None, HashMap::new());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn selective_update_pin_conflict_errors() {
+        // #127: `uvr update shiny` holds rlang at its locked 1.1.4 via a
+        // pin, but the fresh shiny requires rlang >= 2.0.0. The old
+        // merge-after-resolve approach silently wrote the inconsistent pair;
+        // pinned resolution must surface an explicit conflict instead.
+        let registry = MockRegistry {
+            packages: HashMap::from([make_pkg("shiny", "2.0.0", vec![("rlang", Some(">=2.0.0"))])]),
+        };
+        let resolver = Resolver::new(&registry);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("shiny".into(), DependencySpec::Version("*".into()), false);
+
+        let locked = LockedPackage {
+            name: "rlang".into(),
+            version: "1.1.4".into(),
+            source: PackageSource::Cran,
+            raw_version: None,
+            url: Some("https://cran.r-project.org/rlang_1.1.4.tar.gz".into()),
+            checksum: None,
+            requires: vec![],
+            system_requirements: None,
+            dev: false,
+        };
+        let pins = HashMap::from([(
+            "rlang".to_string(),
+            locked_to_package_info(&locked).unwrap(),
+        )]);
+
+        let result = resolver.resolve(&manifest, None, pins);
+        assert!(matches!(
+            result,
+            Err(UvrError::VersionConflict { ref package, .. }) if package == "rlang"
+        ));
+    }
+
+    #[test]
+    fn selective_update_pin_holds_version() {
+        // #127 companion: when the updated package is satisfied by the
+        // pinned version, resolution keeps the pin even though the registry
+        // has a newer release.
+        let registry = MockRegistry {
+            packages: HashMap::from([
+                make_pkg("shiny", "2.0.0", vec![("rlang", Some(">=1.0.0"))]),
+                make_pkg("rlang", "2.5.0", vec![]), // newer version available
+            ]),
+        };
+        let resolver = Resolver::new(&registry);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("shiny".into(), DependencySpec::Version("*".into()), false);
+
+        let locked = LockedPackage {
+            name: "rlang".into(),
+            version: "1.1-4".into(), // R dash form must normalize, not error
+            source: PackageSource::Cran,
+            raw_version: Some("1.1-4".into()),
+            url: None, // legacy entry without url
+            checksum: None,
+            requires: vec![],
+            system_requirements: None,
+            dev: false,
+        };
+        let pins = HashMap::from([(
+            "rlang".to_string(),
+            locked_to_package_info(&locked).unwrap(),
+        )]);
+
+        let lockfile = resolver.resolve(&manifest, None, pins).unwrap();
+        assert_eq!(lockfile.get_package("rlang").unwrap().version, "1.1.4");
+        assert_eq!(lockfile.get_package("shiny").unwrap().version, "2.0.0");
+        // A pin without a url must not round-trip `Some("")` into the lockfile.
+        assert_eq!(lockfile.get_package("rlang").unwrap().url, None);
     }
 
     #[test]

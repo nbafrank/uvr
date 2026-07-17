@@ -36,7 +36,8 @@ pub async fn run(upgrade: bool) -> Result<()> {
 pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfile> {
     let client = build_client()?;
     let existing = load_existing_lockfile(project);
-    let lockfile = resolve_lockfile(project, &client, upgrade, existing.as_ref()).await?;
+    let lockfile =
+        resolve_lockfile(project, &client, upgrade, existing.as_ref(), HashMap::new()).await?;
     project
         .save_lockfile(&lockfile)
         .context("Failed to write uvr.lock")?;
@@ -48,15 +49,24 @@ pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfi
 pub async fn resolve_only(project: &Project) -> Result<Lockfile> {
     let client = build_client()?;
     let existing = load_existing_lockfile(project);
-    resolve_lockfile(project, &client, false, existing.as_ref()).await
+    resolve_lockfile(project, &client, false, existing.as_ref(), HashMap::new()).await
 }
 
 /// Resolve with upgrade=true WITHOUT writing the lockfile.
-/// Used by `uvr update --dry-run`.
-pub async fn resolve_only_upgraded(project: &Project) -> Result<Lockfile> {
+///
+/// `pins` are packages held at fixed versions, injected as pre-resolved
+/// entries (they take precedence over git-resolved packages of the same
+/// name). Selective `uvr update <pkg>` passes the old locked versions of
+/// every non-targeted package here, so the update is validated against the
+/// held-back set instead of silently producing an inconsistent lockfile
+/// (#127). Pass an empty map for an unconstrained resolve (`--dry-run`).
+pub async fn resolve_only_upgraded(
+    project: &Project,
+    pins: HashMap<String, PackageInfo>,
+) -> Result<Lockfile> {
     let client = build_client()?;
     // --upgrade: don't reuse locked bioc_version, re-detect fresh
-    resolve_lockfile(project, &client, true, None).await
+    resolve_lockfile(project, &client, true, None, pins).await
 }
 
 /// Core resolution logic shared by `resolve_and_lock` and `resolve_only`.
@@ -67,6 +77,7 @@ async fn resolve_lockfile(
     client: &reqwest::Client,
     upgrade: bool,
     existing: Option<&Lockfile>,
+    pins: HashMap<String, PackageInfo>,
 ) -> Result<Lockfile> {
     // Query the actual running R version to pin in the lockfile.
     let r_constraint = project.manifest.project.r_version.as_deref();
@@ -163,8 +174,12 @@ async fn resolve_lockfile(
 
     let cran = cran_result.context("Failed to fetch CRAN index")?;
     let bioc_opt = bioc_result?;
-    let pre_resolved = git_result?;
+    let mut pre_resolved = git_result?;
     let custom_registries: Vec<CranRegistry> = custom_result?;
+
+    // Pins override even git-resolved entries: a non-targeted git package
+    // must stay at its locked commit, not drift to a fresh HEAD (#127).
+    pre_resolved.extend(pins);
 
     // Build the registry chain: custom sources → Bioconductor → CRAN.
     // Custom repos come first so user-configured sources take priority.

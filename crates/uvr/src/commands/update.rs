@@ -49,54 +49,48 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
     }
 
     // Re-resolve with upgrade=true (fetches fresh index, ignores locked versions).
-    // For --dry-run or selective update, resolve WITHOUT writing — the final
-    // lockfile is computed after merging and written once at the end.
-    let new_lockfile: Lockfile = if dry_run || !packages.is_empty() {
-        resolve_only_upgraded(&project).await?
-    } else {
-        resolve_and_lock(&project, true).await?
-    };
-
-    // When specific packages are requested, merge back old locked versions for
-    // packages NOT in the update set. This keeps non-targeted packages pinned.
-    let effective_lockfile = if let (false, Some(old_lf)) = (packages.is_empty(), &old_lockfile) {
-        let old_pkg_map: std::collections::HashMap<&str, &uvr_core::lockfile::LockedPackage> =
-            old_lf
-                .packages
-                .iter()
-                .map(|p| (p.name.as_str(), p))
-                .collect();
-
-        let mut merged_packages = Vec::new();
-        for pkg in &new_lockfile.packages {
-            if packages.contains(&pkg.name) {
-                // Requested for update — use the new version
-                merged_packages.push(pkg.clone());
-            } else if let Some(old_pkg) = old_pkg_map.get(pkg.name.as_str()) {
-                // Not requested — keep the old version
-                merged_packages.push((*old_pkg).clone());
-            } else {
-                // New transitive dep — keep it
-                merged_packages.push(pkg.clone());
+    //
+    // Selective update: non-targeted packages are injected into resolution as
+    // pins at their locked versions, so the resolver validates the updated
+    // packages' dependency constraints against the held-back set. The old
+    // approach merged locked versions back AFTER resolution with no
+    // re-validation, which could write a lockfile where an updated package
+    // requires a newer version of a pinned dep than the one locked (#127) —
+    // installing fine but failing at library() time. Now that combination is
+    // an explicit resolution error instead.
+    let effective_lockfile: Lockfile = if !packages.is_empty() {
+        let mut pins = std::collections::HashMap::new();
+        if let Some(old_lf) = &old_lockfile {
+            for pkg in &old_lf.packages {
+                if !packages.contains(&pkg.name) {
+                    pins.insert(
+                        pkg.name.clone(),
+                        uvr_core::resolver::locked_to_package_info(pkg)?,
+                    );
+                }
             }
         }
-
-        let mut merged = Lockfile {
-            r: new_lockfile.r.clone(),
-            packages: merged_packages,
-        };
-        merged.packages.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // Write the merged lockfile (unless dry-run, which doesn't reach here)
+        let resolved = resolve_only_upgraded(&project, pins)
+            .await
+            .with_context(|| {
+                format!(
+                    "Selective update failed with the non-targeted packages held at their locked \
+                 versions. If the error above is a version conflict, the updated package needs \
+                 a newer version of a held-back dependency — include that package too \
+                 (`uvr update {} <conflicting-pkg>`) or update everything with `uvr update`.",
+                    packages.join(" ")
+                )
+            })?;
         if !dry_run {
             project
-                .save_lockfile(&merged)
+                .save_lockfile(&resolved)
                 .context("Failed to write uvr.lock")?;
         }
-
-        merged
+        resolved
+    } else if dry_run {
+        resolve_only_upgraded(&project, std::collections::HashMap::new()).await?
     } else {
-        new_lockfile
+        resolve_and_lock(&project, true).await?
     };
 
     // Compute diff
