@@ -186,6 +186,26 @@ impl Manifest {
                 } else {
                     &mut dependencies
                 };
+                // A Remotes entry declares the *source*, not the version —
+                // carry any constraint from the Imports/Depends/Suggests
+                // line into the git spec so the resolver's pre-resolved
+                // check still has something to validate against (#132).
+                let existing_version = target
+                    .get(&resolved)
+                    .and_then(|s| s.version_req())
+                    .filter(|v| *v != "*")
+                    .map(str::to_string);
+                let spec = match spec {
+                    DependencySpec::Detailed(d)
+                        if d.version.is_none() && existing_version.is_some() =>
+                    {
+                        DependencySpec::Detailed(DetailedDep {
+                            version: existing_version,
+                            ..d
+                        })
+                    }
+                    other => other,
+                };
                 target.insert(resolved, spec);
             }
         }
@@ -609,6 +629,36 @@ Remotes:
         if let DependencySpec::Detailed(d) = pk {
             assert_eq!(d.rev.as_deref(), Some("v1.0"));
         }
+    }
+
+    #[test]
+    fn description_remotes_override_preserves_version_constraint() {
+        // #132 — a Remotes entry declares the *source* for a dep, not its
+        // version. The constraint from the Imports line must survive the
+        // override so the resolver's pre-resolved check can still validate
+        // the git version against it.
+        let dcf = r#"Package: thing
+Imports:
+    foo (>= 2.0.0),
+    bar
+Remotes:
+    user/foo,
+    user/bar
+"#;
+        let m = Manifest::from_description_str(dcf).expect("parse");
+
+        let foo = m.dependencies.get("foo").unwrap();
+        assert_eq!(foo.git(), Some("user/foo"));
+        assert_eq!(
+            foo.version_req(),
+            Some(">=2.0.0"),
+            "Imports version constraint should survive the Remotes override"
+        );
+
+        // Unconstrained ("*") deps should not grow a version field.
+        let bar = m.dependencies.get("bar").unwrap();
+        assert_eq!(bar.git(), Some("user/bar"));
+        assert!(bar.version_req().is_none());
     }
 
     #[test]
