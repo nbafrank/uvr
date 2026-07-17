@@ -11,13 +11,22 @@ use crate::ui::palette;
 pub fn run(version: String) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
+    let exact = is_exact_version(&version);
+    if !exact {
+        // Constraint form (`>=4.2`, `^4.3`): validate before touching
+        // uvr.toml so garbage like `--` never lands in the manifest (#171).
+        uvr_core::resolver::parse_version_req(&version).map_err(|e| {
+            anyhow::anyhow!("`{version}` is not a valid R version or constraint: {e}")
+        })?;
+    }
+
     let old = project.manifest.project.r_version.clone();
     project.manifest.project.r_version = Some(version.clone());
     project
         .save_manifest()
         .context("Failed to write uvr.toml")?;
 
-    if is_exact_version(&version) {
+    if exact {
         project
             .write_r_version_pin(&version)
             .context("Failed to write .r-version")?;
@@ -42,9 +51,13 @@ pub fn run(version: String) -> Result<()> {
     Ok(())
 }
 
-/// Returns true if `s` looks like a bare version number (`4.3.2`, `4.3-2`),
-/// i.e. no comparison operators.
+/// Returns true if `s` is a bare pinnable version (`4.5`, `4.3.2`).
+///
+/// The old digits/dots/dashes character check accepted garbage like `--`
+/// and `4-5-2`, which was then written verbatim to `.r-version` and could
+/// never match an install (#171). Dash forms now fall through to the
+/// constraint branch, where R's `-`/`.` equivalence is handled by
+/// `parse_version_req`.
 fn is_exact_version(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    uvr_core::r_version::detector::is_plausible_r_version(s)
 }

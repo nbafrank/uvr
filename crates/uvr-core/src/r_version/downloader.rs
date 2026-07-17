@@ -433,11 +433,16 @@ pub fn user_agent(info: &HostInfo) -> String {
 }
 
 /// Download and extract R to `~/.uvr/r-versions/<version>/`.
+///
+/// `version` may be partial (`4.5`): it is resolved to the newest published
+/// matching version before install, so the install directory is always a
+/// full `X.Y.Z` that pin resolution and `r list --all` can match (#170).
 pub async fn download_and_install_r(
     client: &reqwest::Client,
     version: &str,
     platform: Platform,
 ) -> Result<PathBuf> {
+    let version = &resolve_install_version(client, version, platform).await?;
     let install_dir = crate::env_vars::r_install_dir()
         .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?
         .join(version);
@@ -512,6 +517,47 @@ pub async fn download_and_install_r(
 
     info!("R {version} installed to {}", install_dir.display());
     Ok(install_dir)
+}
+
+/// Resolve the user-requested version to a full `X.Y.Z`.
+///
+/// Full versions pass through untouched (no network). A partial `4.5`
+/// resolves to the newest published `4.5.x` for the platform; anything that
+/// isn't version-shaped (`--`, `4..`, `latest`) errors immediately instead
+/// of becoming a CDN 404 or a never-matching install directory (#170, #171).
+async fn resolve_install_version(
+    client: &reqwest::Client,
+    version: &str,
+    platform: Platform,
+) -> Result<String> {
+    if is_real_r_version(version) {
+        return Ok(version.to_string());
+    }
+    if !crate::r_version::detector::is_plausible_r_version(version) {
+        return Err(UvrError::Other(format!(
+            "`{version}` is not a valid R version. Expected `X.Y.Z` (e.g. 4.5.1) or a \
+             partial `X.Y` (e.g. 4.5, which installs the newest 4.5.x)."
+        )));
+    }
+    let available = fetch_available_versions(client, platform).await?;
+    let resolved = pick_newest_matching(&available, version).ok_or_else(|| {
+        UvrError::Other(format!(
+            "No published R version matches {version} for your platform. \
+             See `uvr r list --all` for available versions."
+        ))
+    })?;
+    info!("R {version} resolved to {resolved}");
+    Ok(resolved)
+}
+
+/// Newest entry of `available` (sorted oldest-first) whose leading components
+/// match `prefix`.
+fn pick_newest_matching(available: &[String], prefix: &str) -> Option<String> {
+    available
+        .iter()
+        .rev()
+        .find(|v| crate::r_version::detector::version_matches_prefix(prefix, v))
+        .cloned()
 }
 
 /// Build a helpful error when the portable CDN returns 4xx for a requested R
@@ -802,6 +848,29 @@ mod tests {
         // Rolling channels in versions.json must be filtered out.
         assert!(!is_real_r_version("next"));
         assert!(!is_real_r_version("devel"));
+    }
+
+    #[test]
+    fn pick_newest_matching_resolves_partials() {
+        let available: Vec<String> = ["4.4.3", "4.5.0", "4.5.1", "4.5.3", "4.6.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            pick_newest_matching(&available, "4.5").as_deref(),
+            Some("4.5.3")
+        );
+        assert_eq!(
+            pick_newest_matching(&available, "4.5.1").as_deref(),
+            Some("4.5.1")
+        );
+        assert_eq!(pick_newest_matching(&available, "4.7"), None);
+        // Single-component prefixes never reach this fn — resolve_install_version
+        // rejects them via is_plausible_r_version — but the match itself works.
+        assert_eq!(
+            pick_newest_matching(&available, "4").as_deref(),
+            Some("4.6.0")
+        );
     }
 
     #[test]

@@ -74,22 +74,36 @@ pub fn find_all() -> Vec<RInstallation> {
         }
     }
 
-    // Windows: check common install locations
+    // Windows: check common install locations. Besides `ProgramFiles`, the
+    // official installer offers `ProgramFiles(x86)` for 32-bit builds and
+    // defaults to `%LOCALAPPDATA%\Programs\R` for per-user (no-admin)
+    // installs — common on corporate/university machines (#158).
     #[cfg(target_os = "windows")]
     {
-        let program_files =
-            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
-        let r_base = std::path::Path::new(&program_files).join("R");
-        if let Ok(entries) = std::fs::read_dir(&r_base) {
-            for entry in entries.flatten() {
-                let bin = entry.path().join("bin").join("R.exe");
-                if bin.exists() && !found.iter().any(|i| i.binary == bin) {
-                    if let Some(version) = query_r_version(&bin) {
-                        found.push(RInstallation {
-                            binary: bin,
-                            version,
-                            managed: false,
-                        });
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(dir) = std::env::var(var) {
+                roots.push(std::path::Path::new(&dir).join("R"));
+            }
+        }
+        if roots.is_empty() {
+            roots.push(std::path::PathBuf::from("C:\\Program Files\\R"));
+        }
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            roots.push(std::path::Path::new(&local).join("Programs").join("R"));
+        }
+        for r_base in roots {
+            if let Ok(entries) = std::fs::read_dir(&r_base) {
+                for entry in entries.flatten() {
+                    let bin = entry.path().join("bin").join("R.exe");
+                    if bin.exists() && !found.iter().any(|i| i.binary == bin) {
+                        if let Some(version) = query_r_version(&bin) {
+                            found.push(RInstallation {
+                                binary: bin,
+                                version,
+                                managed: false,
+                            });
+                        }
                     }
                 }
             }
@@ -187,16 +201,51 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     parse(a).cmp(&parse(b))
 }
 
+/// True when `s` has the shape of an R version a user may type: 2–4
+/// dot-separated, non-empty, all-digit components (`4.5`, `4.5.1`,
+/// `4.5.1.2`). Rejects constraint syntax, garbage like `--`/`....`/`4..`,
+/// and dash forms (`4.5-2` belongs to package versions, not R itself).
+pub fn is_plausible_r_version(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    (2..=4).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True when every component of `prefix` numerically equals the
+/// corresponding leading component of `full`: `4.5` matches `4.5.1` but not
+/// `4.50.1`; `4.5.1` matches only `4.5.1[.x]`. Non-numeric input never
+/// matches.
+pub fn version_matches_prefix(prefix: &str, full: &str) -> bool {
+    let parse = |s: &str| -> Option<Vec<u32>> { s.split('.').map(|p| p.parse().ok()).collect() };
+    match (parse(prefix), parse(full)) {
+        (Some(p), Some(f)) => {
+            !p.is_empty() && p.len() <= f.len() && p.iter().zip(&f).all(|(a, b)| a == b)
+        }
+        _ => false,
+    }
+}
+
 fn find_exact_version(installations: &[RInstallation], version: &str) -> Result<PathBuf> {
-    installations
+    // Exact string match first — the common case for full `X.Y.Z` pins.
+    if let Some(inst) = installations.iter().find(|i| i.version == version) {
+        return Ok(inst.binary.clone());
+    }
+    // Partial pin (`4.5`): newest installed version matching by component
+    // prefix. Pins used to be compared with string equality only, so a
+    // `.r-version` holding `4.5` could never match the `4.5.x` install
+    // directories and every command failed with "not installed" (#136).
+    let mut matches: Vec<&RInstallation> = installations
         .iter()
-        .find(|i| i.version == version)
-        .map(|i| i.binary.clone())
-        .ok_or_else(|| {
-            UvrError::Other(format!(
-                "R {version} is pinned in .r-version but not installed. Run: uvr r install {version}"
-            ))
-        })
+        .filter(|i| version_matches_prefix(version, &i.version))
+        .collect();
+    matches.sort_by(|a, b| version_cmp(&b.version, &a.version));
+    matches.first().map(|i| i.binary.clone()).ok_or_else(|| {
+        UvrError::Other(format!(
+            "R {version} is pinned in .r-version but not installed. Run: uvr r install {version}"
+        ))
+    })
 }
 
 /// Given a list of installations, return the binary for an exact version match.
@@ -227,7 +276,9 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.lines().rev().find_map(|line| {
         let t = line.trim();
-        if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.contains('.') {
+        // Strict shape check: the old digits-and-dots filter accepted noise
+        // like `....` or `4..` (#159).
+        if is_plausible_r_version(t) {
             Some(t.to_string())
         } else {
             None
@@ -262,6 +313,58 @@ mod tests {
         let installations = vec![fake_installation("4.3.2", true)];
         let result = find_exact_version(&installations, "4.4.1");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_exact_version_partial_pin_picks_newest_match() {
+        // #136: a `4.5` pin must resolve against `4.5.x` installs.
+        let installations = vec![
+            fake_installation("4.5.1", true),
+            fake_installation("4.5.3", true),
+            fake_installation("4.6.0", true),
+        ];
+        let result = find_exact_version(&installations, "4.5").unwrap();
+        assert_eq!(result, PathBuf::from("/fake/r-4.5.3/bin/R"));
+    }
+
+    #[test]
+    fn find_exact_version_partial_pin_no_match() {
+        let installations = vec![fake_installation("4.6.0", true)];
+        assert!(find_exact_version(&installations, "4.5").is_err());
+    }
+
+    #[test]
+    fn version_matches_prefix_component_semantics() {
+        assert!(version_matches_prefix("4.5", "4.5.1"));
+        assert!(version_matches_prefix("4.5", "4.5"));
+        assert!(version_matches_prefix("4.5.1", "4.5.1"));
+        assert!(version_matches_prefix("4.5.1", "4.5.1.2"));
+        // Component-wise, not string-prefix:
+        assert!(!version_matches_prefix("4.5", "4.50.1"));
+        // A longer pin never matches a shorter install:
+        assert!(!version_matches_prefix("4.5.0", "4.5"));
+        assert!(!version_matches_prefix("4.5", "4.6.0"));
+        // Non-numeric input never matches:
+        assert!(!version_matches_prefix("--", "4.5.1"));
+        assert!(!version_matches_prefix("4.5", "four.five"));
+        assert!(!version_matches_prefix("", "4.5.1"));
+    }
+
+    #[test]
+    fn is_plausible_r_version_shapes() {
+        assert!(is_plausible_r_version("4.5"));
+        assert!(is_plausible_r_version("4.5.1"));
+        assert!(is_plausible_r_version("4.5.1.2"));
+        // Garbage the old char-filter accepted (#171, #159):
+        assert!(!is_plausible_r_version("--"));
+        assert!(!is_plausible_r_version("4-5-2"));
+        assert!(!is_plausible_r_version("4.5-2"));
+        assert!(!is_plausible_r_version("...."));
+        assert!(!is_plausible_r_version("4.."));
+        assert!(!is_plausible_r_version("4"));
+        assert!(!is_plausible_r_version(""));
+        assert!(!is_plausible_r_version("4.5.1.2.3"));
+        assert!(!is_plausible_r_version(">=4.5"));
     }
 
     #[test]

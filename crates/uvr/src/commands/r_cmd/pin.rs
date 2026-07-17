@@ -1,7 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use uvr_core::project::Project;
-use uvr_core::r_version::detector::{find_r_binary, query_r_version};
+use uvr_core::r_version::detector::{
+    find_all, find_r_binary, is_plausible_r_version, query_r_version, version_matches_prefix,
+};
 
 use crate::ui;
 use crate::ui::palette;
@@ -13,7 +15,27 @@ pub fn run(version: Option<String>) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
 
     let pinned = match version {
-        Some(v) => v,
+        Some(v) => {
+            // Validate before writing: the pin used to accept any string,
+            // and garbage (`--`, `4-5-2`) produced a `.r-version` that could
+            // never match an install (#171).
+            if !is_plausible_r_version(&v) {
+                bail!(
+                    "`{v}` is not a valid R version to pin. Expected `X.Y.Z` (e.g. 4.5.1) \
+                     or a partial `X.Y` (e.g. 4.5)."
+                );
+            }
+            let installed = find_all();
+            if !installed
+                .iter()
+                .any(|i| i.version == v || version_matches_prefix(&v, &i.version))
+            {
+                ui::warn(format!(
+                    "R {v} is not installed yet — run `uvr r install {v}` to use this pin."
+                ));
+            }
+            v
+        }
         None => {
             let constraint = project.manifest.project.r_version.as_deref();
             let binary = find_r_binary(constraint)
