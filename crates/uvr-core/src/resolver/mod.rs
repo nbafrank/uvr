@@ -126,6 +126,24 @@ impl<'a> Resolver<'a> {
                     if !c.is_empty() && c != "*" {
                         let req = parse_version_req(c)?;
                         if !version_matches_req(&existing.version, &req) {
+                            // A pre-resolved package must never re-resolve
+                            // past its pinned version: for selective-update
+                            // pins the locked version IS the resolution
+                            // (#127), and for git deps swapping to a registry
+                            // version would silently change the source. The
+                            // first-encounter path already errors on a
+                            // constraint mismatch; without this guard, a
+                            // second encounter (pinned package that is both a
+                            // direct dep and a transitive dep of the target)
+                            // would fall through to a live registry lookup
+                            // and quietly override the pin.
+                            if pre_resolved.contains_key(&name) {
+                                return Err(UvrError::VersionConflict {
+                                    package: name.clone(),
+                                    required: c.clone(),
+                                    conflicting: existing.version.to_string(),
+                                });
+                            }
                             // Try re-resolving with the stricter constraint.
                             if let Ok(new_info) =
                                 self.registry.resolve_package(&name, Some(c.as_str()))
@@ -313,9 +331,12 @@ impl<'a> Resolver<'a> {
 /// #127). The resolver constraint-checks `pre_resolved` versions (the #84
 /// guard), so a freshly-updated package that needs a newer version of a
 /// pinned one fails with an explicit `VersionConflict` instead of producing
-/// a self-inconsistent lockfile. `requires` carries names only — the
-/// lockfile stores no constraints — which is fine for pins: their deps are
-/// themselves pinned or resolve fresh with real registry constraints.
+/// a self-inconsistent lockfile. The guard covers both the first encounter
+/// of a pinned name and later, stricter constraints arriving via the
+/// diamond path — a pin is never re-resolved past its version. `requires`
+/// carries names only (the lockfile stores no constraints), which is fine
+/// for pins: their deps are themselves pinned or resolve fresh with real
+/// registry constraints.
 pub fn locked_to_package_info(p: &LockedPackage) -> Result<PackageInfo> {
     let version = Version::parse(&normalize_version(&p.version)).map_err(|e| {
         UvrError::Other(format!(
@@ -722,6 +743,53 @@ mod tests {
             result,
             Err(UvrError::VersionConflict { ref package, .. }) if package == "rlang"
         ));
+    }
+
+    #[test]
+    fn selective_update_pin_survives_diamond_reresolution() {
+        // #127 review blocker: when the pinned package is BOTH a direct
+        // manifest dep and a transitive dep of the updated target — the
+        // common real-world shape (`Imports: shiny, rlang` where shiny also
+        // needs rlang) — it resolves from the pin on first encounter
+        // ("rlang" sorts before "shiny" in the manifest BTreeMap), and
+        // shiny's stricter constraint then arrives via the diamond path.
+        // That path used to consult the registry directly, silently
+        // overriding the pin with a fresh version. It must conflict instead.
+        let registry = MockRegistry {
+            packages: HashMap::from([
+                make_pkg("shiny", "2.0.0", vec![("rlang", Some(">=2.0.0"))]),
+                make_pkg("rlang", "2.5.0", vec![]), // registry has a satisfying version
+            ]),
+        };
+        let resolver = Resolver::new(&registry);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("rlang".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("shiny".into(), DependencySpec::Version("*".into()), false);
+
+        let locked = LockedPackage {
+            name: "rlang".into(),
+            version: "1.1.4".into(),
+            source: PackageSource::Cran,
+            raw_version: None,
+            url: None,
+            checksum: None,
+            requires: vec![],
+            system_requirements: None,
+            dev: false,
+        };
+        let pins = HashMap::from([(
+            "rlang".to_string(),
+            locked_to_package_info(&locked).unwrap(),
+        )]);
+
+        let result = resolver.resolve(&manifest, None, pins);
+        assert!(
+            matches!(
+                result,
+                Err(UvrError::VersionConflict { ref package, .. }) if package == "rlang"
+            ),
+            "pin must surface a conflict, not silently drift: {result:?}"
+        );
     }
 
     #[test]
