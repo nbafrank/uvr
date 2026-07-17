@@ -7,6 +7,14 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.1 (2026-07-17)
+
+Fix batch driven by @gdevenyi's codebase audit (#127–#172): 12 confirmed
+issues fixed, headlined by partial R version support (`uvr r install 4.5`)
+and selective-update lockfile consistency. Every fix was verified against
+the audit's claims and the batch passed an adversarial review before
+tagging.
+
 ### Features
 
 - Partial R versions everywhere: `uvr r install 4.5` installs the newest
