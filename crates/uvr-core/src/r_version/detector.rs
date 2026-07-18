@@ -130,15 +130,28 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_default();
     if let Some(pinned) = read_r_version_pin_from(&cwd) {
         let bin = find_exact_version(&installations, &pinned)?;
-        // Validate the pinned install — a broken managed R (e.g. unpatched
-        // R 4.6 on macOS, see patch_r_executables) shouldn't propagate as
-        // a "found" binary that crashes downstream.
-        if query_r_version(&bin).is_none() {
+        // Validate the pinned install — a broken managed R (one whose binary
+        // doesn't respond to a version query, e.g. a corrupted or partially
+        // extracted install) must not be silently selected and crash
+        // downstream.
+        let Some(resolved) = query_r_version(&bin) else {
             return Err(UvrError::Other(format!(
                 "R {pinned} is pinned in .r-version but the install at {} is broken \
                  (no version response). Reinstall: `uvr r uninstall {pinned} && uvr r install {pinned}`.",
                 bin.display()
             )));
+        };
+        // The pin always wins over the uvr.toml constraint, but silent drift
+        // between the two is confusing (`uvr r use 4.3.0` after setting
+        // `r_version = "^4.5"`, #156) — surface it without changing precedence.
+        if let Some(constraint) = version_constraint {
+            if pin_conflicts_with_constraint(&resolved, constraint) {
+                tracing::warn!(
+                    ".r-version pins R {pinned} (resolved to {resolved}), which does not \
+                     satisfy the uvr.toml constraint `{constraint}`; the pin takes \
+                     precedence. Update .r-version or uvr.toml to bring them back in sync."
+                );
+            }
         }
         return Ok(bin);
     }
@@ -181,8 +194,8 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
 
     // 3. Prefer managed installation, fall back to first system R.
     //    Validate each candidate via `query_r_version` so a broken managed
-    //    install (e.g. R 4.6 before the install-name patch on macOS — see
-    //    `patch_r_executables`) doesn't silently capture every uvr command.
+    //    install (one whose R binary doesn't respond to a version query)
+    //    isn't silently selected and doesn't capture every uvr command.
     let mut managed: Vec<&RInstallation> = installations.iter().filter(|i| i.managed).collect();
     let mut system: Vec<&RInstallation> = installations.iter().filter(|i| !i.managed).collect();
     // Probe in version-descending order so the newest working install wins.
@@ -194,6 +207,22 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
         }
     }
     Err(UvrError::RNotFound)
+}
+
+/// True when `resolved_version` (the full version of the install a
+/// `.r-version` pin resolved to, e.g. `4.3.2`) fails a parseable uvr.toml
+/// `constraint`. Unparseable constraints or versions return false — the
+/// drift warning must never fire on input the constraint branch itself
+/// couldn't act on.
+fn pin_conflicts_with_constraint(resolved_version: &str, constraint: &str) -> bool {
+    let Ok(req) = crate::resolver::parse_version_req(constraint) else {
+        return false;
+    };
+    let norm = normalize_version(resolved_version);
+    match semver::Version::parse(&norm) {
+        Ok(v) => !req.matches(&v),
+        Err(_) => false,
+    }
 }
 
 fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -365,6 +394,23 @@ mod tests {
         assert!(!is_plausible_r_version(""));
         assert!(!is_plausible_r_version("4.5.1.2.3"));
         assert!(!is_plausible_r_version(">=4.5"));
+    }
+
+    #[test]
+    fn pin_conflicts_with_constraint_detects_drift() {
+        // #156: manifest `^4.5` + pin resolving to 4.3.x is drift.
+        assert!(pin_conflicts_with_constraint("4.3.0", "^4.5"));
+        assert!(pin_conflicts_with_constraint("4.6.1", ">=4.7"));
+        // Satisfied constraints are not drift.
+        assert!(!pin_conflicts_with_constraint("4.5.1", "^4.5"));
+        assert!(!pin_conflicts_with_constraint("4.5.1", ">=4.4"));
+        assert!(!pin_conflicts_with_constraint("4.5.1", "*"));
+        // Two-component resolved versions normalize before matching.
+        assert!(!pin_conflicts_with_constraint("4.5", "^4.5"));
+        assert!(pin_conflicts_with_constraint("4.3", "^4.5"));
+        // Unparseable constraint or version never reports drift.
+        assert!(!pin_conflicts_with_constraint("4.5.1", "not-a-constraint"));
+        assert!(!pin_conflicts_with_constraint("garbage", "^4.5"));
     }
 
     #[test]
