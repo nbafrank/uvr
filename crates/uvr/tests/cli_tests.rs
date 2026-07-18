@@ -410,7 +410,63 @@ fn test_update_dry_run_on_empty_project() {
 
 #[test]
 fn test_cache_clean() {
-    uvr_cmd().args(["cache", "clean"]).assert().success();
+    // Isolated HOME: this test used to run a REAL `uvr cache clean` against
+    // the developer's ~/.uvr, wiping the whole package + download cache on
+    // every `cargo test` run.
+    let home = TempDir::new().unwrap();
+    let cache = home.path().join(".uvr").join("cache");
+    let entry = home
+        .path()
+        .join(".uvr")
+        .join("packages")
+        .join("pkg-1.0-0123456789abcdef0123456789abcdef")
+        .join("pkg");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("aabbccdd-pkg_1.0.tar.gz"), b"tar").unwrap();
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("DESCRIPTION"), "Package: pkg\n").unwrap();
+
+    uvr_cmd()
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env_remove("UVR_CACHE_DIR")
+        .args(["cache", "clean"])
+        .assert()
+        .success();
+
+    assert!(
+        std::fs::read_dir(&cache)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
+        "seeded download cache should be emptied"
+    );
+    assert!(
+        !entry.exists(),
+        "seeded package cache entry should be removed"
+    );
+}
+
+#[test]
+fn test_cache_clean_filtered_no_match() {
+    // Filtered clean with no matching entries reports and touches nothing.
+    let home = TempDir::new().unwrap();
+    let cache = home.path().join(".uvr").join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("aabbccdd-other_2.0.tar.gz"), b"tar").unwrap();
+
+    uvr_cmd()
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env_remove("UVR_CACHE_DIR")
+        .args(["cache", "clean", "--package", "nomatch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No cache entries matched"));
+
+    assert!(
+        cache.join("aabbccdd-other_2.0.tar.gz").exists(),
+        "non-matching tarball must survive a filtered clean"
+    );
 }
 
 // ─── help ──────────────────────────────────────────────────

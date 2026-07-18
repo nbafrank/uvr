@@ -7,6 +7,27 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Features
+
+- `uvr cache clean` gains `--package <name>` and `--r-version <minor>`
+  filters (repeatable/comma-separated), so troubleshooting one package or
+  retiring one R series no longer costs the whole cache (#92, thanks
+  @B-Nilson). Cache entries now record their R version; entries from older
+  uvr versions can't be version-filtered and are reported as skipped.
+
+### Fixes
+
+- Switching a project's active R minor no longer wipes the library on
+  every sync: `uvr sync` now re-resolves the lockfile for the new R (the
+  old resolution carried per-minor binary URLs and Bioc releases) and the
+  wipe fires exactly once per actual switch (#85, thanks @B-Nilson).
+- R-style version constraints that semver can't parse directly — 4+
+  components (`>= 0.9.100.5.0`), dash forms (`>= 1.2-7.1`), leading zeros
+  (`>= 0.03-11`), and `==` — are now normalized and enforced instead of
+  being silently treated as unconstrained (#149 follow-up).
+- The `cargo test` suite no longer wipes the developer's real `~/.uvr`
+  cache: the `cache clean` integration test ran against the actual HOME.
+
 ### Fixes
 
 - System-dependency checks distinguish "the sysreqs API was unreachable"
