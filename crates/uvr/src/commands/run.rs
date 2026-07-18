@@ -149,7 +149,16 @@ async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf
     let short_hash = &hash[..12];
 
     let cache_dir = uvr_core::env_vars::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| {
+            // HOME-less environment (sandbox/CI): degrade to the system temp
+            // dir instead of scattering with-envs/ into the working directory.
+            let fallback = std::env::temp_dir().join("uvr-cache");
+            tracing::warn!(
+                "HOME and UVR_CACHE_DIR are unset; using temporary --with env cache at {}",
+                fallback.display()
+            );
+            fallback
+        })
         .join("with-envs")
         .join(short_hash);
 

@@ -22,11 +22,27 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 
 /// Return the global package cache directory (`~/.uvr/packages/`).
+///
+/// When no home directory can be determined (HOME unset in sandboxes,
+/// scratch containers, some CI runners) the cache degrades to a per-boot
+/// directory under the system temp dir rather than polluting the current
+/// working directory with `./.uvr/packages/`.
 pub fn global_packages_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".uvr")
-        .join("packages")
+    match dirs::home_dir() {
+        Some(home) => home.join(".uvr").join("packages"),
+        None => {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            let fallback = std::env::temp_dir().join("uvr-packages");
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "HOME is unset; using temporary package cache at {} \
+                     (cache will not persist across reboots)",
+                    fallback.display()
+                );
+            });
+            fallback
+        }
+    }
 }
 
 /// Compute the cache key for a package.
@@ -193,7 +209,26 @@ pub fn store(source_pkg_dir: &Path, key: &str, package_name: &str) -> std::io::R
             return Ok(());
         }
         // Corrupted/partial entry from a prior crash — remove and replace.
-        let _ = std::fs::remove_dir_all(&final_dir);
+        if let Err(e) = std::fs::remove_dir_all(&final_dir) {
+            // The removal may "fail" benignly when a concurrent process
+            // already removed (or is busy replacing) the entry. Only give up
+            // if the poisoned directory is genuinely still there — otherwise
+            // fall through and let the rename below resolve any race.
+            if final_dir.exists() && !final_dir.join(package_name).join("DESCRIPTION").exists() {
+                tracing::warn!(
+                    "Cannot remove corrupted cache entry {}: {e}; \
+                     the entry will never be usable until it is deleted",
+                    final_dir.display()
+                );
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to remove corrupted cache entry {}: {e}",
+                        final_dir.display()
+                    ),
+                ));
+            }
+        }
     }
 
     // Stage into a temporary directory next to the final location.
@@ -228,10 +263,28 @@ pub fn store(source_pkg_dir: &Path, key: &str, package_name: &str) -> std::io::R
                 || e.raw_os_error() == Some(39 /* ENOTEMPTY */)
                 || e.raw_os_error() == Some(17 /* EEXIST */) =>
         {
-            // Another process cached it first — our staging dir will be
-            // cleaned up by the TempDir drop.
-            debug!("Cache race for {}, using existing entry", package_name);
-            Ok(())
+            // The target exists. Distinguish "another process cached it
+            // first" (benign race — the entry is valid, keep it) from "a
+            // corrupted entry we failed to remove is still squatting on the
+            // key" (silent permanent cache miss if reported as success).
+            if final_dir.join(package_name).join("DESCRIPTION").exists() {
+                // Another process cached it first — our staging dir will be
+                // cleaned up by the TempDir drop.
+                debug!("Cache race for {}, using existing entry", package_name);
+                Ok(())
+            } else {
+                tracing::warn!(
+                    "Cache entry {} exists but is corrupted and could not be replaced",
+                    final_dir.display()
+                );
+                Err(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "corrupted cache entry {} could not be replaced: {e}",
+                        final_dir.display()
+                    ),
+                ))
+            }
         }
         Err(e) => Err(e),
     }
@@ -328,13 +381,34 @@ pub fn cache_stats() -> (u64, u64) {
     (count, bytes)
 }
 
+/// Recursive size of a directory tree, in bytes.
+///
+/// Symlinks are never followed (`symlink_metadata` / `entry.file_type()`
+/// don't traverse them): cache entries are real directories, and a symlink
+/// pointing outside the cache — or a symlink cycle inside a cached package
+/// (preserved verbatim by `copy_dir_recursive`) — must not inflate the
+/// stats or recurse forever.
 fn dir_size(path: &Path) -> u64 {
-    if path.is_file() {
-        return path.metadata().map(|m| m.len()).unwrap_or(0);
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(_) => return 0,
+    };
+    if md.file_type().is_symlink() {
+        return 0;
+    }
+    if md.is_file() {
+        return md.len();
     }
     let mut total = 0u64;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_symlink() {
+                continue;
+            }
             total += dir_size(&entry.path());
         }
     }
@@ -475,6 +549,92 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(global_packages_dir().join(&key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_errors_when_corrupted_entry_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("testpkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: testpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+
+        let key = format!(
+            "testpkg-1.0-poison{:023x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        // Corrupted entry (no DESCRIPTION) holding a read-only subdirectory:
+        // remove_dir_all can't unlink the file inside a 0o555 dir, so the
+        // poisoned entry survives the removal attempt.
+        let entry = global_packages_dir().join(&key);
+        let locked = entry.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("junk"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Sanity: the permission lock is a no-op when running as root (some
+        // containers). Skip the test in that case.
+        if std::fs::remove_file(locked.join("junk")).is_ok() {
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&entry);
+            return;
+        }
+
+        let result = store(&pkg_dir, &key, "testpkg");
+
+        // Restore permissions before asserting so cleanup always succeeds.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&entry).unwrap();
+
+        assert!(
+            result.is_err(),
+            "store must not report success while a poisoned entry blocks the cache key"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_skips_symlinks() {
+        let tmp = TempDir::new().unwrap();
+
+        // External data that must not count toward the entry's size.
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("big"), vec![0u8; 8192]).unwrap();
+
+        let entry = tmp.path().join("entry");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("real"), b"12345").unwrap();
+        std::os::unix::fs::symlink(&external, entry.join("link-dir")).unwrap();
+        std::os::unix::fs::symlink(external.join("big"), entry.join("link-file")).unwrap();
+
+        assert_eq!(dir_size(&entry), 5);
+        // A symlink passed directly (e.g. a symlinked cache entry) counts as 0.
+        assert_eq!(dir_size(&entry.join("link-dir")), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_terminates_on_symlink_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let entry = tmp.path().join("entry");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("f"), b"xx").unwrap();
+        // Self-referential loop: entry/loop -> entry.
+        std::os::unix::fs::symlink(&entry, entry.join("loop")).unwrap();
+
+        // Must terminate (no unbounded recursion) and not double-count.
+        assert_eq!(dir_size(&entry), 2);
     }
 
     #[test]
