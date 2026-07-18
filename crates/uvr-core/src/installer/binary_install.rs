@@ -153,7 +153,8 @@ pub fn install_binary_package(
     Ok(())
 }
 
-/// Verify every `.so` in `<pkg_dir>/libs/` is a Mach-O for the host CPU.
+/// Verify every `.so` / `.dylib` under `<pkg_dir>/libs/` (recursively — arch
+/// subdirs like `libs/arm64/` included) is a Mach-O for the host CPU.
 ///
 /// Reads only the 8-byte Mach-O header (or the fat header + arch entries
 /// for universal binaries). Errors with a clear, actionable message if a
@@ -162,19 +163,21 @@ pub fn install_binary_package(
 /// x86_64-only tarballs. Files that aren't Mach-O at all (unexpected, but
 /// possible if an R package vendors a debug stub or stray asset) are
 /// silently skipped; we only reject confirmed wrong-arch Mach-Os.
+// CPU type constants from `<mach/machine.h>`:
+//   CPU_TYPE_X86_64 = CPU_TYPE_X86 (7) | CPU_ARCH_ABI64 (0x01000000)
+//   CPU_TYPE_ARM64  = CPU_TYPE_ARM (12) | CPU_ARCH_ABI64
+#[cfg(target_os = "macos")]
+const CPU_TYPE_X86_64: u32 = 0x01000007;
+#[cfg(target_os = "macos")]
+const CPU_TYPE_ARM64: u32 = 0x0100000c;
+// Mach-O magic numbers (Mach-O is LE on modern macOS; fat headers are BE):
+#[cfg(target_os = "macos")]
+const MH_MAGIC_64: u32 = 0xfeedfacf;
+#[cfg(target_os = "macos")]
+const FAT_MAGIC: u32 = 0xcafebabe;
+
 #[cfg(target_os = "macos")]
 fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> {
-    use std::io::Read;
-
-    // CPU type constants from `<mach/machine.h>`:
-    //   CPU_TYPE_X86_64 = CPU_TYPE_X86 (7) | CPU_ARCH_ABI64 (0x01000000)
-    //   CPU_TYPE_ARM64  = CPU_TYPE_ARM (12) | CPU_ARCH_ABI64
-    const CPU_TYPE_X86_64: u32 = 0x01000007;
-    const CPU_TYPE_ARM64: u32 = 0x0100000c;
-    // Mach-O magic numbers (Mach-O is LE on modern macOS; fat headers are BE):
-    const MH_MAGIC_64: u32 = 0xfeedfacf;
-    const FAT_MAGIC: u32 = 0xcafebabe;
-
     let host_arch = std::env::consts::ARCH;
     let (expected_cpu_type, expected_arch_name) = match host_arch {
         "aarch64" | "arm64" => (CPU_TYPE_ARM64, "arm64"),
@@ -188,16 +191,62 @@ fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> 
         return Ok(()); // Pure-R package, no native libraries to verify.
     }
 
-    let entries = std::fs::read_dir(&libs_dir).map_err(|e| {
+    verify_mach_o_arch_in_dir(
+        &libs_dir,
+        package_name,
+        expected_cpu_type,
+        expected_arch_name,
+        host_arch,
+        0,
+    )
+}
+
+/// Recursive worker for `verify_mach_o_arch_in_libs`: scans `dir` for `.so` /
+/// `.dylib` files and descends into subdirectories (R macOS binaries sometimes
+/// place arch-specific shared objects under `libs/<arch>/`, and some ship
+/// `.dylib` instead of `.so` — #147). Depth-bounded like
+/// `find_dir_with_r_binary` to guard against symlink loops.
+#[cfg(target_os = "macos")]
+fn verify_mach_o_arch_in_dir(
+    dir: &Path,
+    package_name: &str,
+    expected_cpu_type: u32,
+    expected_arch_name: &str,
+    host_arch: &str,
+    depth: usize,
+) -> Result<()> {
+    use std::io::Read;
+
+    if depth > 12 {
+        return Ok(()); // guard against symlink loops
+    }
+
+    let entries = std::fs::read_dir(dir).map_err(|e| {
         UvrError::Other(format!(
-            "Failed to read libs/ for arch check of '{}': {}",
-            package_name, e
+            "Failed to read '{}' for arch check of '{}': {}",
+            dir.display(),
+            package_name,
+            e
         ))
     })?;
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("so") {
+        if path.is_dir() {
+            verify_mach_o_arch_in_dir(
+                &path,
+                package_name,
+                expected_cpu_type,
+                expected_arch_name,
+                host_arch,
+                depth + 1,
+            )?;
+            continue;
+        }
+        if !matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("so") | Some("dylib")
+        ) {
             continue;
         }
         let Ok(mut file) = std::fs::File::open(&path) else {
@@ -567,7 +616,14 @@ pub fn inspect_tarball(tarball_path: &Path, package_name: &str) -> Option<Tarbal
     let want = format!("{package_name}/DESCRIPTION");
 
     for entry in archive.entries().ok()?.flatten() {
-        let path_owned = entry.path().ok()?.into_owned();
+        // Skip entries with unparseable paths (older GNU tar headers, PAX
+        // quirks) instead of aborting the whole inspection — bailing here
+        // used to misclassify perfectly valid binary tarballs as source
+        // (#139, same shape as the #88 extraction fix).
+        let path_owned = match entry.path() {
+            Ok(p) => p.into_owned(),
+            Err(_) => continue,
+        };
         if path_owned.to_string_lossy() != want {
             continue;
         }
@@ -657,6 +713,17 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
         else {
             continue;
         };
+        // Only parse stdout when otool actually succeeded — a non-zero exit
+        // (broken binary, sandbox denial) can leave partial or garbage output
+        // that would be parsed as dep lines (#164).
+        if !otool_out.status.success() {
+            tracing::debug!(
+                "otool -L exited {} on '{}'; skipping libR patch for this file",
+                otool_out.status.code().unwrap_or(-1),
+                path.display()
+            );
+            continue;
+        }
         let otool_text = String::from_utf8_lossy(&otool_out.stdout);
 
         let mut changed = false;
@@ -677,13 +744,27 @@ fn patch_so_libr_refs(pkg_dir: &Path, libr_path: &Path) -> std::io::Result<()> {
             if old_dep == new_dep {
                 continue; // already pointing at managed path
             }
-            if Command::new("install_name_tool")
+            // Per-dep failures must not be silent (#163): a partially-patched
+            // .so dies later with a cryptic dyld error, so leave a breadcrumb
+            // naming the file and the dep that failed. Not fatal — behavior
+            // matches the outer best-effort contract.
+            match Command::new("install_name_tool")
                 .args(["-change", old_dep, &new_dep, &path.to_string_lossy()])
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
             {
-                changed = true;
+                Ok(s) if s.success() => changed = true,
+                Ok(s) => tracing::warn!(
+                    "install_name_tool failed (exit {}) redirecting '{old_dep}' -> \
+                     '{new_dep}' on '{}'; the package may fail to load under \
+                     uvr-managed R.",
+                    s.code().unwrap_or(-1),
+                    path.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "Failed to run install_name_tool redirecting '{old_dep}' -> \
+                     '{new_dep}' on '{}': {e}",
+                    path.display()
+                ),
             }
         }
 
@@ -1103,6 +1184,71 @@ mod tests {
             "error message should explain the arch mismatch, got: {msg}"
         );
         assert!(msg.contains("#102"), "error should cite issue #102");
+    }
+
+    #[cfg(target_os = "macos")]
+    fn wrong_host_cpu() -> u32 {
+        match std::env::consts::ARCH {
+            "aarch64" | "arm64" => 0x01000007, // host=arm64, file=x86_64
+            "x86_64" => 0x0100000c,            // host=x86_64, file=arm64
+            other => panic!("unexpected host arch in test: {other}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn host_cpu() -> u32 {
+        match std::env::consts::ARCH {
+            "aarch64" | "arm64" => 0x0100000c,
+            "x86_64" => 0x01000007,
+            other => panic!("unexpected host arch in test: {other}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_recurses_into_subdirs() {
+        // Wrong-arch .so hidden in an arch subdir (libs/<arch>/) must still
+        // be caught — the pre-#147 scan only looked at direct libs/* entries.
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let nested = pkg_dir.join("libs").join("x86_64");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_thin_macho_so(&nested.join("pkg.so"), wrong_host_cpu());
+
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect_err("wrong-arch .so in libs subdir should be rejected");
+        assert!(err.to_string().contains("#102"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_covers_dylib_files() {
+        // Wrong-arch .dylib directly in libs/ must be caught (#147).
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let libs = pkg_dir.join("libs");
+        std::fs::create_dir_all(&libs).unwrap();
+        write_thin_macho_so(&libs.join("helper.dylib"), wrong_host_cpu());
+
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect_err("wrong-arch .dylib should be rejected");
+        assert!(err.to_string().contains("#102"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_check_passes_nested_host_arch_dylib() {
+        // Host-arch .dylib in a nested subdir passes — pass/fail semantics
+        // are unchanged, only enumeration got broader.
+        let dir = TempDir::new().unwrap();
+        let pkg_dir = dir.path().join("pkg");
+        let nested = pkg_dir.join("libs").join("arch").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        write_thin_macho_so(&nested.join("helper.dylib"), host_cpu());
+        write_thin_macho_so(&pkg_dir.join("libs").join("pkg.so"), host_cpu());
+
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+            .expect("host-arch files at any depth should pass");
     }
 
     #[cfg(target_os = "macos")]
