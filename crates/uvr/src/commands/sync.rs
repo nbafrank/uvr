@@ -195,6 +195,44 @@ pub async fn run_inner(
         }
     }
 
+    // #85: a lockfile resolved for a different R minor must be re-resolved,
+    // not installed as-is — package URLs (P3M binaries) and the Bioconductor
+    // release are per-R-minor, so installing the old resolution under the new
+    // R produces wrong artifacts. Worse, uvr.lock never learned the new R, so
+    // every subsequent sync saw the same mismatch and wiped the library again
+    // (B-Nilson's wipe-loop). Re-resolve once, write the lockfile, and let the
+    // sentinel logic below decide the (now one-time) wipe. Skipped under
+    // --frozen, which has already bailed on any out-of-date lockfile above.
+    let lockfile = if !frozen {
+        let r_constraint = project.manifest.project.r_version.as_deref();
+        let current_r = find_r_binary(r_constraint)
+            .ok()
+            .and_then(|bin| query_r_version(&bin));
+        match current_r {
+            Some(ref cur)
+                if looks_like_version(&lockfile.r.version)
+                    && r_minor(cur) != r_minor(&lockfile.r.version) =>
+            {
+                let from = r_minor(&lockfile.r.version);
+                let to = r_minor(cur);
+                ui::warn(format!(
+                    "uvr.lock was resolved for R {} but the active R is {} — re-resolving \
+                     the lockfile for R {}. If this switch is unintended, pin the old \
+                     version with `uvr r pin {from}` and re-run `uvr sync`.",
+                    palette::dim(&from),
+                    palette::info(&to),
+                    palette::info(&to),
+                ));
+                crate::commands::lock::resolve_and_lock(project, false)
+                    .await
+                    .context("Failed to re-resolve uvr.lock for the new R version")?
+            }
+            _ => lockfile,
+        }
+    } else {
+        lockfile
+    };
+
     // When --no-dev is set, filter out dev-only packages before installing.
     let lockfile = if no_dev {
         let mut filtered = lockfile.clone();
@@ -250,8 +288,14 @@ pub async fn install_from_lockfile(
         let sentinel_minor = read_library_r_sentinel(&library);
         let calling_minor_opt = calling_r_minor();
 
-        let lockfile_mismatch =
-            looks_like_version(&lockfile.r.version) && current_minor != locked_minor;
+        // The sentinel records what the library actually contains, so when it
+        // exists it is authoritative and the lockfile check is skipped: a
+        // stale lockfile R (now re-resolved upstream in run_inner, #85) must
+        // not re-trigger a wipe of a library the sentinel says already
+        // matches the current R — that was B-Nilson's every-sync wipe-loop.
+        let lockfile_mismatch = sentinel_minor.is_none()
+            && looks_like_version(&lockfile.r.version)
+            && current_minor != locked_minor;
         let sentinel_mismatch = sentinel_minor.as_ref().is_some_and(|m| m != &current_minor);
         let wipe_needed = lockfile_mismatch || sentinel_mismatch;
         let calling_mismatch = calling_minor_opt
