@@ -455,10 +455,20 @@ pub fn parse_version_req(s: &str) -> Result<VersionReq> {
 }
 
 /// Normalize and pad version numbers in a requirement string.
-/// - Replaces `-` with `.` in the version component only (R treats them equivalently)
-/// - Pads to 3 components so semver parses correctly
 ///
-/// E.g. `"> 2.4"` → `"> 2.4.0"`, `">= 1.1-3"` → `">= 1.1.3"`, `">= 1.0.0"` unchanged.
+/// The version component of each comparator goes through [`normalize_version`],
+/// so constraints get the same treatment as versions themselves: R's `-` → `.`
+/// equivalence, leading-zero stripping (`>= 0.03-11` → `>= 0.3.11`), padding to
+/// 3 components (`> 2.4` → `> 2.4.0`), and 4+-component encoding as a semver
+/// pre-release (`>= 1.6.9.27` → `>= 1.6.9-4.27`). CRAN DESCRIPTIONs use such
+/// constraints routinely (RcppArmadillo, Matrix, h2o…); they used to fail
+/// semver parsing and be silently treated as unconstrained (#149 follow-up).
+///
+/// Known asymmetry, accepted: a bare `1.6.9` (release) satisfies
+/// `>= 1.6.9-4.27` under semver even though R orders `1.6.9 < 1.6.9.27` —
+/// the same release-vs-prerelease inversion `normalize_version` already
+/// accepts for version ordering. Enforcing the major.minor.patch floor with a
+/// narrow sub-patch edge beats dropping the constraint entirely.
 fn normalize_version_in_req(s: &str) -> String {
     s.split(',')
         .map(|part| {
@@ -468,14 +478,12 @@ fn normalize_version_in_req(s: &str) -> String {
                 .find(|c: char| c.is_ascii_digit())
                 .unwrap_or(part.len());
             let (prefix, ver) = part.split_at(ver_start);
-            // Apply R's `-` → `.` equivalence only to the version part
-            let ver = ver.replace('-', ".");
-            let dot_count = ver.chars().filter(|&c| c == '.').count();
-            match dot_count {
-                0 if !ver.is_empty() => format!("{prefix}{ver}.0.0"),
-                1 => format!("{prefix}{ver}.0"),
-                _ => format!("{prefix}{ver}"),
+            if ver.is_empty() {
+                return part.to_string();
             }
+            // R writes exact-version constraints as `==`; semver spells it `=`.
+            let prefix = prefix.replace("==", "=");
+            format!("{prefix}{}", normalize_version(ver))
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -602,6 +610,28 @@ mod tests {
         assert!(parse_version_req("*").is_ok());
         assert!(parse_version_req(">=3.0.0").is_ok());
         assert!(parse_version_req(">= 1.0.0").is_ok());
+    }
+
+    #[test]
+    fn parse_constraints_with_r_style_versions() {
+        // Real CRAN constraint shapes that used to fail semver parsing and be
+        // silently dropped as unconstrained (#149 follow-up):
+        // 4+ components (RcppArmadillo, h2o, airGR)…
+        let req = parse_version_req(">= 1.6.9.27").expect("4-component constraint");
+        assert!(req.matches(&Version::parse(&normalize_version("1.6.9.30")).unwrap()));
+        assert!(!req.matches(&Version::parse(&normalize_version("1.6.9.20")).unwrap()));
+        assert!(req.matches(&Version::parse(&normalize_version("1.7.0")).unwrap()));
+        // …dash forms with 4 effective components (Matrix >= 1.2-7.1)…
+        let req = parse_version_req(">= 1.2-7.1").expect("dash 4-component constraint");
+        assert!(req.matches(&Version::parse(&normalize_version("1.3-0")).unwrap()));
+        // …and leading zeros (R2jags >= 0.03-11).
+        let req = parse_version_req(">= 0.03-11").expect("leading-zero constraint");
+        assert!(req.matches(&Version::parse(&normalize_version("0.5.7")).unwrap()));
+        assert!(!req.matches(&Version::parse(&normalize_version("0.2.0")).unwrap()));
+        // …and R's `==` exact-version operator (semver spells it `=`).
+        let req = parse_version_req("== 0.1.0").expect("double-equals constraint");
+        assert!(req.matches(&Version::parse("0.1.0").unwrap()));
+        assert!(!req.matches(&Version::parse("0.1.1").unwrap()));
     }
 
     struct MockRegistry {
