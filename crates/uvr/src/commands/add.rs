@@ -44,6 +44,18 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
         // Validate user/repo format
         let parts: Vec<&str> = repo.split('/').collect();
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            // A first segment containing a dot looks like a hostname
+            // (e.g. `gitlab.com/user/repo`): the real problem is an
+            // unsupported git host, not a malformed GitHub spec — say so
+            // instead of the misleading "Invalid GitHub spec" (#145).
+            if parts[0].contains('.') {
+                anyhow::bail!(
+                    "Unsupported git host '{host}' in '{raw}'. Supported specs: \
+                     GitHub via user/repo[@ref], Forgejo via forgejo::host/owner/repo[@ref]. \
+                     GitLab support is tracked in https://github.com/nbafrank/uvr/issues/123",
+                    host = parts[0],
+                );
+            }
             anyhow::bail!(
                 "Invalid GitHub spec '{raw}'. Expected format: user/repo or user/repo@ref"
             );
@@ -530,6 +542,31 @@ mod tests {
     #[test]
     fn parse_empty_name() {
         assert!(parse_add_spec("", false).is_err());
+    }
+
+    #[test]
+    fn parse_host_looking_spec_gets_unsupported_host_error() {
+        // #145: a bare host prefix must not produce the misleading
+        // "Invalid GitHub spec" error.
+        let err = parse_add_spec("gitlab.com/user/repo", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unsupported git host 'gitlab.com'"),
+            "unexpected message: {msg}"
+        );
+        assert!(msg.contains("user/repo"), "should list GitHub form: {msg}");
+        assert!(msg.contains("forgejo::"), "should list Forgejo form: {msg}");
+        assert!(msg.contains("issues/123"), "should reference #123: {msg}");
+        assert!(!msg.contains("Invalid GitHub spec"), "misleading: {msg}");
+    }
+
+    #[test]
+    fn parse_non_host_bad_spec_keeps_github_error() {
+        // No dot in the first segment → still the plain GitHub-spec error.
+        let msg = parse_add_spec("user/repo/extra", false)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Invalid GitHub spec"), "unexpected: {msg}");
     }
 
     #[test]

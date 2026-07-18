@@ -487,9 +487,10 @@ fn normalize_version_in_req(s: &str) -> String {
 /// - Strips leading zeros from each component (semver forbids them):
 ///   `"2026.03.11"` → `"2026.3.11"`
 /// - Pads to three components
-/// - Preserves 4th component as semver pre-release (e.g. `"1.0.12.2"` → `"1.0.12-4.2"`)
-///   so that `1.0.12.1` and `1.0.12.2` are distinguishable. The `4.` prefix ensures
-///   semver ordering is correct: `1.0.12-4.1 < 1.0.12-4.2`.
+/// - Preserves 4th+ components as semver pre-release (e.g. `"1.0.12.2"` → `"1.0.12-4.2"`,
+///   `"1.2.3.4.5"` → `"1.2.3-4.4.5"`) so that `1.0.12.1` and `1.0.12.2` are
+///   distinguishable. The `4.` prefix ensures semver ordering is correct:
+///   `1.0.12-4.1 < 1.0.12-4.2`.
 ///   Note: `raw_version` is always used for URLs, not this normalized form.
 pub fn normalize_version(v: &str) -> String {
     let v = v.replace('-', ".");
@@ -508,11 +509,15 @@ pub fn normalize_version(v: &str) -> String {
         2 => format!("{}.{}.0", parts[0], parts[1]),
         _ => format!("{}.{}.{}", parts[0], parts[1], parts[2]),
     };
-    // R allows 4-component versions (e.g. Rcpp 1.0.12.2, data.table dev builds).
-    // Encode the 4th component as a semver pre-release so versions remain
-    // distinguishable and correctly ordered.
+    // R allows 4+-component versions (e.g. Rcpp 1.0.12.2, data.table dev builds).
+    // Encode every trailing component as a semver pre-release so versions remain
+    // distinguishable and correctly ordered (#130). A 4-component version keeps
+    // its historical form (`1.2.3.4` → `1.2.3-4.4`) for lockfile compatibility;
+    // 5th+ components append as further dotted pre-release identifiers
+    // (`1.2.3.4.5` → `1.2.3-4.4.5`), and semver's numeric identifier ordering
+    // keeps `1.2.3-4.4.5 < 1.2.3-4.4.6` and `1.2.3-4.4 < 1.2.3-4.4.5`.
     if parts.len() >= 4 {
-        format!("{base}-4.{}", parts[3])
+        format!("{base}-4.{}", parts[3..].join("."))
     } else {
         base
     }
@@ -565,13 +570,29 @@ mod tests {
         // Date-style versions with leading zeros (e.g. prodlim 2026.03.11)
         assert_eq!(normalize_version("2026.03.11"), "2026.3.11");
         assert_eq!(normalize_version("2023.03.01"), "2023.3.1");
-        // 4-component versions (e.g. Rcpp 1.0.12.2) → semver pre-release
+        // 4-component versions (e.g. Rcpp 1.0.12.2) → semver pre-release.
+        // This exact format is load-bearing: it's what existing lockfiles
+        // contain, so it must never change (#130 kept it byte-identical).
         assert_eq!(normalize_version("1.0.12.2"), "1.0.12-4.2");
         assert_eq!(normalize_version("1.0.12.1"), "1.0.12-4.1");
+        assert_eq!(normalize_version("1.2.3.4"), "1.2.3-4.4");
+        // 5th+ components are preserved, not dropped (#130)
+        assert_eq!(normalize_version("1.2.3.4.5"), "1.2.3-4.4.5");
+        assert_eq!(normalize_version("1.2.3.4.6"), "1.2.3-4.4.6");
+        assert_ne!(
+            normalize_version("1.2.3.4.5"),
+            normalize_version("1.2.3.4.6")
+        );
         // 4-component versions are distinguishable via semver ordering
         let v1 = Version::parse(&normalize_version("1.0.12.1")).unwrap();
         let v2 = Version::parse(&normalize_version("1.0.12.2")).unwrap();
         assert!(v1 < v2);
+        // 5-component ordering: 4.4 < 4.4.5 < 4.4.6 as pre-release identifiers
+        let v4 = Version::parse(&normalize_version("1.2.3.4")).unwrap();
+        let v5 = Version::parse(&normalize_version("1.2.3.4.5")).unwrap();
+        let v6 = Version::parse(&normalize_version("1.2.3.4.6")).unwrap();
+        assert!(v4 < v5);
+        assert!(v5 < v6);
         // Both satisfy >=1.0.12 (pre-release < release, but >=1.0.12-0 matches)
         // and the raw_version is used for URL construction anyway
     }

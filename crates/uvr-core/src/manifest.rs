@@ -371,7 +371,7 @@ pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> 
         // Split off `@ref` (branch/tag/SHA) and optional `#PR` (dropped).
         let (repo_path, rev) = match path.split_once('@') {
             Some((r, ref_)) => {
-                let ref_ = ref_.split('#').next().unwrap_or(ref_).trim();
+                let ref_ = ref_.split_once('#').map_or(ref_, |(r, _pr)| r).trim();
                 let rev = if ref_.is_empty() {
                     None
                 } else {
@@ -379,7 +379,7 @@ pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> 
                 };
                 (r.trim(), rev)
             }
-            None => (path.split('#').next().unwrap_or(path).trim(), None),
+            None => (path.split_once('#').map_or(path, |(p, _pr)| p).trim(), None),
         };
 
         if !repo_path.contains('/') {
@@ -387,9 +387,8 @@ pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> 
         }
         let pkg_name = explicit_name.unwrap_or_else(|| {
             repo_path
-                .rsplit('/')
-                .next()
-                .unwrap_or(repo_path)
+                .rsplit_once('/')
+                .map_or(repo_path, |(_, name)| name)
                 .to_string()
         });
         if pkg_name.is_empty() {

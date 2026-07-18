@@ -7,6 +7,33 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Fixes
+
+- System-dependency checks distinguish "the sysreqs API was unreachable"
+  from "no sysdeps needed": failed lookups now fall back to the vendored
+  local rules and `uvr sync` says the check was degraded (#148).
+- macOS arch verification of binary packages now recurses into `libs/`
+  subdirectories and covers `.dylib` files (#147); `install_name_tool`/
+  `otool` failures during library patching are logged instead of silently
+  swallowed (#163, #164); a corrupt tar entry no longer aborts binary
+  tarball inspection (#139).
+- Registry caches no longer record a fresh ETag when the cache data write
+  failed, which could make later conditional requests serve stale content
+  (part of #168); unparseable dependency constraints and index entries are
+  logged when dropped (#149, #150).
+- The package cache reports an error instead of silent success when a
+  corrupted entry can't be replaced (#141), and cache size stats no longer
+  follow symlinks (#142).
+- HOME-less environments (sandboxes, some CI) now cache under the system
+  temp dir instead of polluting the working directory (#161, main sites).
+- 5th+ version components are preserved during normalization instead of
+  silently dropped (#130).
+- Warnings now fire when the Bioconductor release is derived from a default
+  R 4.4 because R couldn't be detected (#154), and when a `.r-version` pin
+  contradicts the `uvr.toml` constraint (#156, pin still wins).
+- `uvr add gitlab.com/user/repo` explains that the host is unsupported and
+  points at #123 instead of claiming an "Invalid GitHub spec" (#145).
+
 ## v0.4.1 (2026-07-17)
 
 Fix batch driven by @gdevenyi's codebase audit (#127–#172): 12 confirmed
