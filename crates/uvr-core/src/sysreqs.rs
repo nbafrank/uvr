@@ -63,6 +63,12 @@ struct PpmRequirementDetail {
 pub enum SysReqLookup {
     Supported(Vec<SysReq>),
     UnsupportedDistro,
+    /// The API couldn't be consulted at all (network failure, non-success
+    /// HTTP status, unparseable body). Distinct from `Supported(vec![])` —
+    /// "no sysdeps needed" — so callers can fall back to the vendored local
+    /// rules instead of silently acting as if the check passed (#148). An
+    /// offline CI runner used to get neither API nor local results.
+    LookupFailed,
 }
 
 /// Detects the Posit PPM "Unsupported system" error body.
@@ -108,7 +114,7 @@ pub async fn resolve_system_deps(
         Ok(r) => r,
         Err(e) => {
             warn!("Posit sysreqs API request failed: {e}");
-            return Ok(SysReqLookup::Supported(vec![]));
+            return Ok(SysReqLookup::LookupFailed);
         }
     };
 
@@ -120,15 +126,15 @@ pub async fn resolve_system_deps(
             debug!("Posit sysreqs API reports {distribution} is unsupported");
             return Ok(SysReqLookup::UnsupportedDistro);
         }
-        debug!("Posit sysreqs API returned {status} for {package_name}");
-        return Ok(SysReqLookup::Supported(vec![]));
+        warn!("Posit sysreqs API returned {status} for {package_name}");
+        return Ok(SysReqLookup::LookupFailed);
     }
 
     let response: PpmSysreqsResponse = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to parse Posit sysreqs API response: {e}");
-            return Ok(SysReqLookup::Supported(vec![]));
+            return Ok(SysReqLookup::LookupFailed);
         }
     };
 
@@ -184,6 +190,10 @@ pub struct SysReqsCheck {
     /// Set when the Posit API reported the distro as unsupported.
     /// When true, `missing` is not authoritative — the check was skipped.
     pub unsupported_distro: bool,
+    /// Set when at least one API lookup failed outright (network/HTTP/parse,
+    /// #148). Affected packages were checked against the vendored local
+    /// rules instead, so `missing` is best-effort rather than authoritative.
+    pub lookup_failed: bool,
 }
 
 /// R package to check sysreqs for.
@@ -236,6 +246,15 @@ pub async fn check_system_deps(
                 tail_start = idx;
                 break;
             }
+            Ok(SysReqLookup::LookupFailed) => {
+                // API unreachable/broken for this package (#148): check it
+                // against the vendored local rules instead of pretending the
+                // check passed, but keep querying the API for the rest — a
+                // transient per-request failure shouldn't downgrade the
+                // whole run to local rules.
+                out.lookup_failed = true;
+                check_pkg_local(&mut out, pkg, distro);
+            }
             Err(e) => {
                 warn!("Failed to resolve system deps for {}: {e}", pkg.name);
             }
@@ -243,28 +262,35 @@ pub async fn check_system_deps(
     }
 
     if local_fallback {
-        let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
         for pkg in &packages[tail_start..] {
-            let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
-                continue;
-            };
-            let resolved: Vec<SysReq> =
-                sysreqs_rules::resolve_local(sys_req_text, distribution, version)
-                    .into_iter()
-                    .map(|package| SysReq { package })
-                    .collect();
-            if resolved.is_empty() {
-                continue;
-            }
-            let missing = filter_missing(&resolved);
-            if !missing.is_empty() {
-                out.missing
-                    .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
-            }
+            check_pkg_local(&mut out, pkg, distro);
         }
     }
 
     out
+}
+
+/// Check one package's `SystemRequirements` against the vendored
+/// `r-system-requirements` rules and record any missing system packages.
+/// Shared by the unsupported-distro tail fallback and the per-package
+/// API-failure fallback (#148).
+fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &str) {
+    let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
+    let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
+        return;
+    };
+    let resolved: Vec<SysReq> = sysreqs_rules::resolve_local(sys_req_text, distribution, version)
+        .into_iter()
+        .map(|package| SysReq { package })
+        .collect();
+    if resolved.is_empty() {
+        return;
+    }
+    let missing = filter_missing(&resolved);
+    if !missing.is_empty() {
+        out.missing
+            .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
+    }
 }
 
 #[cfg(test)]

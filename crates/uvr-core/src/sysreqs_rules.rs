@@ -91,10 +91,16 @@ fn constraint_matches(c: &ConstraintStatic, distribution: &str, version: &str) -
             return false;
         }
     }
-    match c.distribution {
-        Some(d) if d != distribution => return false,
-        None => return false,
-        _ => {}
+    // Upstream r-system-requirements semantics: a constraint without a
+    // `distribution` applies to every distribution of its `os` (wildcard).
+    // This used to be never-match — currently unreachable with the vendored
+    // rules (all 27 distribution-less constraints are os: "windows", rejected
+    // above), but a vendor sync introducing a linux one would have silently
+    // dropped its rule (#166).
+    if let Some(d) = c.distribution {
+        if d != distribution {
+            return false;
+        }
     }
     if c.versions.is_empty() {
         return true;
@@ -128,6 +134,28 @@ fn truncate_to_minor(v: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distribution_less_linux_constraint_is_wildcard() {
+        // #166: upstream semantics say no `distribution` = every distro of
+        // that os. (Currently unreachable via the vendored rules — all
+        // distribution-less constraints are os: "windows" — so this guards
+        // the helper directly against a future vendor sync.)
+        let wildcard = ConstraintStatic {
+            os: Some("linux"),
+            distribution: None,
+            versions: &[],
+        };
+        assert!(constraint_matches(&wildcard, "ubuntu", "22.04"));
+        assert!(constraint_matches(&wildcard, "alpine", "3.21"));
+
+        let windows = ConstraintStatic {
+            os: Some("windows"),
+            distribution: None,
+            versions: &[],
+        };
+        assert!(!constraint_matches(&windows, "ubuntu", "22.04"));
+    }
 
     #[test]
     fn xml2_on_alpine_matches_libxml2_dev() {

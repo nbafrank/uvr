@@ -416,7 +416,21 @@ pub async fn install_from_lockfile(
                         .is_some_and(|s| !s.trim().is_empty())
                 });
 
-                if check.unsupported_distro && check.missing.is_empty() && any_has_sysreqs {
+                if check.lookup_failed && check.missing.is_empty() && any_has_sysreqs {
+                    // The sysreqs API couldn't be reached/parsed for at least
+                    // one package and the local-rules fallback found nothing
+                    // missing (#148). Say the check was degraded rather than
+                    // silently implying it passed.
+                    eprintln!();
+                    ui::warn_block(
+                        "System dependency check degraded",
+                        vec![
+                            "The Posit sysreqs API could not be consulted (network or service issue); the vendored local rules were used instead.".to_string(),
+                            "Packages with system-library requirements may fail to compile from source if the local rules missed something.".to_string(),
+                        ],
+                    );
+                    eprintln!();
+                } else if check.unsupported_distro && check.missing.is_empty() && any_has_sysreqs {
                     // PPM doesn't cover this distro AND the local fallback
                     // found nothing (either no rule matched any of the
                     // declared SystemRequirements, or the local rules are
@@ -1014,7 +1028,16 @@ pub fn ensure_companion_package(
         let _ = std::fs::remove_dir_all(library.join("uvr"));
     }
 
-    let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_else(|| {
+        // HOME-less environment (sandbox/CI): degrade to the system temp dir
+        // instead of dropping the companion tarball into the working directory.
+        let fallback = std::env::temp_dir().join("uvr-cache");
+        tracing::warn!(
+            "HOME and UVR_CACHE_DIR are unset; caching companion tarball in {}",
+            fallback.display()
+        );
+        fallback
+    });
     let _ = std::fs::create_dir_all(&cache_dir);
     let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
 
