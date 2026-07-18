@@ -175,12 +175,21 @@ async fn fetch_subrepo(
                     if let Some(parent) = cache_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    let _ = std::fs::write(&cache_path, &text);
-                    crate::registry::cran::write_cache_meta(
-                        &cache_key,
-                        new_etag.as_deref(),
-                        new_lm.as_deref(),
-                    );
+                    // Only record the new ETag/Last-Modified once the data write
+                    // succeeds — otherwise a later conditional GET could 304
+                    // against stale/absent cache content.
+                    if let Err(e) = std::fs::write(&cache_path, &text) {
+                        warn!(
+                            "Bioc {bioc_release}/{subrepo_path}: failed to write cache data to {}: {e}; not updating cache meta",
+                            cache_path.display()
+                        );
+                    } else {
+                        crate::registry::cran::write_cache_meta(
+                            &cache_key,
+                            new_etag.as_deref(),
+                            new_lm.as_deref(),
+                        );
+                    }
                     return Ok(parse_bioc_text(&text));
                 }
             }
@@ -218,8 +227,17 @@ async fn fetch_subrepo(
     if let Some(parent) = cache_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&cache_path, &text);
-    crate::registry::cran::write_cache_meta(&cache_key, new_etag.as_deref(), new_lm.as_deref());
+    // Only record the new ETag/Last-Modified once the data write succeeds —
+    // otherwise a later conditional GET could 304 against stale/absent cache
+    // content.
+    if let Err(e) = std::fs::write(&cache_path, &text) {
+        warn!(
+            "Bioc {bioc_release}/{subrepo_path}: failed to write cache data to {}: {e}; not updating cache meta",
+            cache_path.display()
+        );
+    } else {
+        crate::registry::cran::write_cache_meta(&cache_key, new_etag.as_deref(), new_lm.as_deref());
+    }
 
     Ok(parse_bioc_text(&text))
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use flate2::read::GzDecoder;
 use semver::{Version, VersionReq};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
@@ -415,12 +415,21 @@ impl CranRegistry {
                         gz.read_to_end(&mut decompressed)?;
                         let text = String::from_utf8_lossy(&decompressed);
                         let index = parse_packages_gz(&text)?;
-                        // Write cache + meta after successful parse
+                        // Write cache + meta after successful parse. Only
+                        // record the new ETag/Last-Modified once the data
+                        // write succeeds — otherwise a later conditional GET
+                        // could 304 against stale/absent cache content.
                         if let Some(parent) = cache_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
-                        let _ = std::fs::write(&cache_path, &decompressed);
-                        write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
+                        if let Err(e) = std::fs::write(&cache_path, &decompressed) {
+                            warn!(
+                                "{cache_key} index: failed to write cache data to {}: {e}; not updating cache meta",
+                                cache_path.display()
+                            );
+                        } else {
+                            write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
+                        }
                         debug!("{} index: {} packages (updated)", cache_key, index.len());
                         return Ok(CranRegistry {
                             index,
@@ -502,8 +511,17 @@ impl CranRegistry {
         if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&cache_path, &decompressed);
-        write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
+        // Only record the new ETag/Last-Modified once the data write succeeds.
+        // If the data write fails but the meta is written anyway, a later
+        // conditional GET could 304 against stale/absent cache content.
+        if let Err(e) = std::fs::write(&cache_path, &decompressed) {
+            warn!(
+                "{cache_key} index: failed to write cache data to {}: {e}; not updating cache meta",
+                cache_path.display()
+            );
+        } else {
+            write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
+        }
 
         debug!("{} index: {} packages", cache_key, index.len());
         Ok(CranRegistry {
@@ -604,7 +622,15 @@ pub(crate) fn parse_dcf_block(block: &str) -> Option<CranPackageEntry> {
     let name = fields.get("Package")?.clone();
     let raw_version = fields.get("Version")?.clone();
     let version_str = normalize_version(&raw_version);
-    let version = Version::parse(&version_str).ok()?;
+    let version = match Version::parse(&version_str) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "package '{name}': unparseable version '{raw_version}' (normalized '{version_str}': {e}); dropping from index"
+            );
+            return None;
+        }
+    };
 
     let depends = fields
         .get("Depends")
@@ -650,7 +676,15 @@ pub fn parse_dep_field(s: &str) -> Vec<DepConstraint> {
             if let Some(paren_pos) = part.find('(') {
                 let name = part[..paren_pos].trim().to_string();
                 let constraint_str = part[paren_pos + 1..].trim_end_matches(')').trim();
-                let req = parse_version_req(constraint_str).ok();
+                let req = match parse_version_req(constraint_str) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        warn!(
+                            "dependency '{name}': unparseable version constraint '{constraint_str}' ({e}); treating as unconstrained"
+                        );
+                        None
+                    }
+                };
                 Some(DepConstraint { name, req })
             } else {
                 Some(DepConstraint {
@@ -721,6 +755,36 @@ MD5sum: def789
         assert!(deps[0].req.is_some());
         assert_eq!(deps[1].name, "rlang");
         assert!(deps[1].req.is_none());
+    }
+
+    #[test]
+    fn parse_dep_field_malformed_constraint_falls_back_to_unconstrained() {
+        // Issue #149: a typo'd constraint must not be silently dropped as a
+        // constrained dep — it falls back to unconstrained (a warn is logged).
+        let deps = parse_dep_field("rlang (=> 1.0.0), dplyr (>= 1.0.0)");
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].name, "rlang");
+        assert!(
+            deps[0].req.is_none(),
+            "malformed constraint should fall back to unconstrained"
+        );
+        assert_eq!(deps[1].name, "dplyr");
+        assert!(deps[1].req.is_some(), "valid constraint still parsed");
+    }
+
+    #[test]
+    fn parse_dcf_block_unparseable_version_dropped() {
+        // Issue #150: an entry whose version doesn't parse as semver (even after
+        // normalization) is dropped from the index (a warn is logged on drop).
+        let block = "Package: weird\nVersion: not-a-version\nMD5sum: abc\n";
+        assert!(
+            parse_dcf_block(block).is_none(),
+            "unparseable version should drop the entry"
+        );
+
+        // A valid version on the same shape still parses.
+        let ok = "Package: fine\nVersion: 1.2.3\nMD5sum: abc\n";
+        assert!(parse_dcf_block(ok).is_some());
     }
 
     #[test]

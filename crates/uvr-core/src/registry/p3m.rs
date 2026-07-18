@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use flate2::read::GzDecoder;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::Result;
 use crate::r_version::downloader::Platform;
@@ -182,7 +182,13 @@ async fn fetch_repo_index(
         if let Some(parent) = cache.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&cache, &text);
+        if let Err(e) = std::fs::write(&cache, &text) {
+            warn!(
+                "P3M {} index: failed to write cache to {}: {e}",
+                repo.label(),
+                cache.display()
+            );
+        }
     }
 
     Ok(index)

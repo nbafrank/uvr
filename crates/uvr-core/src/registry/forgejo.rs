@@ -119,7 +119,7 @@ pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)
 /// shell that exports `UVR_FORGEJO_TOKEN=` doesn't fail authenticated
 /// requests with a literal empty bearer.
 pub fn forgejo_token(host: &str) -> Option<String> {
-    let host_no_port = host.split(':').next().unwrap_or(host);
+    let host_no_port = host.split_once(':').map_or(host, |(h, _port)| h);
     let normalized: String = host_no_port
         .to_ascii_uppercase()
         .chars()
