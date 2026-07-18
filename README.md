@@ -240,6 +240,8 @@ uvr tree
 | `uvr doctor` | Diagnose environment issues (R, build tools, project status) |
 | `uvr completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `uvr cache clean` | Remove all cached package downloads |
+| `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
+| `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
 
 ---
 

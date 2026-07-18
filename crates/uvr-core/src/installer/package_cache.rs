@@ -81,6 +81,78 @@ pub fn cache_key(
     format!("{}-{}-{}", name, version, &hash[..32])
 }
 
+/// Extract the package name from a cache key (`<name>-<version>-<hash32>`).
+///
+/// R package names cannot contain hyphens (only letters, digits, and dots),
+/// so the name is everything before the *first* hyphen. Splitting from the
+/// right would be wrong: package *versions* may contain hyphens (e.g.
+/// Matrix "1.6-5"). Returns `None` when `key` does not look like a cache
+/// key (missing the trailing 32-hex-char hash or a version segment) — e.g.
+/// stray files or temp staging dirs in the cache directory.
+pub fn package_name_from_key(key: &str) -> Option<&str> {
+    let (name, rest) = key.split_once('-')?;
+    // rest = "<version>-<hash32>": require a non-empty version segment and
+    // a trailing 32-char hex hash.
+    let (version, hash) = rest.rsplit_once('-')?;
+    if name.is_empty()
+        || version.is_empty()
+        || hash.len() != 32
+        || !hash.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(name)
+}
+
+/// Filename of the metadata file written inside each cache entry directory
+/// (next to the `<package_name>/` subdirectory). Records facts the cache key
+/// hashes away — the R minor version and install method — so `uvr cache
+/// clean --r-version` can filter entries. Entries created by older uvr
+/// versions lack this file and cannot be filtered by R version.
+pub const ENTRY_META_FILENAME: &str = ".uvr-meta";
+
+/// Metadata recorded for a cache entry at store time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryMeta {
+    /// R minor version the package was installed under, e.g. "4.5".
+    pub r_minor: String,
+    /// Whether the package was installed from a binary (vs built from source).
+    pub is_binary: bool,
+}
+
+impl EntryMeta {
+    fn to_file_contents(&self) -> String {
+        format!(
+            "r_minor={}\nkind={}\n",
+            self.r_minor,
+            if self.is_binary { "binary" } else { "source" }
+        )
+    }
+
+    fn from_file_contents(contents: &str) -> Option<Self> {
+        let mut r_minor = None;
+        let mut is_binary = None;
+        for line in contents.lines() {
+            match line.split_once('=') {
+                Some(("r_minor", v)) if !v.is_empty() => r_minor = Some(v.to_string()),
+                Some(("kind", v)) => is_binary = Some(v == "binary"),
+                // Unknown keys are ignored for forward compatibility.
+                _ => {}
+            }
+        }
+        Some(EntryMeta {
+            r_minor: r_minor?,
+            is_binary: is_binary?,
+        })
+    }
+}
+
+/// Read the metadata file of a cache entry directory, if present and parseable.
+pub fn read_entry_meta(entry_dir: &Path) -> Option<EntryMeta> {
+    let contents = std::fs::read_to_string(entry_dir.join(ENTRY_META_FILENAME)).ok()?;
+    EntryMeta::from_file_contents(&contents)
+}
+
 /// Look up a package in the global cache, trying both binary and source keys.
 ///
 /// Returns `Some((path, is_binary))` if found. Tries the `is_binary` variant
@@ -198,7 +270,17 @@ fn remove_entry(path: &Path) -> std::io::Result<()> {
 /// Uses a temporary directory + rename so concurrent processes never see
 /// a half-written cache entry. If the entry already exists (another process
 /// won the race), the temporary copy is discarded.
-pub fn store(source_pkg_dir: &Path, key: &str, package_name: &str) -> std::io::Result<()> {
+///
+/// When `meta` is given it is written as a [`ENTRY_META_FILENAME`] file into
+/// the staging directory, so the rename publishes the entry and its metadata
+/// atomically. Metadata is best effort: an entry without it is still usable,
+/// it just cannot be filtered by `uvr cache clean --r-version`.
+pub fn store(
+    source_pkg_dir: &Path,
+    key: &str,
+    package_name: &str,
+    meta: Option<&EntryMeta>,
+) -> std::io::Result<()> {
     let packages_dir = global_packages_dir();
     std::fs::create_dir_all(&packages_dir)?;
 
@@ -248,6 +330,15 @@ pub fn store(source_pkg_dir: &Path, key: &str, package_name: &str) -> std::io::R
     #[cfg(not(target_os = "macos"))]
     {
         copy_dir_recursive(source_pkg_dir, &staged_pkg)?;
+    }
+
+    if let Some(meta) = meta {
+        if let Err(e) = std::fs::write(
+            staging.path().join(ENTRY_META_FILENAME),
+            meta.to_file_contents(),
+        ) {
+            debug!("Failed to write cache entry metadata for {key}: {e}");
+        }
     }
 
     // Atomic rename. If it fails because the target already exists, that's fine.
@@ -453,6 +544,141 @@ mod tests {
     }
 
     #[test]
+    fn package_name_from_key_roundtrips_cache_key() {
+        let key = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None);
+        assert_eq!(package_name_from_key(&key), Some("ggplot2"));
+        // Dots in names are fine (e.g. data.table).
+        let key = cache_key("data.table", "1.15.4", Some("abc"), "4.5", false, None);
+        assert_eq!(package_name_from_key(&key), Some("data.table"));
+    }
+
+    #[test]
+    fn package_name_from_key_handles_hyphenated_versions() {
+        // R package *versions* may contain hyphens (Matrix "1.6-5"); names
+        // cannot, so the name is everything before the first hyphen.
+        let key = cache_key("Matrix", "1.6-5", Some("abc"), "4.4", true, None);
+        assert_eq!(package_name_from_key(&key), Some("Matrix"));
+    }
+
+    #[test]
+    fn package_name_from_key_rejects_non_keys() {
+        let hex32 = "0123456789abcdef0123456789abcdef";
+        // No hyphens at all (e.g. tempfile staging dirs like ".tmpAbC123").
+        assert_eq!(package_name_from_key(".tmpAbC123"), None);
+        // Trailing segment is not a 32-char hex hash.
+        assert_eq!(package_name_from_key("not-a-key"), None);
+        assert_eq!(package_name_from_key("pkg-1.0-deadbeef"), None);
+        // Missing version segment or empty name.
+        assert_eq!(package_name_from_key(&format!("pkg-{hex32}")), None);
+        assert_eq!(package_name_from_key(&format!("-1.0-{hex32}")), None);
+        // Well-formed key parses.
+        assert_eq!(
+            package_name_from_key(&format!("pkg-1.0-{hex32}")),
+            Some("pkg")
+        );
+    }
+
+    #[test]
+    fn entry_meta_file_contents_roundtrip() {
+        let meta = EntryMeta {
+            r_minor: "4.5".to_string(),
+            is_binary: true,
+        };
+        let contents = meta.to_file_contents();
+        assert_eq!(contents, "r_minor=4.5\nkind=binary\n");
+        assert_eq!(EntryMeta::from_file_contents(&contents), Some(meta));
+
+        let source = EntryMeta {
+            r_minor: "4.4".to_string(),
+            is_binary: false,
+        };
+        assert_eq!(
+            EntryMeta::from_file_contents(&source.to_file_contents()),
+            Some(source)
+        );
+    }
+
+    #[test]
+    fn entry_meta_parse_tolerates_unknown_keys_and_rejects_incomplete() {
+        // Unknown keys from a future uvr are ignored.
+        let parsed = EntryMeta::from_file_contents("r_minor=4.5\nkind=source\nfuture_field=zap\n");
+        assert_eq!(
+            parsed,
+            Some(EntryMeta {
+                r_minor: "4.5".to_string(),
+                is_binary: false,
+            })
+        );
+        // Missing either field → unparseable (treated as legacy).
+        assert_eq!(EntryMeta::from_file_contents("r_minor=4.5\n"), None);
+        assert_eq!(EntryMeta::from_file_contents("kind=binary\n"), None);
+        assert_eq!(EntryMeta::from_file_contents(""), None);
+    }
+
+    #[test]
+    fn store_writes_meta_and_read_entry_meta_roundtrips() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("testpkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: testpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+
+        let key = format!(
+            "testpkg-1.0-meta{:028x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        let meta = EntryMeta {
+            r_minor: "4.5".to_string(),
+            is_binary: true,
+        };
+        store(&pkg_dir, &key, "testpkg", Some(&meta)).unwrap();
+
+        let entry_dir = global_packages_dir().join(&key);
+        assert_eq!(read_entry_meta(&entry_dir), Some(meta));
+        // The entry itself is still a valid lookup target.
+        assert!(lookup("testpkg", &key).is_some());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&entry_dir);
+    }
+
+    #[test]
+    fn store_without_meta_leaves_no_meta_file() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("testpkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: testpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+
+        let key = format!(
+            "testpkg-1.0-nometa{:026x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        store(&pkg_dir, &key, "testpkg", None).unwrap();
+
+        let entry_dir = global_packages_dir().join(&key);
+        assert!(!entry_dir.join(ENTRY_META_FILENAME).exists());
+        assert_eq!(read_entry_meta(&entry_dir), None);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&entry_dir);
+    }
+
+    #[test]
     fn lookup_missing() {
         assert!(lookup("nonexistent", "fake-key-12345678901234567890123456789012").is_none());
     }
@@ -470,7 +696,7 @@ mod tests {
 
         // Store under the source key (is_binary=false)
         let source_key = cache_key("testpkg", "1.0", Some("cksum"), "4.5", false, None);
-        store(&pkg_dir, &source_key, "testpkg").unwrap();
+        store(&pkg_dir, &source_key, "testpkg", None).unwrap();
 
         // Lookup with binary hint (is_binary=true) — should still find the source entry
         let found = lookup_any("testpkg", "1.0", Some("cksum"), "4.5", true, None);
@@ -505,7 +731,7 @@ mod tests {
         );
 
         // Store
-        store(&pkg_dir, &key, "testpkg").unwrap();
+        store(&pkg_dir, &key, "testpkg", None).unwrap();
 
         // Lookup
         let cached = lookup("testpkg", &key);
@@ -544,7 +770,7 @@ mod tests {
         assert!(lookup("testpkg", &key).is_none()); // no DESCRIPTION
 
         // Store should replace the corrupted entry
-        store(&pkg_dir, &key, "testpkg").unwrap();
+        store(&pkg_dir, &key, "testpkg", None).unwrap();
         assert!(lookup("testpkg", &key).is_some()); // now valid
 
         // Cleanup
@@ -590,7 +816,7 @@ mod tests {
             return;
         }
 
-        let result = store(&pkg_dir, &key, "testpkg");
+        let result = store(&pkg_dir, &key, "testpkg", None);
 
         // Restore permissions before asserting so cleanup always succeeds.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();

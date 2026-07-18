@@ -188,14 +188,24 @@ async fn run() -> Result<()> {
             }
         },
         Commands::Cache(cache_args) => match cache_args.command {
-            Some(CacheCommands::Clean) => {
-                commands::cache::run_clean()?;
+            Some(CacheCommands::Clean(args)) => {
+                commands::cache::run_clean(&args.packages, &args.r_versions)?;
             }
             None => {
                 ui::welcome_group(
                     "cache",
                     "Manage the local download cache",
-                    &[("uvr cache clean", "Remove all cached package downloads")],
+                    &[
+                        ("uvr cache clean", "Remove all cached package downloads"),
+                        (
+                            "uvr cache clean --package <name>",
+                            "Remove cache entries for specific packages",
+                        ),
+                        (
+                            "uvr cache clean --r-version <minor>",
+                            "Remove package entries built for an R minor version",
+                        ),
+                    ],
                 );
             }
         },

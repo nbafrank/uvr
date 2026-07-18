@@ -457,6 +457,20 @@ pub struct CacheArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CacheCommands {
-    /// Remove all cached package downloads
-    Clean,
+    /// Remove cached package downloads and extracted packages
+    /// (everything by default; use --package / --r-version to filter)
+    Clean(CacheCleanArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheCleanArgs {
+    /// Only remove cache entries for these R packages
+    /// (repeatable, or comma-separated: --package rlang,jsonlite)
+    #[arg(long = "package", value_name = "NAME", value_delimiter = ',')]
+    pub packages: Vec<String>,
+
+    /// Only remove extracted-package entries built for these R minor versions,
+    /// e.g. 4.5 (repeatable, or comma-separated: --r-version 4.4,4.5)
+    #[arg(long = "r-version", value_name = "MINOR", value_delimiter = ',')]
+    pub r_versions: Vec<String>,
 }

@@ -1000,7 +1000,14 @@ pub async fn install_from_lockfile(
                 libr_path.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);
-            if let Err(e) = package_cache::store(&pkg_dir, &key, &plan.pkg.name) {
+            // Recorded inside the entry so `uvr cache clean --r-version` can
+            // filter by R minor — the key only carries it hashed.
+            let entry_meta = package_cache::EntryMeta {
+                r_minor: r_minor_str.clone(),
+                is_binary: cache_key_binary,
+            };
+            if let Err(e) = package_cache::store(&pkg_dir, &key, &plan.pkg.name, Some(&entry_meta))
+            {
                 tracing::debug!("Failed to cache {}: {e}", plan.pkg.name);
             }
         }
