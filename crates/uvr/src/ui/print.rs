@@ -191,6 +191,7 @@ pub fn welcome(version: &str) {
                 ("uvr init", "Create a new project here"),
                 ("uvr add <pkg>", "Add a package"),
                 ("uvr sync", "Install everything from the lockfile"),
+                ("uvr import renv.lock", "Migrate a project from renv"),
             ],
         ),
         (
