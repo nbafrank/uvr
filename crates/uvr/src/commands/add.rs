@@ -229,7 +229,38 @@ pub async fn run(
     }
 
     // Re-resolve → update lockfile (and roll back manifest on failure).
-    let resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+    let mut resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+
+    // A CRAN add that failed only because the package lives on Bioconductor
+    // is a question uvr can already answer — so answer it instead of asking
+    // the user to retype the command with `--bioc`. This matters most from
+    // `uvr::add()` inside an R session, where "run `uvr add sva --bioc`" is
+    // advice the caller can't act on without leaving R.
+    if let (Err(ref e), false) = (&resolve_result, bioc) {
+        if let Some(missing) = package_not_found_name(e) {
+            if parsed.iter().any(|(n, _)| n == &missing)
+                && probe_bioc(&project, &missing).await == Some(true)
+            {
+                let release = bioc_release_to_probe(&project);
+                ui::bullet_dim(format!(
+                    "'{missing}' isn't on CRAN — adding it from Bioconductor {release}."
+                ));
+                project.manifest.add_dep(
+                    missing.clone(),
+                    DependencySpec::Detailed(DetailedDep {
+                        bioc: Some(true),
+                        ..Default::default()
+                    }),
+                    dev,
+                );
+                project
+                    .save_manifest()
+                    .context("Failed to write uvr.toml")?;
+                resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+            }
+        }
+    }
+
     if let Err(e) = resolve_result {
         // Roll back the manifest to its original state
         if let Some(original) = original_manifest {
@@ -348,17 +379,23 @@ async fn diagnose_not_found(
         .find(|(n, _)| n == &name)
         .map(|(_, spec)| spec.is_bioc())?;
     let release = bioc_release_to_probe(project);
-    // Probe is best-effort: `None` means "couldn't check". For a `--bioc` add
-    // we still return a Bioc-flavored message in that case, so the misleading
-    // CRAN-archive hint never reaches the user even offline.
-    let on_bioc = match crate::commands::util::build_client() {
-        Ok(client) => BiocRegistry::fetch_release(&client, &release)
-            .await
-            .ok()
-            .map(|bioc| bioc.contains(&name)),
-        Err(_) => None,
-    };
+    let on_bioc = probe_bioc(project, &name).await;
     bioc_not_found_message(&name, added_with_bioc, on_bioc, &release)
+}
+
+/// Is `name` in the Bioconductor release this project resolves against?
+///
+/// Best-effort: `None` means the probe couldn't run (offline, CDN down), which
+/// callers must treat as "unknown", never as "no" — `diagnose_not_found` still
+/// emits Bioc-flavored guidance for a `--bioc` add in that case so the
+/// misleading CRAN-archive hint never reaches the user.
+async fn probe_bioc(project: &Project, name: &str) -> Option<bool> {
+    let release = bioc_release_to_probe(project);
+    let client = crate::commands::util::build_client().ok()?;
+    BiocRegistry::fetch_release(&client, &release)
+        .await
+        .ok()
+        .map(|bioc| bioc.contains(name))
 }
 
 /// For each git-sourced dep (github or forgejo) in `parsed`, fetch the remote
