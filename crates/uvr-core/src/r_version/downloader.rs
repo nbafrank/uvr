@@ -515,6 +515,18 @@ pub async fn download_and_install_r(
         )));
     }
 
+    // The portable macOS builds ship libomp.dylib but link it from nothing,
+    // so binary packages built with -fopenmp can't resolve their symbols
+    // (#116 fallout). Load it from R's own startup instead.
+    match crate::r_version::openmp::ensure_openmp_shim(&install_dir) {
+        Ok(true) => info!("Enabled the bundled OpenMP runtime for R {version}"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            "Could not configure the OpenMP runtime for R {version}: {e}. \
+             Binary packages built with OpenMP (Rtsne, mgcv, ...) may fail to load."
+        ),
+    }
+
     info!("R {version} installed to {}", install_dir.display());
     Ok(install_dir)
 }

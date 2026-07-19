@@ -276,6 +276,32 @@ pub async fn install_from_lockfile(
         .ok()
         .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
 
+    // Self-heal R installs made before the OpenMP shim existed: without it,
+    // every P3M binary package built with -fopenmp (Rtsne, dotCall64, mgcv,
+    // ...) fails to load with "symbol not found in flat namespace". Runs
+    // before the up-to-date early return below, because a fully-installed
+    // library is exactly the case where the packages are present but won't
+    // load. Only uvr-managed installs are touched — a system/CRAN R is not
+    // ours to edit (and doesn't need it: CRAN's R links libomp itself).
+    if let Some((ref r_bin, _)) = r_info {
+        if let Some(r_home) = uvr_core::r_version::openmp::r_home_from_binary(r_bin) {
+            let managed = dirs::home_dir()
+                .map(|h| r_home.starts_with(h.join(".uvr").join("r-versions")))
+                .unwrap_or(false);
+            if managed {
+                match uvr_core::r_version::openmp::ensure_openmp_shim(r_home) {
+                    Ok(true) => ui::bullet_dim(
+                        "Enabled the bundled OpenMP runtime for this R (needed by Rtsne, mgcv, \
+                         and other packages built with OpenMP)."
+                            .to_string(),
+                    ),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("Could not configure the OpenMP runtime: {e}"),
+                }
+            }
+        }
+    }
+
     // Detect R version mismatch in two places:
     //   (a) lockfile R minor vs current R → user retargeted lockfile but library is stale.
     //   (b) library sentinel R minor vs current R → user upgraded R out from under the library
@@ -607,12 +633,15 @@ pub async fn install_from_lockfile(
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf());
     let managed_versions_dir = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
-    let libr_path: Option<std::path::PathBuf> = if let Some(ref r_home) = r_home_opt {
-        if managed_versions_dir
+    let r_is_managed = |r_home: &std::path::Path| {
+        managed_versions_dir
             .as_ref()
             .map(|d| r_home.starts_with(d))
             .unwrap_or(false)
-        {
+    };
+
+    let libr_path: Option<std::path::PathBuf> = if let Some(ref r_home) = r_home_opt {
+        if r_is_managed(r_home) {
             let libr_name = if cfg!(target_os = "macos") {
                 "libR.dylib"
             } else if cfg!(target_os = "windows") {
