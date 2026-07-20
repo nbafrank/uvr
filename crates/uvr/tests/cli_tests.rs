@@ -410,15 +410,16 @@ fn test_update_dry_run_on_empty_project() {
 
 #[test]
 fn test_cache_clean() {
-    // Isolated HOME: this test used to run a REAL `uvr cache clean` against
+    // Isolated dirs: this test used to run a REAL `uvr cache clean` against
     // the developer's ~/.uvr, wiping the whole package + download cache on
-    // every `cargo test` run.
+    // every `cargo test` run. The HOME/USERPROFILE overrides alone are not
+    // enough — on Windows `dirs::home_dir()` resolves via the Known Folder
+    // API, ignoring the child's env — so the explicit UVR_*_DIR overrides
+    // are the load-bearing isolation.
     let home = TempDir::new().unwrap();
     let cache = home.path().join(".uvr").join("cache");
-    let entry = home
-        .path()
-        .join(".uvr")
-        .join("packages")
+    let packages = home.path().join(".uvr").join("packages");
+    let entry = packages
         .join("pkg-1.0-0123456789abcdef0123456789abcdef")
         .join("pkg");
     std::fs::create_dir_all(&cache).unwrap();
@@ -429,7 +430,8 @@ fn test_cache_clean() {
     uvr_cmd()
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
-        .env_remove("UVR_CACHE_DIR")
+        .env("UVR_CACHE_DIR", &cache)
+        .env("UVR_PACKAGES_DIR", &packages)
         .args(["cache", "clean"])
         .assert()
         .success();
@@ -451,13 +453,15 @@ fn test_cache_clean_filtered_no_match() {
     // Filtered clean with no matching entries reports and touches nothing.
     let home = TempDir::new().unwrap();
     let cache = home.path().join(".uvr").join("cache");
+    let packages = home.path().join(".uvr").join("packages");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::write(cache.join("aabbccdd-other_2.0.tar.gz"), b"tar").unwrap();
 
     uvr_cmd()
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
-        .env_remove("UVR_CACHE_DIR")
+        .env("UVR_CACHE_DIR", &cache)
+        .env("UVR_PACKAGES_DIR", &packages)
         .args(["cache", "clean", "--package", "nomatch"])
         .assert()
         .success()

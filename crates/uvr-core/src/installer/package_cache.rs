@@ -21,13 +21,17 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-/// Return the global package cache directory (`~/.uvr/packages/`).
+/// Return the global package cache directory (`~/.uvr/packages/`, or
+/// `UVR_PACKAGES_DIR` when set).
 ///
 /// When no home directory can be determined (HOME unset in sandboxes,
 /// scratch containers, some CI runners) the cache degrades to a per-boot
 /// directory under the system temp dir rather than polluting the current
 /// working directory with `./.uvr/packages/`.
 pub fn global_packages_dir() -> PathBuf {
+    if let Some(dir) = crate::env_vars::packages_dir() {
+        return dir;
+    }
     match dirs::home_dir() {
         Some(home) => home.join(".uvr").join("packages"),
         None => {

@@ -54,6 +54,16 @@ pub fn library() -> Option<PathBuf> {
     read_env_var("UVR_LIBRARY").map(PathBuf::from)
 }
 
+/// UVR_PACKAGES_DIR
+///
+/// Gets the directory where uvr stores cached installed-package entries.
+/// Expects a valid absolute or relative directory path.
+/// Defaults to `~/.uvr/packages/` if not set (see
+/// `installer::package_cache::global_packages_dir` for the no-home fallback).
+pub fn packages_dir() -> Option<PathBuf> {
+    read_env_var("UVR_PACKAGES_DIR").map(PathBuf::from)
+}
+
 /// UVR_PROGRESS
 ///
 /// Controls the visibility of progress bars and spinners in the terminal.
@@ -195,6 +205,7 @@ mod tests {
             "UVR_INSTALL_DIR",
             "UVR_INSTALL_TIMEOUT",
             "UVR_LIBRARY",
+            "UVR_PACKAGES_DIR",
             "UVR_PROGRESS",
             "UVR_R_INSTALL_DIR",
             "UVR_REPOS",
@@ -211,6 +222,7 @@ mod tests {
         assert_eq!(install_dir(), None);
         assert_eq!(install_timeout(), None);
         assert_eq!(library(), None);
+        assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
 
         let default_r_install = r_install_dir();
@@ -233,6 +245,9 @@ mod tests {
         env::set_var("UVR_LIBRARY", "/custom/library");
         assert_eq!(library(), Some(PathBuf::from("/custom/library")));
 
+        env::set_var("UVR_PACKAGES_DIR", "/custom/packages");
+        assert_eq!(packages_dir(), Some(PathBuf::from("/custom/packages")));
+
         env::set_var("UVR_PROGRESS", "always");
         assert_eq!(progress(), Some("always".to_string()));
 
@@ -252,6 +267,7 @@ mod tests {
         assert_eq!(install_dir(), None);
         assert_eq!(install_timeout(), None);
         assert_eq!(library(), None);
+        assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
 
         let empty_r_install = r_install_dir();
