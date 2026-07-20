@@ -285,8 +285,8 @@ pub async fn install_from_lockfile(
     // ours to edit (and doesn't need it: CRAN's R links libomp itself).
     if let Some((ref r_bin, _)) = r_info {
         if let Some(r_home) = uvr_core::r_version::openmp::r_home_from_binary(r_bin) {
-            let managed = dirs::home_dir()
-                .map(|h| r_home.starts_with(h.join(".uvr").join("r-versions")))
+            let managed = uvr_core::env_vars::r_install_dir()
+                .map(|d| r_home.starts_with(d))
                 .unwrap_or(false);
             if managed {
                 match uvr_core::r_version::openmp::ensure_openmp_shim(r_home) {
@@ -632,7 +632,7 @@ pub async fn install_from_lockfile(
         .parent()
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf());
-    let managed_versions_dir = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
+    let managed_versions_dir = uvr_core::env_vars::r_install_dir();
     let r_is_managed = |r_home: &std::path::Path| {
         managed_versions_dir
             .as_ref()

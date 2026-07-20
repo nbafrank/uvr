@@ -17,6 +17,17 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
+- The automatic Bioconductor fallback in `uvr add` no longer drops the
+  user's version constraint: `uvr add pkg@>=1.2.0` for a Bioc-only
+  package now lands in uvr.toml with both `bioc = true` and the
+  constraint, instead of silently unconstrained.
+- The managed-R checks in `uvr sync` (OpenMP self-heal, libR patching)
+  now honor `UVR_R_INSTALL_DIR` instead of assuming `~/.uvr/r-versions`,
+  so relocated R installs get the same treatment.
+- New `UVR_PACKAGES_DIR` env var overrides the installed-package cache
+  location (`~/.uvr/packages/`), mirroring `UVR_CACHE_DIR`; the cache
+  integration tests use it for isolation that also holds on Windows,
+  where `HOME`/`USERPROFILE` overrides don't reach `dirs::home_dir()`.
 - Switching a project's active R minor no longer wipes the library on
   every sync: `uvr sync` now re-resolves the lockfile for the new R (the
   old resolution carried per-minor binary URLs and Bioc releases) and the
