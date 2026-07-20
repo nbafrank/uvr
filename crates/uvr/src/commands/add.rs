@@ -238,25 +238,24 @@ pub async fn run(
     // advice the caller can't act on without leaving R.
     if let (Err(ref e), false) = (&resolve_result, bioc) {
         if let Some(missing) = package_not_found_name(e) {
-            if parsed.iter().any(|(n, _)| n == &missing)
-                && probe_bioc(&project, &missing).await == Some(true)
-            {
-                let release = bioc_release_to_probe(&project);
-                ui::bullet_dim(format!(
-                    "'{missing}' isn't on CRAN — adding it from Bioconductor {release}."
-                ));
-                project.manifest.add_dep(
-                    missing.clone(),
-                    DependencySpec::Detailed(DetailedDep {
-                        bioc: Some(true),
-                        ..Default::default()
-                    }),
-                    dev,
-                );
-                project
-                    .save_manifest()
-                    .context("Failed to write uvr.toml")?;
-                resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+            let original_spec = parsed
+                .iter()
+                .find(|(n, _)| n == &missing)
+                .map(|(_, spec)| spec);
+            if let Some(spec) = original_spec.filter(|s| s.git().is_none()) {
+                if probe_bioc(&project, &missing).await == Some(true) {
+                    let release = bioc_release_to_probe(&project);
+                    ui::bullet_dim(format!(
+                        "'{missing}' isn't on CRAN — adding it from Bioconductor {release}."
+                    ));
+                    project
+                        .manifest
+                        .add_dep(missing.clone(), bioc_fallback_spec(spec), dev);
+                    project
+                        .save_manifest()
+                        .context("Failed to write uvr.toml")?;
+                    resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+                }
             }
         }
     }
@@ -293,6 +292,20 @@ pub async fn run(
 
 /// Extract the package name from a `PackageNotFound` anywhere in `err`'s chain,
 /// if that's what the resolution failed on. Returns `None` for any other error.
+/// Build the manifest spec used when a CRAN-missing package is re-added from
+/// Bioconductor: the switch is CRAN→Bioconductor, not constrained→
+/// unconstrained, so the user's version constraint (if any) carries over.
+fn bioc_fallback_spec(original: &DependencySpec) -> DependencySpec {
+    DependencySpec::Detailed(DetailedDep {
+        version: original
+            .version_req()
+            .filter(|v| *v != "*")
+            .map(str::to_string),
+        bioc: Some(true),
+        ..Default::default()
+    })
+}
+
 fn package_not_found_name(err: &anyhow::Error) -> Option<String> {
     err.chain()
         .find_map(|c| match c.downcast_ref::<UvrError>() {
@@ -567,6 +580,24 @@ mod tests {
         let (name, spec) = parse_add_spec("DESeq2", true).unwrap();
         assert_eq!(name, "DESeq2");
         assert!(spec.is_bioc());
+    }
+
+    #[test]
+    fn bioc_fallback_preserves_version_constraint() {
+        let (_, spec) = parse_add_spec("sva@>=3.50.0", false).unwrap();
+        let fallback = bioc_fallback_spec(&spec);
+        assert!(fallback.is_bioc());
+        assert_eq!(fallback.version_req(), Some(">=3.50.0"));
+    }
+
+    #[test]
+    fn bioc_fallback_leaves_bare_add_unconstrained() {
+        let (_, spec) = parse_add_spec("sva", false).unwrap();
+        let fallback = bioc_fallback_spec(&spec);
+        assert!(fallback.is_bioc());
+        // A bare add is `Version("*")`; the fallback must not serialize a
+        // literal `version = "*"` into uvr.toml.
+        assert_eq!(fallback.version_req(), None);
     }
 
     #[test]
