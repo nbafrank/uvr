@@ -287,6 +287,15 @@ pub fn test_find_exact(installations: &[RInstallation], version: &str) -> Result
 
 pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
     let output = Command::new(binary)
+        // When uvr runs inside an R session (RStudio terminal, `system("uvr …")`
+        // from uvr-r), the enclosing session's R_HOME/R_LIBS* leak into this
+        // spawn. The queried binary knows its own home; an inherited R_HOME
+        // from a *different* — possibly since-removed — install at best makes
+        // R warn on stdout and at worst breaks startup (#128, #99).
+        .env_remove("R_HOME")
+        .env_remove("R_LIBS")
+        .env_remove("R_LIBS_USER")
+        .env_remove("R_LIBS_SITE")
         .args([
             "--vanilla",
             "--slave",
