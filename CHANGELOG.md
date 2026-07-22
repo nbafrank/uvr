@@ -7,6 +7,15 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.2 (2026-07-22)
+
+Round two of @gdevenyi's codebase audit (#127–#172): roughly twenty more
+confirmed issues fixed across the resolver, registry caches, package
+cache, and macOS binary installs — plus two requests from @B-Nilson
+(#85, #92), an automatic Bioconductor fallback for `uvr add`, and a fix
+for OpenMP-linked binary packages on uvr-managed macOS R installs. The
+batch passed an adversarial review before tagging.
+
 ### Features
 
 - `uvr cache clean` gains `--package <name>` and `--r-version <minor>`
@@ -14,20 +23,19 @@ Pure tracking section — fixes and small features land here between tags.
   retiring one R series no longer costs the whole cache (#92, thanks
   @B-Nilson). Cache entries now record their R version; entries from older
   uvr versions can't be version-filtered and are reported as skipped.
+- `uvr add <pkg>` for a package that isn't on CRAN but is on Bioconductor
+  now adds it from Bioconductor automatically — with any version
+  constraint preserved — instead of asking you to retype the command with
+  `--bioc`. This matters most from `uvr::add()` inside an R session,
+  where re-running a CLI command isn't an option.
 
 ### Fixes
 
-- The automatic Bioconductor fallback in `uvr add` no longer drops the
-  user's version constraint: `uvr add pkg@>=1.2.0` for a Bioc-only
-  package now lands in uvr.toml with both `bioc = true` and the
-  constraint, instead of silently unconstrained.
-- The managed-R checks in `uvr sync` (OpenMP self-heal, libR patching)
-  now honor `UVR_R_INSTALL_DIR` instead of assuming `~/.uvr/r-versions`,
-  so relocated R installs get the same treatment.
-- New `UVR_PACKAGES_DIR` env var overrides the installed-package cache
-  location (`~/.uvr/packages/`), mirroring `UVR_CACHE_DIR`; the cache
-  integration tests use it for isolation that also holds on Windows,
-  where `HOME`/`USERPROFILE` overrides don't reach `dirs::home_dir()`.
+- macOS: uvr-managed R installs now load the bundled OpenMP runtime, so
+  P3M binary packages built with `-fopenmp` (Rtsne, mgcv, dotCall64, …)
+  load instead of failing with "symbol not found in flat namespace".
+  `uvr sync` self-heals installs made by earlier uvr versions, and the
+  managed-R checks honor `UVR_R_INSTALL_DIR` for relocated installs.
 - Switching a project's active R minor no longer wipes the library on
   every sync: `uvr sync` now re-resolves the lockfile for the new R (the
   old resolution carried per-minor binary URLs and Bioc releases) and the
@@ -36,11 +44,11 @@ Pure tracking section — fixes and small features land here between tags.
   components (`>= 0.9.100.5.0`), dash forms (`>= 1.2-7.1`), leading zeros
   (`>= 0.03-11`), and `==` — are now normalized and enforced instead of
   being silently treated as unconstrained (#149 follow-up).
-- The `cargo test` suite no longer wipes the developer's real `~/.uvr`
-  cache: the `cache clean` integration test ran against the actual HOME.
-
-### Fixes
-
+- New `UVR_PACKAGES_DIR` env var overrides the installed-package cache
+  location (`~/.uvr/packages/`), mirroring `UVR_CACHE_DIR`; the `cargo
+  test` suite uses it for isolation and no longer wipes the developer's
+  real `~/.uvr` cache (nor the CI runner's on Windows, where
+  `HOME`/`USERPROFILE` overrides don't reach `dirs::home_dir()`).
 - System-dependency checks distinguish "the sysreqs API was unreachable"
   from "no sysdeps needed": failed lookups now fall back to the vendored
   local rules and `uvr sync` says the check was degraded (#148).
