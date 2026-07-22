@@ -203,13 +203,18 @@ pub async fn run_inner(
     // (B-Nilson's wipe-loop). Re-resolve once, write the lockfile, and let the
     // sentinel logic below decide the (now one-time) wipe. Skipped under
     // --frozen, which has already bailed on any out-of-date lockfile above.
+    // Resolve R binary + version once for the whole sync (spawning R is
+    // ~250ms): the #85 re-resolve check and install_from_lockfile share this
+    // single detection, which also removes the window where two independent
+    // detections could disagree (e.g. a concurrent `uvr r use`).
+    let r_constraint = project.manifest.project.r_version.as_deref();
+    let r_info: Option<(std::path::PathBuf, String)> = find_r_binary(r_constraint)
+        .ok()
+        .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
+
     let lockfile = if !frozen {
-        let r_constraint = project.manifest.project.r_version.as_deref();
-        let current_r = find_r_binary(r_constraint)
-            .ok()
-            .and_then(|bin| query_r_version(&bin));
-        match current_r {
-            Some(ref cur)
+        match &r_info {
+            Some((_, cur))
                 if looks_like_version(&lockfile.r.version)
                     && r_minor(cur) != r_minor(&lockfile.r.version) =>
             {
@@ -247,7 +252,7 @@ pub async fn run_inner(
         lockfile
     };
 
-    install_from_lockfile(project, &lockfile, jobs, library_override, timeout).await
+    install_from_lockfile_with_r(project, &lockfile, jobs, library_override, timeout, r_info).await
 }
 
 /// Download and install any packages in `lockfile` not yet present in the project library.
@@ -266,15 +271,28 @@ pub async fn install_from_lockfile(
     library_override: Option<&std::path::Path>,
     timeout: Option<Duration>,
 ) -> Result<()> {
-    let library = library_override
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| project.library_path());
-
     // Resolve R binary + version once (spawning R is ~250ms, so avoid repeating).
     let r_constraint = project.manifest.project.r_version.as_deref();
     let r_info: Option<(PathBuf, String)> = find_r_binary(r_constraint)
         .ok()
         .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
+    install_from_lockfile_with_r(project, lockfile, jobs, library_override, timeout, r_info).await
+}
+
+/// [`install_from_lockfile`] with the R detection already done — `uvr sync`
+/// resolves R once and shares it between the #85 re-resolve check and the
+/// install, so the two can never observe different Rs.
+async fn install_from_lockfile_with_r(
+    project: &Project,
+    lockfile: &Lockfile,
+    jobs: usize,
+    library_override: Option<&std::path::Path>,
+    timeout: Option<Duration>,
+    r_info: Option<(PathBuf, String)>,
+) -> Result<()> {
+    let library = library_override
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| project.library_path());
 
     // Self-heal R installs made before the OpenMP shim existed: without it,
     // every P3M binary package built with -fopenmp (Rtsne, dotCall64, mgcv,

@@ -7,6 +7,18 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+### Fixes
+
+- R version detection no longer inherits `R_HOME`/`R_LIBS*` from an
+  enclosing R session (RStudio terminal, `system("uvr …")`), where a
+  stale `R_HOME` from a different install could break or confuse the
+  spawned R (#128; hardens the #99 scenario).
+- `uvr sync` detects R exactly once per run — the R-switch check and the
+  installer previously each spawned R (~250ms), with a tiny window to
+  observe different Rs.
+- `uvr cache clean` byte counts no longer follow symlinks (the deletion
+  logic never did; this aligns the reported sizes).
+
 ## v0.4.2 (2026-07-22)
 
 Round two of @gdevenyi's codebase audit (#127–#172): roughly twenty more

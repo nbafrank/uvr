@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use uvr_core::installer::package_cache;
+use uvr_core::installer::package_cache::{self, dir_size};
 
 use crate::ui;
 
@@ -313,22 +313,6 @@ fn remove_matching_package_entries(
     }
 
     Ok(outcome)
-}
-
-/// Total size in bytes of all files under `path` (recursive; best effort).
-fn dir_size(path: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(read_dir) = std::fs::read_dir(path) {
-        for entry in read_dir.flatten() {
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            if is_dir {
-                total += dir_size(&entry.path());
-            } else {
-                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            }
-        }
-    }
-    total
 }
 
 #[cfg(test)]

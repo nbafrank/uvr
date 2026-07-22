@@ -483,7 +483,7 @@ pub fn cache_stats() -> (u64, u64) {
 /// pointing outside the cache — or a symlink cycle inside a cached package
 /// (preserved verbatim by `copy_dir_recursive`) — must not inflate the
 /// stats or recurse forever.
-fn dir_size(path: &Path) -> u64 {
+pub fn dir_size(path: &Path) -> u64 {
     let md = match std::fs::symlink_metadata(path) {
         Ok(md) => md,
         Err(_) => return 0,
