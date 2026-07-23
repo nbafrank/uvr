@@ -399,6 +399,13 @@ P3M binary packages are sourced from [Posit Package Manager](https://packagemana
 
 ---
 
+## Support
+
+uvr is free and MIT-licensed. If it saves you time, you can support its
+development on [Ko-fi](https://ko-fi.com/nbafrank).
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
