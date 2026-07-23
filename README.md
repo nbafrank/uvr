@@ -406,6 +406,8 @@ uvr is shaped by the people who use it and report back. Special thanks to:
 - [@B-Nilson](https://github.com/B-Nilson) — a steady stream of field
   reports and requests that became core behavior: cache-preserving R
   switches (#85), filtered cache cleaning (#92), and more.
+- [@bsirak](https://github.com/bsirak) — the trampoline and symlink
+  integration RFC (#109).
 - [@gdevenyi](https://github.com/gdevenyi) — a systematic 46-issue audit of
   the entire codebase (#127–#172), with file-and-line precision, that drove
   the v0.4.1 and v0.4.2 fix batches (and a code contribution on top).
@@ -416,8 +418,6 @@ uvr is shaped by the people who use it and report back. Special thanks to:
   install backend.
 - [@zorbax](https://github.com/zorbax) — the precise diagnosis of the macOS
   GNU-tar install failure (#125).
-- [@bsirak](https://github.com/bsirak) — the trampoline and symlink
-  integration RFC (#109).
 
 And to everyone who has filed an issue, tested a fix, or suggested a
 direction — thank you; the last several releases were built from your
