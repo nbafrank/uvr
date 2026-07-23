@@ -416,6 +416,8 @@ uvr is shaped by the people who use it and report back. Special thanks to:
   install backend.
 - [@zorbax](https://github.com/zorbax) — the precise diagnosis of the macOS
   GNU-tar install failure (#125).
+- [@bsirak](https://github.com/bsirak) — the trampoline and symlink
+  integration RFC (#109).
 
 And to everyone who has filed an issue, tested a fix, or suggested a
 direction — thank you; the last several releases were built from your
