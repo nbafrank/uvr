@@ -403,12 +403,12 @@ P3M binary packages are sourced from [Posit Package Manager](https://packagemana
 
 uvr is shaped by the people who use it and report back. Special thanks to:
 
-- [@gdevenyi](https://github.com/gdevenyi) — a systematic 46-issue audit of
-  the entire codebase (#127–#172), with file-and-line precision, that drove
-  the v0.4.1 and v0.4.2 fix batches (and a code contribution on top).
 - [@B-Nilson](https://github.com/B-Nilson) — a steady stream of field
   reports and requests that became core behavior: cache-preserving R
   switches (#85), filtered cache cleaning (#92), and more.
+- [@gdevenyi](https://github.com/gdevenyi) — a systematic 46-issue audit of
+  the entire codebase (#127–#172), with file-and-line precision, that drove
+  the v0.4.1 and v0.4.2 fix batches (and a code contribution on top).
 - [@pat-s](https://github.com/pat-s) — the Alpine/musl system-requirements
   groundwork, and candid feedback that improved how this project is run.
 - [@hongyuanjia](https://github.com/hongyuanjia) — suggested building on
