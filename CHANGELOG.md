@@ -9,6 +9,11 @@ Pure tracking section — fixes and small features land here between tags.
 
 ### Fixes
 
+- `uvr sync` now actually removes unused packages from the library, as
+  the hint printed by `uvr remove` has always promised: installed
+  packages that are no longer in the lockfile's selected set are pruned
+  (the uvr companion package and non-package files are left alone;
+  Linux symlinked entries are unlinked, never traversed).
 - R version detection no longer inherits `R_HOME`/`R_LIBS*` from an
   enclosing R session (RStudio terminal, `system("uvr …")`), where a
   stale `R_HOME` from a different install could break or confuse the

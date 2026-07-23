@@ -425,6 +425,56 @@ async fn install_from_lockfile_with_r(
 
     let start = ui::now();
 
+    // Make the library match the lockfile: `uvr remove` promises "run
+    // `uvr sync` to remove unused packages from the library", so drop
+    // installed packages that are no longer part of the resolution. Only
+    // real package dirs (with a DESCRIPTION) are candidates; the uvr
+    // companion package and the `.uvr-r-version` sentinel are uvr-managed,
+    // not lockfile-tracked. Under `--no-dev` the lockfile arrives with dev
+    // packages filtered out, so those prune too — sync targets the
+    // selected set exactly.
+    let locked_names: std::collections::HashSet<&str> =
+        lockfile.packages.iter().map(|p| p.name.as_str()).collect();
+    let mut removed_unused = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&library) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name == "uvr" || locked_names.contains(name) {
+                continue;
+            }
+            if !entry.path().join("DESCRIPTION").exists() {
+                continue;
+            }
+            let version = installed_version(name, &library);
+            // Linux libraries hold symlinks into the global package cache:
+            // unlink those rather than remove_dir_all (which errors on a
+            // symlink and must never traverse into the shared cache).
+            let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+            let removal = if is_symlink {
+                std::fs::remove_file(entry.path())
+            } else {
+                std::fs::remove_dir_all(entry.path())
+            };
+            match removal {
+                Ok(()) => {
+                    ui::row_removed(name, version.as_deref().unwrap_or(""));
+                    removed_unused += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Could not remove unused package {name}: {e}")
+                }
+            }
+        }
+    }
+    if removed_unused > 0 {
+        ui::bullet_dim(format!(
+            "Removed {removed_unused} unused package(s) from the library"
+        ));
+    }
+
     let all_ordered = topological_install_order(&lockfile.packages)
         .context("Failed to determine install order")?;
     let to_install: Vec<&LockedPackage> = all_ordered
