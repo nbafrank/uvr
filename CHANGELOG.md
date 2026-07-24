@@ -13,7 +13,12 @@ Pure tracking section — fixes and small features land here between tags.
   the hint printed by `uvr remove` has always promised: installed
   packages that are no longer in the lockfile's selected set are pruned
   (the uvr companion package and non-package files are left alone;
-  Linux symlinked entries are unlinked, never traversed).
+  Linux symlinked entries are unlinked, never traversed). Pruning is
+  deliberately narrow: only `uvr sync` prunes (`add`/`import`/`update`/
+  `run` stay purely additive), only the project's own `.uvr/library/` is
+  touched (never `--library`/`UVR_LIBRARY` targets, which may be shared),
+  and only after a successful install, so a failed sync leaves the
+  library exactly as it was.
 - R version detection no longer inherits `R_HOME`/`R_LIBS*` from an
   enclosing R session (RStudio terminal, `system("uvr …")`), where a
   stale `R_HOME` from a different install could break or confuse the

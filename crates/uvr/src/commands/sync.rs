@@ -252,7 +252,18 @@ pub async fn run_inner(
         lockfile
     };
 
-    install_from_lockfile_with_r(project, &lockfile, jobs, library_override, timeout, r_info).await
+    install_from_lockfile_with_r(
+        project,
+        &lockfile,
+        jobs,
+        library_override,
+        timeout,
+        r_info,
+        // Only `uvr sync` prunes: it is the command the `uvr remove` hint
+        // names, and the one whose contract is "make the library match".
+        true,
+    )
+    .await
 }
 
 /// Download and install any packages in `lockfile` not yet present in the project library.
@@ -264,6 +275,10 @@ pub async fn run_inner(
 /// If the currently active R version differs from the one in the lockfile (major.minor),
 /// the project library is wiped and all packages are reinstalled from scratch to avoid
 /// ABI incompatibilities.
+///
+/// Purely additive: never removes packages from the library (that is
+/// `uvr sync`'s job — see [`prune_unused_packages`]), so `add`/`import`/
+/// `update`/`run` cannot delete anything a user placed there manually.
 pub async fn install_from_lockfile(
     project: &Project,
     lockfile: &Lockfile,
@@ -276,12 +291,23 @@ pub async fn install_from_lockfile(
     let r_info: Option<(PathBuf, String)> = find_r_binary(r_constraint)
         .ok()
         .and_then(|bin| query_r_version(&bin).map(|ver| (bin, ver)));
-    install_from_lockfile_with_r(project, lockfile, jobs, library_override, timeout, r_info).await
+    install_from_lockfile_with_r(
+        project,
+        lockfile,
+        jobs,
+        library_override,
+        timeout,
+        r_info,
+        false,
+    )
+    .await
 }
 
 /// [`install_from_lockfile`] with the R detection already done — `uvr sync`
 /// resolves R once and shares it between the #85 re-resolve check and the
-/// install, so the two can never observe different Rs.
+/// install, so the two can never observe different Rs. `prune` opts in to
+/// removing unused packages after a successful install (sync only).
+#[allow(clippy::too_many_arguments)]
 async fn install_from_lockfile_with_r(
     project: &Project,
     lockfile: &Lockfile,
@@ -289,6 +315,7 @@ async fn install_from_lockfile_with_r(
     library_override: Option<&std::path::Path>,
     timeout: Option<Duration>,
     r_info: Option<(PathBuf, String)>,
+    prune: bool,
 ) -> Result<()> {
     let library = library_override
         .map(|p| p.to_path_buf())
@@ -425,55 +452,15 @@ async fn install_from_lockfile_with_r(
 
     let start = ui::now();
 
-    // Make the library match the lockfile: `uvr remove` promises "run
-    // `uvr sync` to remove unused packages from the library", so drop
-    // installed packages that are no longer part of the resolution. Only
-    // real package dirs (with a DESCRIPTION) are candidates; the uvr
-    // companion package and the `.uvr-r-version` sentinel are uvr-managed,
-    // not lockfile-tracked. Under `--no-dev` the lockfile arrives with dev
-    // packages filtered out, so those prune too — sync targets the
-    // selected set exactly.
-    let locked_names: std::collections::HashSet<&str> =
-        lockfile.packages.iter().map(|p| p.name.as_str()).collect();
-    let mut removed_unused = 0usize;
-    if let Ok(entries) = std::fs::read_dir(&library) {
-        for entry in entries.flatten() {
-            let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else {
-                continue;
-            };
-            if name == "uvr" || locked_names.contains(name) {
-                continue;
-            }
-            if !entry.path().join("DESCRIPTION").exists() {
-                continue;
-            }
-            let version = installed_version(name, &library);
-            // Linux libraries hold symlinks into the global package cache:
-            // unlink those rather than remove_dir_all (which errors on a
-            // symlink and must never traverse into the shared cache).
-            let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
-            let removal = if is_symlink {
-                std::fs::remove_file(entry.path())
-            } else {
-                std::fs::remove_dir_all(entry.path())
-            };
-            match removal {
-                Ok(()) => {
-                    ui::row_removed(name, version.as_deref().unwrap_or(""));
-                    removed_unused += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("Could not remove unused package {name}: {e}")
-                }
-            }
-        }
-    }
-    if removed_unused > 0 {
-        ui::bullet_dim(format!(
-            "Removed {removed_unused} unused package(s) from the library"
-        ));
-    }
+    // `uvr remove` promises "run `uvr sync` to remove unused packages from
+    // the library" — but pruning is a destructive act, so it is doubly
+    // gated: only `uvr sync` opts in (`prune`; add/import/update/run stay
+    // purely additive), and only for the project's own `.uvr/library/`
+    // (`library_override` covers both `--library` and `UVR_LIBRARY`, which
+    // may point at shared or system libraries that hold packages other
+    // projects depend on). Deferred until after a successful install so a
+    // failed sync remains a no-op on the library.
+    let do_prune = prune && library_override.is_none();
 
     let all_ordered = topological_install_order(&lockfile.packages)
         .context("Failed to determine install order")?;
@@ -493,6 +480,9 @@ async fn install_from_lockfile_with_r(
     }
 
     if to_install.is_empty() {
+        if do_prune {
+            prune_unused_packages(&library, lockfile);
+        }
         if let Some((_, ref current_r)) = r_info {
             write_library_r_sentinel(&library, &r_minor(current_r));
         }
@@ -1130,6 +1120,12 @@ async fn install_from_lockfile_with_r(
     if runtime_source > 0 {
         sub_parts.push(format!("{runtime_source} from source"));
     }
+    // Install succeeded — now (and only now) drop unused packages, so a
+    // failed sync never leaves the library smaller than it started.
+    if do_prune {
+        prune_unused_packages(&library, lockfile);
+    }
+
     let sep = format!(" {} ", ui::glyph::bullet());
     ui::summary(headline, sub_parts.join(&sep));
 
@@ -1138,6 +1134,60 @@ async fn install_from_lockfile_with_r(
     }
 
     Ok(())
+}
+
+/// Remove installed packages that are not in `lockfile`'s selected set,
+/// making the library match the resolution (what `uvr remove`'s "run
+/// `uvr sync` to remove unused packages" hint has always promised).
+///
+/// Guards: only real package dirs (with a DESCRIPTION) are candidates; the
+/// uvr companion package and non-package files (e.g. the `.uvr-r-version`
+/// sentinel) are skipped. Linux libraries hold symlinks into the global
+/// package cache — those are unlinked, never traversed. Callers gate this
+/// to the project's own `.uvr/library/` (never `--library`/`UVR_LIBRARY`
+/// targets, which may be shared) and to explicit `uvr sync` runs.
+///
+/// Returns the number of packages removed.
+fn prune_unused_packages(library: &std::path::Path, lockfile: &Lockfile) -> usize {
+    let locked_names: std::collections::HashSet<&str> =
+        lockfile.packages.iter().map(|p| p.name.as_str()).collect();
+    let mut removed_unused = 0usize;
+    if let Ok(entries) = std::fs::read_dir(library) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if name == "uvr" || locked_names.contains(name) {
+                continue;
+            }
+            if !entry.path().join("DESCRIPTION").exists() {
+                continue;
+            }
+            let version = installed_version(name, library);
+            let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+            let removal = if is_symlink {
+                std::fs::remove_file(entry.path())
+            } else {
+                std::fs::remove_dir_all(entry.path())
+            };
+            match removal {
+                Ok(()) => {
+                    ui::row_removed(name, version.as_deref().unwrap_or(""));
+                    removed_unused += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Could not remove unused package {name}: {e}")
+                }
+            }
+        }
+    }
+    if removed_unused > 0 {
+        ui::bullet_dim(format!(
+            "Removed {removed_unused} unused package(s) from the library"
+        ));
+    }
+    removed_unused
 }
 
 /// Pinned commit SHA and expected SHA-256 hash of the companion R package tarball.
@@ -2016,6 +2066,81 @@ mod tests {
             os: "linux".into(),
             abi: "musl".into(),
         }
+    }
+
+    fn fake_installed_pkg(library: &std::path::Path, name: &str, version: &str) {
+        let pkg = library.join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("DESCRIPTION"),
+            format!("Package: {name}\nVersion: {version}\n"),
+        )
+        .unwrap();
+    }
+
+    fn lockfile_with(names: &[&str]) -> Lockfile {
+        Lockfile {
+            r: Default::default(),
+            packages: names
+                .iter()
+                .map(|n| locked_pkg(n, "1.0", "https://example.invalid/x.tar.gz"))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn prune_removes_only_packages_absent_from_lockfile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fake_installed_pkg(tmp.path(), "keepme", "1.0");
+        fake_installed_pkg(tmp.path(), "dropme", "2.0");
+
+        let removed = prune_unused_packages(tmp.path(), &lockfile_with(&["keepme"]));
+
+        assert_eq!(removed, 1);
+        assert!(tmp.path().join("keepme").exists());
+        assert!(!tmp.path().join("dropme").exists());
+    }
+
+    #[test]
+    fn prune_spares_companion_sentinel_and_non_packages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The companion package is uvr-managed, never lockfile-tracked.
+        fake_installed_pkg(tmp.path(), "uvr", "0.1.4");
+        // The sentinel is a flat file; a stray dir without DESCRIPTION is
+        // not a package — neither may be touched.
+        std::fs::write(tmp.path().join(".uvr-r-version"), "4.5").unwrap();
+        std::fs::create_dir(tmp.path().join("not-a-package")).unwrap();
+
+        let removed = prune_unused_packages(tmp.path(), &lockfile_with(&[]));
+
+        assert_eq!(removed, 0);
+        assert!(tmp.path().join("uvr").exists());
+        assert!(tmp.path().join(".uvr-r-version").exists());
+        assert!(tmp.path().join("not-a-package").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_unlinks_symlinked_packages_without_traversing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Simulate the Linux layout: the library entry is a symlink into
+        // the global package cache. Pruning must remove the link and leave
+        // the cache target untouched.
+        let cache = tmp.path().join("cache-entry");
+        fake_installed_pkg(&tmp.path().join("."), "unused", "1.0");
+        std::fs::rename(tmp.path().join("unused"), &cache).unwrap();
+        let library = tmp.path().join("library");
+        std::fs::create_dir(&library).unwrap();
+        std::os::unix::fs::symlink(&cache, library.join("unused")).unwrap();
+
+        let removed = prune_unused_packages(&library, &lockfile_with(&[]));
+
+        assert_eq!(removed, 1);
+        assert!(!library.join("unused").exists());
+        assert!(
+            cache.join("DESCRIPTION").exists(),
+            "pruning a symlinked entry must never traverse into the cache"
+        );
     }
 
     fn locked_pkg(name: &str, version: &str, url: &str) -> LockedPackage {
