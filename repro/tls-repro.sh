@@ -44,10 +44,14 @@ echo "Server cert signed by custom CA (NOT trusted by webpki-roots)"
 
 echo ""
 echo "=== Step 3: Start local HTTPS server (no sudo needed) ==="
-python3 - "$WORK" << 'PYEOF' &
+# Use a random available port to avoid conflicts
+PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+echo "Using port: $PORT"
+
+python3 - "$WORK" "$PORT" << 'PYEOF' &
 import http.server, ssl, sys
 
-work = sys.argv[1]
+work, port = sys.argv[1], int(sys.argv[2])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -56,7 +60,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'Package: BiocStyle\nVersion: 2.38.0\n')
     def log_message(self, *a): pass
 
-server = http.server.HTTPServer(('127.0.0.1', 14443), Handler)
+server = http.server.HTTPServer(('127.0.0.1', port), Handler)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(f'{work}/server.crt', f'{work}/server.key')
 server.socket = ctx.wrap_socket(server.socket, server_side=True)
@@ -67,7 +71,7 @@ sleep 1
 
 echo ""
 echo "=== Step 4: curl with --cacert (simulates system cert store trusting our CA) ==="
-curl -s --cacert $WORK/ca.crt https://localhost:14443/ \
+curl -s --cacert $WORK/ca.crt https://localhost:$PORT/ \
   && echo "curl --cacert: ✅ SUCCESS" \
   || echo "curl --cacert: ❌ FAIL"
 
@@ -89,6 +93,8 @@ cat > $WORK/rust-test/src/main.rs << 'RUST'
 fn main() {
     // rustls-tls: uses webpki-roots only — does NOT trust system/custom CAs
     let result = reqwest::blocking::get("https://localhost:14443/");
+    let url = format!("https://localhost:{}/", std::env::var("TEST_PORT").unwrap_or("14443".into()));
+    let result = reqwest::blocking::get(&url);
     match result {
         Ok(r)  => println!("reqwest rustls-tls: ✅ OK ({})", r.status()),
         Err(e) => println!("reqwest rustls-tls: ❌ FAIL\n  Error: {e}"),
@@ -97,7 +103,7 @@ fn main() {
 RUST
 
 echo "Building reqwest rustls-tls test (first build ~30s, subsequent instant)..."
-cd $WORK/rust-test && cargo run 2>&1
+TEST_PORT=$PORT cd $WORK/rust-test && TEST_PORT=$PORT cargo run 2>&1
 
 echo ""
 echo "=== Step 6: Same test with native-tls (uses system cert store) ==="
@@ -105,7 +111,7 @@ sed -i '' 's/rustls-tls/native-tls/' $WORK/rust-test/Cargo.toml 2>/dev/null || \
   sed -i 's/rustls-tls/native-tls/' $WORK/rust-test/Cargo.toml
 # native-tls needs to trust our CA — pass it via SSL_CERT_FILE (macOS/Linux)
 export SSL_CERT_FILE=$WORK/ca.crt
-cd $WORK/rust-test && cargo run 2>&1
+cd $WORK/rust-test && TEST_PORT=$PORT cargo run 2>&1
 
 kill $SERVER_PID 2>/dev/null || true
 
