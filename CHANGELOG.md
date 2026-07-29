@@ -7,6 +7,7 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- Fix: `bioc_release_for_r(4, 5)` now returns `"3.22"` instead of `"3.21"` — Bioc 3.21 was a devel release paired with R 4.5.0-devel and is no longer available on the CDN; Bioc 3.22 is the stable release for R 4.5.x. Previously all `--bioc` installs failed on R 4.5 with a 404 network error unless `bioc_version` was pinned manually in `uvr.toml`.
 - **GitLab-hosted package support** (#123, PR #174 by @pteridin): `uvr add gitlab::host/group/repo[@ref]` resolves via the GitLab API v4, mirroring the existing `forgejo::` support — self-hosted instances included, nested groups handled via URL-encoded project paths. Flows through lockfile, `uvr export`, and sync.
 - Cache filenames derived from download URLs strip query strings/fragments — GitLab archive URLs carry `?sha=...`, and `?` is an illegal filename character on Windows (os error 123). (PR #174)
 - `R CMD INSTALL` failure logs now combine stdout and stderr instead of picking one stream — R splits progress and the actual error across both inconsistently. (PR #174)
