@@ -22,7 +22,7 @@ use crate::resolver::PackageRegistry;
 fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
     match (r_major, r_minor) {
         (4, 6) => "3.23",
-        (4, 5) => "3.21",
+        (4, 5) => "3.22",
         (4, 4) => "3.20",
         (4, 3) => "3.18",
         (4, 2) => "3.16",
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn bioc_release_mapping() {
-        assert_eq!(bioc_release_for_r(4, 5), "3.21");
+        assert_eq!(bioc_release_for_r(4, 5), "3.22");
         assert_eq!(bioc_release_for_r(4, 4), "3.20");
         assert_eq!(bioc_release_for_r(4, 3), "3.18");
         assert_eq!(bioc_release_for_r(4, 2), "3.16");
@@ -429,10 +429,10 @@ mod tests {
     #[test]
     fn default_release_maps_r_to_bioc() {
         // R 4.6 must map to its own Bioc release (3.23), not the 4.5 fallback —
-        // pulling 3.21 here ships R-4.5-API package sources that fail to compile
+        // pulling 3.22 here ships R-4.5-API package sources that fail to compile
         // against R 4.6 headers (the S4Vectors PRENV/Rf_findVar bug).
         assert_eq!(default_release_for_r("4.6.0"), "3.23");
-        assert_eq!(default_release_for_r("4.5.1"), "3.21");
+        assert_eq!(default_release_for_r("4.5.1"), "3.22");
         assert_eq!(default_release_for_r("4.4.0"), "3.20");
         assert_eq!(default_release_for_r("4.3"), "3.18");
         // Unparseable / partial versions fall through to the newest known
