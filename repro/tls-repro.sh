@@ -11,6 +11,20 @@
 
 set -e
 WORK=$(mktemp -d)
+
+# Check requirements
+if ! command -v cargo &>/dev/null; then
+  echo "❌ cargo not found. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+  exit 1
+fi
+if ! command -v openssl &>/dev/null; then
+  echo "❌ openssl not found"
+  exit 1
+fi
+if ! command -v python3 &>/dev/null; then
+  echo "❌ python3 not found"
+  exit 1
+fi
 trap "rm -rf $WORK" EXIT
 
 echo "=== Step 1: Generate a self-signed CA (not in webpki-roots) ==="
@@ -83,7 +97,7 @@ fn main() {
 RUST
 
 echo "Building reqwest rustls-tls test (first build ~30s, subsequent instant)..."
-cd $WORK/rust-test && cargo run -q 2>/dev/null
+cd $WORK/rust-test && cargo run 2>&1
 
 echo ""
 echo "=== Step 6: Same test with native-tls (uses system cert store) ==="
@@ -91,7 +105,7 @@ sed -i '' 's/rustls-tls/native-tls/' $WORK/rust-test/Cargo.toml 2>/dev/null || \
   sed -i 's/rustls-tls/native-tls/' $WORK/rust-test/Cargo.toml
 # native-tls needs to trust our CA — pass it via SSL_CERT_FILE (macOS/Linux)
 export SSL_CERT_FILE=$WORK/ca.crt
-cd $WORK/rust-test && cargo run -q 2>/dev/null
+cd $WORK/rust-test && cargo run 2>&1
 
 kill $SERVER_PID 2>/dev/null || true
 
