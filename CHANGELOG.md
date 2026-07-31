@@ -7,6 +7,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- System dependencies are resolved on RHEL and its rebuilds (#209). uvr asked
+  both sysreqs catalogs under the raw `/etc/os-release` identity, which neither
+  speaks: Posit's API answers `Unsupported system` for `rhel`/`8.10` but
+  answers normally for `redhat`/`8`, and every vendored rule is written as
+  `redhat` with `versions: ["8"]`. RHEL hosts therefore got nothing from the
+  API and nothing from the local fallback either. The `(ID, VERSION_ID)` pair
+  is now mapped onto the catalogs' vocabulary — `rhel` → `redhat`,
+  `rocky`/`almalinux` → `rockylinux`, `sles` → `sle`, openSUSE variants →
+  `opensuse` — with the RHEL family truncated to its major release.
+
 ## v0.4.4 (2026-07-31)
 
 The biggest release yet, driven by a wave of new users: GitLab-hosted

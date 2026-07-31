@@ -13,8 +13,9 @@ pub struct SysReq {
     pub package: String,
 }
 
-/// Detect the Linux distribution from `/etc/os-release`.
-/// Returns `(id, version_id)` like `("ubuntu", "22.04")`.
+/// Detect the Linux distribution from `/etc/os-release`, normalized onto the
+/// vocabulary the sysreqs catalogs use. Returns `id-version` like
+/// `"ubuntu-22.04"` or `"redhat-8"`.
 pub fn detect_linux_distro() -> Option<String> {
     let os = crate::os_release::detect()?;
     // Both halves are required here, unlike P3M slug detection: the sysreqs
@@ -25,7 +26,45 @@ pub fn detect_linux_distro() -> Option<String> {
     if os.id.is_empty() || os.version_id.is_empty() {
         return None;
     }
-    Some(format!("{}-{}", os.id, os.version_id))
+    let (distribution, release) = normalize_distro(&os.id, &os.version_id);
+    Some(format!("{distribution}-{release}"))
+}
+
+/// Map an `/etc/os-release` `(ID, VERSION_ID)` pair onto the names Posit's
+/// sysreqs API and the vendored `r-system-requirements` rules are written in.
+///
+/// Both catalogs speak the Posit vocabulary, not the os-release one, and both
+/// reject the raw values RHEL reports (#209):
+///
+/// ```text
+/// ?distribution=rhel&release=8.10  -> {"code":14,"error":"Unsupported system"}
+/// ?distribution=redhat&release=8   -> {"requirements":[{"name":"xml2", ...}]}
+/// ```
+///
+/// The vendored rules agree — every RHEL entry is written as `redhat` with
+/// `versions: ["8"]`, so a `rhel` / `8.10` host matched no rule either and the
+/// local fallback had nothing to offer once the API had bowed out. RHEL hosts
+/// therefore got no system dependencies from either source.
+///
+/// Only the RHEL family is truncated to its major: Ubuntu is keyed `22.04`,
+/// openSUSE `15.6` and SLE `12.3` in both catalogs.
+pub(crate) fn normalize_distro(id: &str, version_id: &str) -> (String, String) {
+    let distribution = match id {
+        "rhel" => "redhat",
+        // The RHEL rebuilds share Rocky's entries — same repos (crb /
+        // powertools), same package names.
+        "rocky" | "almalinux" => "rockylinux",
+        "sles" => "sle",
+        "opensuse-leap" | "opensuse-tumbleweed" => "opensuse",
+        other => other,
+    };
+    let release = match distribution {
+        "redhat" | "rockylinux" | "centos" | "fedora" => {
+            version_id.split('.').next().unwrap_or(version_id)
+        }
+        _ => version_id,
+    };
+    (distribution.to_string(), release.to_string())
 }
 
 /// Response from the Posit Package Manager sysreqs API.
@@ -330,6 +369,71 @@ mod tests {
         let check = check_system_deps(&client, &queries, "ubuntu-22.04").await;
         assert!(!check.lookup_failed, "no API contact → no failed lookups");
         assert!(!check.unsupported_distro);
+    }
+
+    #[test]
+    fn rhel_normalizes_to_the_posit_vocabulary() {
+        // #209: UBI/RHEL report ID="rhel", VERSION_ID="8.10". Posit's API
+        // answers only for redhat/8, and every vendored rule is written as
+        // `redhat` with versions ["8"] — so the raw pair matched neither.
+        assert_eq!(
+            normalize_distro("rhel", "8.10"),
+            ("redhat".to_string(), "8".to_string())
+        );
+        assert_eq!(
+            normalize_distro("rocky", "9.3"),
+            ("rockylinux".to_string(), "9".to_string())
+        );
+        assert_eq!(
+            normalize_distro("almalinux", "10.0"),
+            ("rockylinux".to_string(), "10".to_string())
+        );
+        assert_eq!(
+            normalize_distro("sles", "12.3"),
+            ("sle".to_string(), "12.3".to_string())
+        );
+    }
+
+    #[test]
+    fn non_rhel_distros_keep_their_full_version() {
+        // Ubuntu is keyed "22.04" and openSUSE "15.6" in both catalogs;
+        // truncating either to a major would match nothing.
+        assert_eq!(
+            normalize_distro("ubuntu", "22.04"),
+            ("ubuntu".to_string(), "22.04".to_string())
+        );
+        assert_eq!(
+            normalize_distro("opensuse-leap", "15.6"),
+            ("opensuse".to_string(), "15.6".to_string())
+        );
+        assert_eq!(
+            normalize_distro("debian", "12"),
+            ("debian".to_string(), "12".to_string())
+        );
+        // Alpine keeps its patch version; `resolve_local` truncates it to
+        // major.minor when matching rules (#30).
+        assert_eq!(
+            normalize_distro("alpine", "3.24.1"),
+            ("alpine".to_string(), "3.24.1".to_string())
+        );
+    }
+
+    #[test]
+    fn normalized_rhel_resolves_against_the_local_rules() {
+        // The other half of #209: with the normalized pair the vendored rules
+        // finally match, so the local fallback works even when the API can't
+        // be reached.
+        let (distribution, release) = normalize_distro("rhel", "8.10");
+        let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
+        assert!(
+            pkgs.iter().any(|p| p == "libxml2-devel"),
+            "expected libxml2-devel for rhel-8.10, got {pkgs:?}"
+        );
+        let gdal = sysreqs_rules::resolve_local("GDAL (>= 2.2.3)", &distribution, &release);
+        assert!(
+            gdal.iter().any(|p| p == "gdal-devel"),
+            "expected gdal-devel for rhel-8.10, got {gdal:?}"
+        );
     }
 
     #[test]
