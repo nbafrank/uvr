@@ -7,6 +7,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- System dependencies are resolved on distributions Posit's sysreqs API
+  doesn't cover (#207). `SystemRequirements` was only ever read from the
+  resolved repository's `PACKAGES` index, and CRAN's index doesn't publish
+  that field — so on Alpine every CRAN package reached the vendored local
+  rules with nothing to match, and `uvr sync --install-system-deps` went
+  straight into a source build that failed on the missing library (`terra`
+  → `gdal-config not found`, `units` → `libudunits2.so was not found`)
+  without printing a sysreqs warning either. The check now runs after the
+  tarballs are downloaded and reads `SystemRequirements` from each one's
+  DESCRIPTION, which is where the field is actually published.
 - System dependencies are resolved on RHEL and its rebuilds (#209). uvr asked
   both sysreqs catalogs under the raw `/etc/os-release` identity, which neither
   speaks: Posit's API answers `Unsupported system` for `rhel`/`8.10` but

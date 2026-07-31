@@ -664,6 +664,12 @@ pub struct TarballMeta {
     /// True iff DESCRIPTION explicitly states `NeedsCompilation: no`.
     /// Absent means uvr can't prove the package is pure-R — treat conservatively as source.
     pub pure_r: bool,
+    /// Raw `SystemRequirements:` field, continuation lines joined.
+    ///
+    /// The tarball is the only place this is reliably published: CRAN's
+    /// `PACKAGES` index omits the field, so it never reaches the lockfile
+    /// and the sysreqs fallback has nothing to match (#207).
+    pub system_requirements: Option<String>,
 }
 
 /// Inspect a downloaded `.tar.gz` for both `Built:` and `NeedsCompilation` in
@@ -710,6 +716,12 @@ pub fn inspect_tarball(tarball_path: &Path, package_name: &str) -> Option<Tarbal
                 }
             }
         }
+        // `SystemRequirements` routinely wraps across lines (terra's spans
+        // two), so it needs the real DCF parser rather than the line-prefix
+        // scan above — a truncated value would silently lose rule matches.
+        meta.system_requirements = crate::dcf::parse_dcf_fields(&buf)
+            .remove("SystemRequirements")
+            .filter(|s| !s.trim().is_empty());
         return Some(meta);
     }
     None
@@ -727,6 +739,19 @@ pub fn detect_built_from_tarball(
     package_name: &str,
 ) -> Option<crate::registry::cran::BuiltInfo> {
     inspect_tarball(tarball_path, package_name).and_then(|m| m.built)
+}
+
+/// Read the `SystemRequirements:` field out of a downloaded tarball's
+/// DESCRIPTION.
+///
+/// The field never survives the trip through a `PACKAGES` index — CRAN's
+/// doesn't publish it — so the tarball uvr has just downloaded is the only
+/// authoritative source for the exact version being installed (#207).
+///
+/// Thin convenience wrapper around `inspect_tarball` for callers that only
+/// care about `SystemRequirements`.
+pub fn detect_sysreqs_from_tarball(tarball_path: &Path, package_name: &str) -> Option<String> {
+    inspect_tarball(tarball_path, package_name).and_then(|m| m.system_requirements)
 }
 
 /// Public entry-point for retroactively patching already-installed packages.
@@ -1037,6 +1062,59 @@ mod tests {
         let m = inspect_tarball(tarball.path(), "bin").unwrap();
         assert!(!m.pure_r);
         assert!(m.built.is_some());
+    }
+
+    #[test]
+    fn inspect_tarball_extracts_wrapped_system_requirements() {
+        // #207: terra's SystemRequirements wraps onto a second line, so the
+        // value has to come from the DCF parser — a line-prefix scan would
+        // truncate it at "PROJ (>=" and lose the proj/sqlite rule matches.
+        let tarball = write_tarball_with_description_for(
+            "terra",
+            "Package: terra\nVersion: 1.9-34\nNeedsCompilation: yes\n\
+             SystemRequirements: C++17, GDAL (>= 2.2.3), GEOS (>= 3.4.0), PROJ (>=\n\
+             \x204.9.3), TBB, sqlite3\n",
+        );
+        let m = inspect_tarball(tarball.path(), "terra").unwrap();
+        assert_eq!(
+            m.system_requirements.as_deref(),
+            Some("C++17, GDAL (>= 2.2.3), GEOS (>= 3.4.0), PROJ (>= 4.9.3), TBB, sqlite3")
+        );
+    }
+
+    #[test]
+    fn detect_sysreqs_from_tarball_reads_the_field() {
+        let tarball = write_tarball_with_description_for(
+            "units",
+            "Package: units\nVersion: 1.0-1\nSystemRequirements: udunits-2\n",
+        );
+        assert_eq!(
+            detect_sysreqs_from_tarball(tarball.path(), "units").as_deref(),
+            Some("udunits-2")
+        );
+        // A package declaring none stays None rather than Some("").
+        let plain = write_tarball_with_description_for("cli", "Package: cli\nVersion: 3.6.3\n");
+        assert!(detect_sysreqs_from_tarball(plain.path(), "cli").is_none());
+    }
+
+    #[test]
+    fn backfilled_sysreqs_resolve_to_alpine_packages() {
+        // The end of the #207 chain: the string read off the tarball is what
+        // the vendored rules turn into the apk names that were previously
+        // never installed.
+        let tarball = write_tarball_with_description_for(
+            "terra",
+            "Package: terra\nVersion: 1.9-34\n\
+             SystemRequirements: C++17, GDAL (>= 2.2.3), GEOS (>= 3.4.0), PROJ (>= 4.9.3), TBB, sqlite3\n",
+        );
+        let sys_reqs = detect_sysreqs_from_tarball(tarball.path(), "terra").unwrap();
+        let pkgs = crate::sysreqs_rules::resolve_local(&sys_reqs, "alpine", "3.24.1");
+        for expected in ["gdal-dev", "geos-dev", "proj-dev", "sqlite-dev"] {
+            assert!(
+                pkgs.iter().any(|p| p == expected),
+                "expected {expected}, got {pkgs:?}"
+            );
+        }
     }
 
     #[test]

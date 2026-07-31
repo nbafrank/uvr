@@ -32,6 +32,23 @@ struct PkgPlan<'a> {
     is_binary: bool,
 }
 
+/// Read `SystemRequirements` out of the tarball just downloaded for `name`,
+/// if one was downloaded at all.
+///
+/// Packages served from the package cache have no tarball in this run and
+/// yield `None` — they are installed without compiling, so a build-time
+/// system library can't be what's missing for them.
+#[cfg(target_os = "linux")]
+fn tarball_sysreqs(
+    name: &str,
+    plans: &[PkgPlan<'_>],
+    results: &[uvr_core::installer::download::DownloadResult],
+) -> Option<String> {
+    let idx = plans.iter().position(|p| p.pkg.name == name)?;
+    let path = &results.get(idx)?.path;
+    uvr_core::installer::binary_install::detect_sysreqs_from_tarball(path, name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallKind {
     /// Pre-built binary tarball with host-matching `Built:`. Fast-path extract.
@@ -512,167 +529,6 @@ async fn install_from_lockfile_with_r(
 
     let client = crate::commands::util::build_client()?;
 
-    // On Linux, check for missing system dependencies before installing.
-    #[cfg(target_os = "linux")]
-    {
-        use uvr_core::sysreqs;
-
-        if let Some(distro) = sysreqs::detect_linux_distro() {
-            let queries: Vec<sysreqs::PackageSysReqQuery> = to_install
-                .iter()
-                .map(|p| sysreqs::PackageSysReqQuery {
-                    name: p.name.clone(),
-                    system_requirements: p.system_requirements.clone(),
-                    bioc: matches!(p.source, uvr_core::lockfile::PackageSource::Bioconductor),
-                })
-                .collect();
-
-            if !queries.is_empty() {
-                let check = sysreqs::check_system_deps(&client, &queries, &distro).await;
-
-                // #30 follow-up: only fire the unsupported-distro warning
-                // when at least one package actually declares
-                // `SystemRequirements`. pat-s reported that on Alpine 3.23.x
-                // a binaries-only install of `cli/glue/rlang` (no sysreqs
-                // at all) still triggered the loud "System dependency check
-                // skipped" warning, which reads as a real problem when in
-                // fact nothing needed checking. Gate on the presence of
-                // sysreqs so the warning fires only when there's actually
-                // a check we couldn't perform.
-                let any_has_sysreqs = queries.iter().any(|q| {
-                    q.system_requirements
-                        .as_deref()
-                        .is_some_and(|s| !s.trim().is_empty())
-                });
-
-                if check.lookup_failed && check.missing.is_empty() && any_has_sysreqs {
-                    // The sysreqs API couldn't be reached/parsed for at least
-                    // one package and the local-rules fallback found nothing
-                    // missing (#148). Say the check was degraded rather than
-                    // silently implying it passed.
-                    eprintln!();
-                    ui::warn_block(
-                        "System dependency check degraded",
-                        vec![
-                            "The Posit sysreqs API could not be consulted (network or service issue); the vendored local rules were used instead.".to_string(),
-                            "Packages with system-library requirements may fail to compile from source if the local rules missed something.".to_string(),
-                        ],
-                    );
-                    eprintln!();
-                } else if check.unsupported_distro && check.missing.is_empty() && any_has_sysreqs {
-                    // PPM doesn't cover this distro AND the local fallback
-                    // found nothing (either no rule matched any of the
-                    // declared SystemRequirements, or the local rules are
-                    // out of date). Tell the user we skipped the check
-                    // rather than silently claiming everything is fine.
-                    eprintln!();
-                    ui::warn_block(
-                        &format!("System dependency check skipped on {distro}"),
-                        vec![
-                            "Posit's sysreqs catalog doesn't cover this distribution, and the local fallback had no applicable rules.".to_string(),
-                            "Packages with system-library requirements may fail to compile from source.".to_string(),
-                        ],
-                    );
-                    ui::hint(
-                        "Install build prerequisites manually (e.g. libxml2-dev, libcurl-dev, libssl-dev) if source builds fail.",
-                    );
-                    eprintln!();
-                } else if !check.missing.is_empty() {
-                    let missing = &check.missing;
-                    let all_pkgs: Vec<&str> = missing
-                        .values()
-                        .flat_map(|reqs| reqs.iter().map(|r| r.package.as_str()))
-                        .collect::<std::collections::BTreeSet<&str>>()
-                        .into_iter()
-                        .collect();
-
-                    eprintln!();
-                    // Structured warning with a loud `⚠ WARN` header and one
-                    // bullet per package → missing deps. The user's fix is
-                    // delivered as a proper hint below, not an extra warn line.
-                    let body: Vec<String> = missing
-                        .iter()
-                        .map(|(pkg_name, reqs)| {
-                            let names: Vec<&str> =
-                                reqs.iter().map(|r| r.package.as_str()).collect();
-                            format!("{pkg_name} needs: {}", names.join(", "))
-                        })
-                        .collect();
-                    ui::warn_block(
-                        &format!(
-                            "Missing system dependencies for {} package(s)",
-                            missing.len()
-                        ),
-                        body,
-                    );
-                    // Pick the platform's installer (returns None when sudo
-                    // is needed but missing — reviewer-flagged regression
-                    // in minimal containers). For the display hint, fall
-                    // back to a manual command shape so the user still has
-                    // an actionable line even when uvr can't run it.
-                    let installer = pick_sysreqs_installer(&all_pkgs);
-                    let install_cmd_display = match &installer {
-                        Some((prog, args)) => format!("{} {}", prog, args.join(" ")),
-                        None => {
-                            if which::which("apk").is_ok() {
-                                format!("apk add {}", all_pkgs.join(" "))
-                            } else if which::which("dnf").is_ok() {
-                                format!("dnf install -y {}", all_pkgs.join(" "))
-                            } else {
-                                format!("apt-get install -y {}", all_pkgs.join(" "))
-                            }
-                        }
-                    };
-
-                    let want_run = sysreqs_install_enabled();
-                    match (want_run, installer) {
-                        (true, None) => {
-                            ui::warn(
-                                "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
-                            );
-                            ui::hint(format!("Install manually: {install_cmd_display}"));
-                            ui::hint("Or run uvr as root in this container.");
-                        }
-                        (true, Some((install_program, install_args))) => {
-                            if confirm_sysreqs_install(&install_cmd_display)? {
-                                ui::info(format!("Running: {install_cmd_display}"));
-                                let status = std::process::Command::new(&install_program)
-                                    .args(&install_args)
-                                    .status()
-                                    .with_context(|| {
-                                        format!("Failed to spawn {install_program}")
-                                    })?;
-                                if !status.success() {
-                                    anyhow::bail!(
-                                        "System dependency install failed (exit {}). \
-                                         Re-run `{install_cmd_display}` manually or \
-                                         install the listed libraries before retrying `uvr sync`.",
-                                        status.code().unwrap_or(-1)
-                                    );
-                                }
-                                ui::success("System dependencies installed.");
-                            } else {
-                                ui::hint(format!("Install with: {install_cmd_display}"));
-                                ui::hint(
-                                    "Continuing — some packages may fail to compile without these.",
-                                );
-                            }
-                        }
-                        (false, _) => {
-                            ui::hint(format!("Install with: {install_cmd_display}"));
-                            ui::hint(
-                                "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
-                            );
-                            ui::hint(
-                                "Continuing — some packages may fail to compile without these.",
-                            );
-                        }
-                    }
-                    eprintln!();
-                }
-            }
-        }
-    }
     let cache_dir = uvr_core::env_vars::cache_dir_or_temp();
 
     // Use the R binary resolved at the top of install_from_lockfile.
@@ -957,7 +813,9 @@ async fn install_from_lockfile_with_r(
             })
             .collect();
 
-        let downloader = Downloader::new(client, cache_dir, jobs);
+        // Cloned rather than moved: the sysreqs check below still needs the
+        // client, and it now runs after the download phase (#207).
+        let downloader = Downloader::new(client.clone(), cache_dir, jobs);
         let results = downloader
             .download_all(&specs)
             .await
@@ -1037,6 +895,184 @@ async fn install_from_lockfile_with_r(
                 "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
                 host_info.distro_label, r_minor_str, runtime_source
             );
+        }
+
+        // Check for missing system dependencies: the tarballs are on disk
+        // now, and nothing has been compiled yet.
+        //
+        // Reading `SystemRequirements` from the downloaded tarball is what
+        // makes the check work at all on distributions Posit's sysreqs API
+        // doesn't cover (#207). The field never survives the trip through a
+        // `PACKAGES` index — CRAN's omits it — so `p.system_requirements`
+        // from the lockfile is `None` for every CRAN package, and the
+        // vendored local rules had nothing to match. The tarball is also
+        // authoritative for the exact version being installed, which an
+        // index-level lookup wouldn't be.
+        #[cfg(target_os = "linux")]
+        {
+            use uvr_core::sysreqs;
+
+            if let Some(distro) = sysreqs::detect_linux_distro() {
+                let queries: Vec<sysreqs::PackageSysReqQuery> = to_install
+                    .iter()
+                    .map(|p| sysreqs::PackageSysReqQuery {
+                        name: p.name.clone(),
+                        system_requirements: p
+                            .system_requirements
+                            .clone()
+                            .or_else(|| tarball_sysreqs(&p.name, &plans, &results)),
+                        bioc: matches!(p.source, uvr_core::lockfile::PackageSource::Bioconductor),
+                    })
+                    .collect();
+
+                if !queries.is_empty() {
+                    let check = sysreqs::check_system_deps(&client, &queries, &distro).await;
+
+                    // #30 follow-up: only fire the unsupported-distro warning
+                    // when at least one package actually declares
+                    // `SystemRequirements`. pat-s reported that on Alpine 3.23.x
+                    // a binaries-only install of `cli/glue/rlang` (no sysreqs
+                    // at all) still triggered the loud "System dependency check
+                    // skipped" warning, which reads as a real problem when in
+                    // fact nothing needed checking. Gate on the presence of
+                    // sysreqs so the warning fires only when there's actually
+                    // a check we couldn't perform.
+                    let any_has_sysreqs = queries.iter().any(|q| {
+                        q.system_requirements
+                            .as_deref()
+                            .is_some_and(|s| !s.trim().is_empty())
+                    });
+
+                    if check.lookup_failed && check.missing.is_empty() && any_has_sysreqs {
+                        // The sysreqs API couldn't be reached/parsed for at least
+                        // one package and the local-rules fallback found nothing
+                        // missing (#148). Say the check was degraded rather than
+                        // silently implying it passed.
+                        eprintln!();
+                        ui::warn_block(
+                            "System dependency check degraded",
+                            vec![
+                                "The Posit sysreqs API could not be consulted (network or service issue); the vendored local rules were used instead.".to_string(),
+                                "Packages with system-library requirements may fail to compile from source if the local rules missed something.".to_string(),
+                            ],
+                        );
+                        eprintln!();
+                    } else if check.unsupported_distro
+                        && check.missing.is_empty()
+                        && any_has_sysreqs
+                    {
+                        // PPM doesn't cover this distro AND the local fallback
+                        // found nothing (either no rule matched any of the
+                        // declared SystemRequirements, or the local rules are
+                        // out of date). Tell the user we skipped the check
+                        // rather than silently claiming everything is fine.
+                        eprintln!();
+                        ui::warn_block(
+                            &format!("System dependency check skipped on {distro}"),
+                            vec![
+                                "Posit's sysreqs catalog doesn't cover this distribution, and the local fallback had no applicable rules.".to_string(),
+                                "Packages with system-library requirements may fail to compile from source.".to_string(),
+                            ],
+                        );
+                        ui::hint(
+                            "Install build prerequisites manually (e.g. libxml2-dev, libcurl-dev, libssl-dev) if source builds fail.",
+                        );
+                        eprintln!();
+                    } else if !check.missing.is_empty() {
+                        let missing = &check.missing;
+                        let all_pkgs: Vec<&str> = missing
+                            .values()
+                            .flat_map(|reqs| reqs.iter().map(|r| r.package.as_str()))
+                            .collect::<std::collections::BTreeSet<&str>>()
+                            .into_iter()
+                            .collect();
+
+                        eprintln!();
+                        // Structured warning with a loud `⚠ WARN` header and one
+                        // bullet per package → missing deps. The user's fix is
+                        // delivered as a proper hint below, not an extra warn line.
+                        let body: Vec<String> = missing
+                            .iter()
+                            .map(|(pkg_name, reqs)| {
+                                let names: Vec<&str> =
+                                    reqs.iter().map(|r| r.package.as_str()).collect();
+                                format!("{pkg_name} needs: {}", names.join(", "))
+                            })
+                            .collect();
+                        ui::warn_block(
+                            &format!(
+                                "Missing system dependencies for {} package(s)",
+                                missing.len()
+                            ),
+                            body,
+                        );
+                        // Pick the platform's installer (returns None when sudo
+                        // is needed but missing — reviewer-flagged regression
+                        // in minimal containers). For the display hint, fall
+                        // back to a manual command shape so the user still has
+                        // an actionable line even when uvr can't run it.
+                        let installer = pick_sysreqs_installer(&all_pkgs);
+                        let install_cmd_display = match &installer {
+                            Some((prog, args)) => format!("{} {}", prog, args.join(" ")),
+                            None => {
+                                if which::which("apk").is_ok() {
+                                    format!("apk add {}", all_pkgs.join(" "))
+                                } else if which::which("dnf").is_ok() {
+                                    format!("dnf install -y {}", all_pkgs.join(" "))
+                                } else {
+                                    format!("apt-get install -y {}", all_pkgs.join(" "))
+                                }
+                            }
+                        };
+
+                        let want_run = sysreqs_install_enabled();
+                        match (want_run, installer) {
+                            (true, None) => {
+                                ui::warn(
+                                    "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
+                                );
+                                ui::hint(format!("Install manually: {install_cmd_display}"));
+                                ui::hint("Or run uvr as root in this container.");
+                            }
+                            (true, Some((install_program, install_args))) => {
+                                if confirm_sysreqs_install(&install_cmd_display)? {
+                                    ui::info(format!("Running: {install_cmd_display}"));
+                                    let status = std::process::Command::new(&install_program)
+                                        .args(&install_args)
+                                        .status()
+                                        .with_context(|| {
+                                            format!("Failed to spawn {install_program}")
+                                        })?;
+                                    if !status.success() {
+                                        anyhow::bail!(
+                                            "System dependency install failed (exit {}). \
+                                             Re-run `{install_cmd_display}` manually or \
+                                             install the listed libraries before retrying `uvr sync`.",
+                                            status.code().unwrap_or(-1)
+                                        );
+                                    }
+                                    ui::success("System dependencies installed.");
+                                } else {
+                                    ui::hint(format!("Install with: {install_cmd_display}"));
+                                    ui::hint(
+                                        "Continuing — some packages may fail to compile without these.",
+                                    );
+                                }
+                            }
+                            (false, _) => {
+                                ui::hint(format!("Install with: {install_cmd_display}"));
+                                ui::hint(
+                                    "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
+                                );
+                                ui::hint(
+                                    "Continuing — some packages may fail to compile without these.",
+                                );
+                            }
+                        }
+                        eprintln!();
+                    }
+                }
+            }
         }
 
         let installer = RCmdInstall::new(r_binary.to_string_lossy());
