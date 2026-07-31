@@ -20,9 +20,13 @@ pub fn detect_linux_distro() -> Option<String> {
     let os = crate::os_release::detect()?;
     // Both halves are required here, unlike P3M slug detection: the sysreqs
     // API and the vendored rules are keyed by `id-version`, and there is no
-    // sensible query for a rolling release that publishes no version. Arch
-    // and CachyOS land here and the caller skips the check — the safe
-    // direction to fail, since a wrong answer only produces a wrong hint.
+    // sensible query for a distro that publishes no version at all — the
+    // caller skips the check, the safe direction to fail, since a wrong
+    // answer only produces a wrong hint. Note this is a narrower net than it
+    // looks: rolling releases do not necessarily land here. `archlinux`
+    // containers report a snapshot `VERSION_ID` (e.g. `20260726.0.562117`)
+    // and so reach the catalogs as `arch`/<snapshot>, which simply matches
+    // nothing (reported by @gdevenyi on #209).
     if os.id.is_empty() || os.version_id.is_empty() {
         return None;
     }
@@ -48,9 +52,23 @@ pub fn detect_linux_distro() -> Option<String> {
 ///
 /// Only the RHEL family is truncated to its major: Ubuntu is keyed `22.04`,
 /// openSUSE `15.6` and SLE `12.3` in both catalogs.
+///
+/// Mapping onto a name a catalog knows is not the same as full API coverage —
+/// the two catalogs disagree about which distros they serve, and the local
+/// rules remain the backstop (measurements by @gdevenyi on #209):
+///
+/// - `rockylinux` is served by the API for 9 and 10 but not 8, so Rocky/Alma 8
+///   still resolves via the local rules and still prints the degraded-check
+///   warning. That is the pre-existing behaviour, not a regression from this
+///   mapping.
+/// - `fedora` and `alpine` are rejected by the API at every release; they are
+///   local-rules-only by design.
 pub(crate) fn normalize_distro(id: &str, version_id: &str) -> (String, String) {
     let distribution = match id {
-        "rhel" => "redhat",
+        // Oracle Linux is a straight RHEL rebuild and reports `ID="ol"`, which
+        // neither catalog knows (#209). Note this only routes its *sysreqs*;
+        // P3M binary selection keys off a separate slug in `downloader.rs`.
+        "rhel" | "ol" => "redhat",
         // The RHEL rebuilds share Rocky's entries — same repos (crb /
         // powertools), same package names.
         "rocky" | "almalinux" => "rockylinux",
@@ -391,6 +409,41 @@ mod tests {
         assert_eq!(
             normalize_distro("sles", "12.3"),
             ("sle".to_string(), "12.3".to_string())
+        );
+    }
+
+    #[test]
+    fn oracle_linux_is_treated_as_a_rhel_rebuild() {
+        // #209, from @gdevenyi's image sweep: `oraclelinux:8` reports
+        // ID="ol", VERSION_ID="8.10" — unknown to both catalogs, so OL
+        // resolved nothing at all.
+        assert_eq!(
+            normalize_distro("ol", "8.10"),
+            ("redhat".to_string(), "8".to_string())
+        );
+        let (distribution, release) = normalize_distro("ol", "8.10");
+        let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
+        assert!(
+            pkgs.iter().any(|p| p == "libxml2-devel"),
+            "expected libxml2-devel for ol-8.10, got {pkgs:?}"
+        );
+    }
+
+    #[test]
+    fn centos_keeps_its_own_identity() {
+        // CentOS has its own rule entries (epel / powertools pre-installs) and
+        // the API rejects it at every release, so it stays local-rules-only
+        // rather than being folded into `redhat` here. Mapping Stream >= 9 to
+        // `redhat` would upgrade it to API answers, but that is a behaviour
+        // change with a 7/8 boundary to argue, not part of this fix.
+        assert_eq!(
+            normalize_distro("centos", "9"),
+            ("centos".to_string(), "9".to_string())
+        );
+        let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", "centos", "9");
+        assert!(
+            pkgs.iter().any(|p| p == "libxml2-devel"),
+            "expected the version-less centos rules to still resolve, got {pkgs:?}"
         );
     }
 

@@ -15,7 +15,11 @@ Pure tracking section — fixes and small features land here between tags.
   API and nothing from the local fallback either. The `(ID, VERSION_ID)` pair
   is now mapped onto the catalogs' vocabulary — `rhel` → `redhat`,
   `rocky`/`almalinux` → `rockylinux`, `sles` → `sle`, openSUSE variants →
-  `opensuse` — with the RHEL family truncated to its major release.
+  `opensuse` — with the RHEL family truncated to its major release. Oracle
+  Linux (`ol`) joins them: it is a RHEL rebuild that neither catalog knew.
+  Coverage still varies behind the mapping — the API serves `rockylinux` 9/10
+  but not 8, and rejects `fedora` and `alpine` outright — so the local rules
+  remain the backstop for those.
 
 ## v0.4.4 (2026-07-31)
 
