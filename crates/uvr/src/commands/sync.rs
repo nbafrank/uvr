@@ -1065,8 +1065,15 @@ async fn install_from_lockfile_with_r(
                                     // Setup first: several rules need a repo
                                     // enabled (EPEL, crb) before their packages
                                     // exist. Entries contain shell operators,
-                                    // so they go through `sh -c`.
-                                    run_rule_commands(&check.pre_install, "setup")?;
+                                    // so they go through `sh -c`. A failed
+                                    // setup step bails: the package install
+                                    // below would fail anyway.
+                                    run_rule_commands(
+                                        &check.pre_install,
+                                        "setup",
+                                        r_binary.parent(),
+                                        true,
+                                    )?;
                                     ui::info(format!("Running: {install_cmd_display}"));
                                     let status = std::process::Command::new(&install_program)
                                         .args(&install_args)
@@ -1082,7 +1089,18 @@ async fn install_from_lockfile_with_r(
                                             status.code().unwrap_or(-1)
                                         );
                                     }
-                                    run_rule_commands(&check.post_install, "post-install")?;
+                                    // Post-install runs after the packages
+                                    // are already installed, so a failure
+                                    // here (e.g. `R CMD javareconf` still
+                                    // missing something) warns and continues
+                                    // instead of failing an otherwise-
+                                    // successful sync.
+                                    run_rule_commands(
+                                        &check.post_install,
+                                        "post-install",
+                                        r_binary.parent(),
+                                        false,
+                                    )?;
                                     ui::success("System dependencies installed.");
                                 } else {
                                     ui::hint(format!("Install with: {install_cmd_display}"));
@@ -1689,8 +1707,7 @@ fn local_check_incomplete(
 /// Run a rule's setup/post-install commands via `sh -c`: entries such as
 /// `rpm -q epel-release || yum install -y https://...` rely on shell
 /// operators, so a direct `Command::new` of the first token would break
-/// them. Bails on the first failing command with the exit code and the
-/// offending command so the user can re-run it manually.
+/// them.
 ///
 /// Escalates with the same `sudo` rule as `pick_sysreqs_installer`: these
 /// commands enable repos and install RPMs/DEBs, which need root just like
@@ -1699,24 +1716,73 @@ fn local_check_incomplete(
 /// already returned `None` (and short-circuited to the `(true, None)`
 /// arm instead) whenever `sudo` would be needed but isn't on PATH — so
 /// `sudo` is guaranteed to exist here whenever it's needed.
+///
+/// `r_bin_dir` is the directory holding the R binary this sync is using
+/// (`r_binary`'s parent). A uvr-managed R install lives under uvr's own
+/// managed directory and is never added to `$PATH`, so a rule command
+/// such as `R CMD javareconf` (rJava) can't find `R` unless we put it
+/// there ourselves — it previously failed with exit 127 on every
+/// uvr-managed R. `sudo`'s default `env_reset` discards the environment
+/// it inherited and rebuilds one from its own policy (`secure_path`,
+/// `env_keep`), so setting `PATH` on the `sudo` child via `Command::env`
+/// would not reliably survive into the command sudo execs. Instead we
+/// run `sudo env PATH=<path> sh -c <cmd>`: `env` is the program sudo
+/// execs (resolved via `secure_path`, so it's found regardless of the
+/// sanitised `PATH`), and setting a variable via `env`'s own argv is not
+/// subject to `env_keep`/`env_delete` filtering the way an inherited
+/// variable would be — it reaches `sh` unconditionally.
+///
+/// `bail_on_failure` is why `pre_install` and `post_install` are no
+/// longer symmetric: a `pre_install` failure (e.g. a repo that didn't
+/// enable) means the package install that follows will fail anyway, so
+/// failing fast with a clear message is correct. `post_install` runs
+/// after the packages are already installed, so a failure there (e.g.
+/// `javareconf` still missing a system lib) must not turn an otherwise-
+/// successful sync into a failed one — it warns, names the command to
+/// re-run, and continues. Do not merge these back into one "just bail"
+/// path; that regresses the exact case this feature exists for (rJava +
+/// `--install-system-deps`).
 #[cfg(target_os = "linux")]
-fn run_rule_commands(cmds: &[String], phase: &str) -> Result<()> {
+fn run_rule_commands(
+    cmds: &[String],
+    phase: &str,
+    r_bin_dir: Option<&std::path::Path>,
+    bail_on_failure: bool,
+) -> Result<()> {
     let needs_sudo = !is_effective_root();
+    let path_env = r_bin_dir.map(|dir| {
+        format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    });
     for cmd in cmds {
         ui::info(format!("Running: {cmd}"));
         let status = if needs_sudo {
-            std::process::Command::new("sudo")
-                .args(["sh", "-c", cmd])
-                .status()
+            let mut command = std::process::Command::new("sudo");
+            if let Some(path) = &path_env {
+                command.args(["env", &format!("PATH={path}")]);
+            }
+            command.args(["sh", "-c", cmd]).status()
         } else {
-            std::process::Command::new("sh").arg("-c").arg(cmd).status()
+            let mut command = std::process::Command::new("sh");
+            command.arg("-c").arg(cmd);
+            if let Some(path) = &path_env {
+                command.env("PATH", path);
+            }
+            command.status()
         }
         .with_context(|| format!("Failed to spawn: {cmd}"))?;
         if !status.success() {
-            anyhow::bail!(
-                "System dependency {phase} failed (exit {}): {cmd}",
-                status.code().unwrap_or(-1)
-            );
+            let code = status.code().unwrap_or(-1);
+            if bail_on_failure {
+                anyhow::bail!("System dependency {phase} failed (exit {code}): {cmd}");
+            }
+            ui::warn(format!(
+                "System dependency {phase} failed (exit {code}): {cmd}"
+            ));
+            ui::hint(format!("Run `{cmd}` manually to finish {phase}."));
         }
     }
     Ok(())
