@@ -1041,6 +1041,26 @@ async fn install_from_lockfile_with_r(
                                 ui::hint("Or run uvr as root in this container.");
                             }
                             (true, Some((install_program, install_args))) => {
+                                // Full disclosure before consent: the prompt
+                                // below only names the package-manager
+                                // command, but answering yes also authorises
+                                // every pre_install/post_install command a
+                                // rule carries (repo enablement, `R CMD
+                                // javareconf`, etc.). Show the whole plan
+                                // first — unconditionally, since
+                                // `confirm_sysreqs_install` proceeds without
+                                // prompting on a non-TTY — so nothing runs
+                                // without having been shown.
+                                if !check.pre_install.is_empty() || !check.post_install.is_empty() {
+                                    ui::info("The following will run:");
+                                    for cmd in &check.pre_install {
+                                        ui::bullet(cmd);
+                                    }
+                                    ui::bullet(&install_cmd_display);
+                                    for cmd in &check.post_install {
+                                        ui::bullet(cmd);
+                                    }
+                                }
                                 if confirm_sysreqs_install(&install_cmd_display)? {
                                     // Setup first: several rules need a repo
                                     // enabled (EPEL, crb) before their packages
@@ -1671,15 +1691,27 @@ fn local_check_incomplete(
 /// operators, so a direct `Command::new` of the first token would break
 /// them. Bails on the first failing command with the exit code and the
 /// offending command so the user can re-run it manually.
+///
+/// Escalates with the same `sudo` rule as `pick_sysreqs_installer`: these
+/// commands enable repos and install RPMs/DEBs, which need root just like
+/// the package install itself. The caller only reaches this function via
+/// the `(true, Some(..))` match arm, where `pick_sysreqs_installer` has
+/// already returned `None` (and short-circuited to the `(true, None)`
+/// arm instead) whenever `sudo` would be needed but isn't on PATH — so
+/// `sudo` is guaranteed to exist here whenever it's needed.
 #[cfg(target_os = "linux")]
 fn run_rule_commands(cmds: &[String], phase: &str) -> Result<()> {
+    let needs_sudo = !is_effective_root();
     for cmd in cmds {
         ui::info(format!("Running: {cmd}"));
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .status()
-            .with_context(|| format!("Failed to spawn: {cmd}"))?;
+        let status = if needs_sudo {
+            std::process::Command::new("sudo")
+                .args(["sh", "-c", cmd])
+                .status()
+        } else {
+            std::process::Command::new("sh").arg("-c").arg(cmd).status()
+        }
+        .with_context(|| format!("Failed to spawn: {cmd}"))?;
         if !status.success() {
             anyhow::bail!(
                 "System dependency {phase} failed (exit {}): {cmd}",
