@@ -1725,8 +1725,6 @@ fn local_check_incomplete(
     check.missing.is_empty() && pkgs_with_sysreqs > 0 && check.local_resolved < pkgs_with_sysreqs
 }
 
-
-
 /// Base `PATH` for rule commands that run as root. Mirrors the default
 /// `secure_path` shipped in `/etc/sudoers` on Debian/Ubuntu, Fedora/RHEL
 /// and Alpine, so a rule command sees the same search path it would have

@@ -391,6 +391,11 @@ fn apply_index(
             // Same rule as the local path: setup commands only matter when
             // something is actually missing — otherwise every sync on a
             // Rocky box would re-enable EPEL.
+            //
+            // Dedup keeps the first occurrence across packages, which assumes
+            // rule commands are order-independent across rules — see the
+            // ordering note on `sysreqs_rules::resolve_local` for the one
+            // known (EOL-Ubuntu-only) case where that assumption bites.
             for cmd in &entry.pre_install {
                 if !out.pre_install.contains(cmd) {
                     out.pre_install.push(cmd.clone());
@@ -921,6 +926,73 @@ mod tests {
         assert!(
             out.pre_install.is_empty(),
             "sf has no packages, so nothing can be missing, so no setup command should be collected"
+        );
+    }
+
+    #[test]
+    fn api_setup_commands_are_deduplicated_across_packages() {
+        // The real rockylinux-9 shape: every geospatial package's index entry
+        // repeats `dnf install -y epel-release`. `apply_index` merges the
+        // entries of all packages in one sync, so without its `contains`
+        // guard the user would be shown — and asked to consent to — the same
+        // root command once per package, and uvr would run it N times.
+        //
+        // Both packages must genuinely be missing something, since setup
+        // commands are only collected when `filter_missing` reports a gap.
+        if which::which("dpkg").is_err()
+            && which::which("rpm").is_err()
+            && which::which("apk").is_err()
+        {
+            // Without dpkg/rpm/apk (macOS/Windows dev boxes) `filter_missing`
+            // reports nothing missing, so the collection path under test
+            // never runs and the assertions below would be vacuous.
+            return;
+        }
+        let entry = |pkg: &str| SysReqIndexEntry {
+            packages: vec![SysReq {
+                package: pkg.to_string(),
+            }],
+            pre_install: vec!["dnf install -y epel-release".to_string()],
+            post_install: vec!["R CMD javareconf".to_string()],
+        };
+        let mut index = HashMap::new();
+        index.insert(
+            "sf".to_string(),
+            entry("uvr-test-absent-gdal-devel-4e1d9f2a"),
+        );
+        index.insert(
+            "terra".to_string(),
+            entry("uvr-test-absent-geos-devel-4e1d9f2a"),
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "sf".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+            PackageSysReqQuery {
+                name: "terra".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        assert_eq!(
+            out.missing.len(),
+            2,
+            "precondition: both packages must report a missing system package, \
+             otherwise no setup command is collected at all"
+        );
+        assert_eq!(
+            out.pre_install,
+            vec!["dnf install -y epel-release".to_string()],
+            "the shared pre_install command must appear exactly once"
+        );
+        assert_eq!(
+            out.post_install,
+            vec!["R CMD javareconf".to_string()],
+            "the shared post_install command must appear exactly once"
         );
     }
 

@@ -89,6 +89,18 @@ pub fn resolve_local(sys_req_text: &str, distribution: &str, version: &str) -> L
                         out.packages.push((*pkg).to_string());
                     }
                 }
+                // ORDERING ASSUMPTION: dedup keeps the first occurrence, so
+                // the merged list is in rule-table order and a command can
+                // end up before or after commands of another rule that the
+                // rule author never saw. That is only sound because rule
+                // commands are assumed order-independent *across* rules
+                // (each enables a repo or refreshes an index for its own
+                // packages). Known, accepted exception: on EOL Ubuntu 16.04,
+                // `sf` + `gert` merge to [software-properties-common,
+                // ppa:ubuntugis/ppa, apt-get update, ppa:cran/libgit2], which
+                // adds the libgit2 PPA *after* the last index refresh. No
+                // supported release is affected; revisit if a rule for a
+                // current distro ever grows an intra-sequence dependency.
                 for cmd in dep.pre_install {
                     if !out.pre_install.iter().any(|x| x == cmd) {
                         out.pre_install.push((*cmd).to_string());
@@ -271,9 +283,9 @@ mod tests {
             .dependencies
             .iter()
             .find(|d| {
-                d.constraints.iter().any(|c| {
-                    c.distribution == Some("rockylinux") && c.versions.contains(&"9")
-                })
+                d.constraints
+                    .iter()
+                    .any(|c| c.distribution == Some("rockylinux") && c.versions.contains(&"9"))
             })
             .expect("rockylinux 9 entry");
         assert!(
@@ -288,11 +300,7 @@ mod tests {
     fn gdal_dep_for<'a>(rule: &'a RuleStatic, distro: &str) -> &'a DependencyStatic {
         rule.dependencies
             .iter()
-            .find(|d| {
-                d.constraints
-                    .iter()
-                    .any(|c| c.distribution == Some(distro))
-            })
+            .find(|d| d.constraints.iter().any(|c| c.distribution == Some(distro)))
             .expect("dependency entry for distro")
     }
 
