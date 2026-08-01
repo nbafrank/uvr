@@ -100,9 +100,29 @@ struct PpmRequirement {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct PpmCommand {
+    #[serde(default)]
+    command: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct PpmRequirementDetail {
     #[serde(default)]
     packages: Vec<String>,
+    #[serde(default)]
+    pre_install: Vec<PpmCommand>,
+    #[serde(default)]
+    post_install: Vec<PpmCommand>,
+}
+
+/// One package's entry in the batched sysreqs index: its distro packages
+/// plus any setup commands the API attaches to them (e.g. enabling EPEL
+/// before a `dnf install`, or `R CMD javareconf` after one).
+#[derive(Debug, Default)]
+struct SysReqIndexEntry {
+    packages: Vec<SysReq>,
+    pre_install: Vec<String>,
+    post_install: Vec<String>,
 }
 
 /// Index a batched (`all=true`) sysreqs response by R package name.
@@ -117,8 +137,8 @@ struct PpmRequirementDetail {
 /// `LookupFailed`; keep that.
 fn parse_sysreqs_index(
     body: &str,
-) -> std::result::Result<HashMap<String, Vec<SysReq>>, serde_json::Error> {
-    let mut index: HashMap<String, Vec<SysReq>> = HashMap::new();
+) -> std::result::Result<HashMap<String, SysReqIndexEntry>, serde_json::Error> {
+    let mut index: HashMap<String, SysReqIndexEntry> = HashMap::new();
     let response: PpmSysreqsResponse = serde_json::from_str(body)?;
     for req in response.requirements {
         if req.name.is_empty() {
@@ -127,7 +147,17 @@ fn parse_sysreqs_index(
         let entry = index.entry(req.name).or_default();
         for pkg in req.requirements.packages {
             if !pkg.is_empty() {
-                entry.push(SysReq { package: pkg });
+                entry.packages.push(SysReq { package: pkg });
+            }
+        }
+        for c in req.requirements.pre_install {
+            if !c.command.is_empty() && !entry.pre_install.contains(&c.command) {
+                entry.pre_install.push(c.command);
+            }
+        }
+        for c in req.requirements.post_install {
+            if !c.command.is_empty() && !entry.post_install.contains(&c.command) {
+                entry.post_install.push(c.command);
             }
         }
     }
@@ -145,7 +175,7 @@ fn is_unsupported_system_body(body: &str) -> bool {
 
 /// Outcome of the one-per-sync batched sysreqs fetch.
 enum SysReqIndex {
-    Supported(HashMap<String, Vec<SysReq>>),
+    Supported(HashMap<String, SysReqIndexEntry>),
     UnsupportedDistro,
     LookupFailed,
 }
@@ -341,7 +371,7 @@ pub async fn check_system_deps(
 fn apply_index(
     out: &mut SysReqsCheck,
     packages: &[PackageSysReqQuery],
-    index: Option<&HashMap<String, Vec<SysReq>>>,
+    index: Option<&HashMap<String, SysReqIndexEntry>>,
     distro: &str,
 ) {
     for pkg in packages {
@@ -351,13 +381,26 @@ fn apply_index(
             check_pkg_local(out, pkg, distro);
             continue;
         };
-        let Some(resolved) = index.get(&pkg.name) else {
+        let Some(entry) = index.get(&pkg.name) else {
             // Absent from the index means the package declares no system
             // requirements, which is the common case.
             continue;
         };
-        let missing = filter_missing(resolved);
+        let missing = filter_missing(&entry.packages);
         if !missing.is_empty() {
+            // Same rule as the local path: setup commands only matter when
+            // something is actually missing — otherwise every sync on a
+            // Rocky box would re-enable EPEL.
+            for cmd in &entry.pre_install {
+                if !out.pre_install.contains(cmd) {
+                    out.pre_install.push(cmd.clone());
+                }
+            }
+            for cmd in &entry.post_install {
+                if !out.post_install.contains(cmd) {
+                    out.post_install.push(cmd.clone());
+                }
+            }
             out.missing
                 .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
         }
@@ -694,9 +737,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![PackageSysReqQuery {
@@ -727,9 +773,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![PackageSysReqQuery {
@@ -758,9 +807,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![
@@ -793,7 +845,11 @@ mod tests {
         ]}"#;
         let index = parse_sysreqs_index(body).unwrap();
         assert_eq!(index.len(), 2);
-        let curl: Vec<&str> = index["curl"].iter().map(|r| r.package.as_str()).collect();
+        let curl: Vec<&str> = index["curl"]
+            .packages
+            .iter()
+            .map(|r| r.package.as_str())
+            .collect();
         assert_eq!(curl, vec!["libcurl4-openssl-dev", "libssl-dev"]);
     }
 
@@ -812,8 +868,60 @@ mod tests {
         let body =
             r#"{"requirements":[{"name":"x","requirements":{"packages":["","libssl-dev"]}}]}"#;
         let index = parse_sysreqs_index(body).unwrap();
-        let x: Vec<&str> = index["x"].iter().map(|r| r.package.as_str()).collect();
+        let x: Vec<&str> = index["x"]
+            .packages
+            .iter()
+            .map(|r| r.package.as_str())
+            .collect();
         assert_eq!(x, vec!["libssl-dev"]);
+    }
+
+    #[test]
+    fn batched_index_carries_setup_commands() {
+        // Shape returned by the API for `sf` on rockylinux 9.
+        let body = r#"{"requirements":[
+            {"name":"sf","requirements":{
+                "packages":["gdal3.4-devel"],
+                "pre_install":[{"command":"dnf install -y epel-release"}]
+            }},
+            {"name":"rJava","requirements":{
+                "packages":["default-jdk"],
+                "post_install":[{"command":"R CMD javareconf"}]
+            }}
+        ]}"#;
+        let index = parse_sysreqs_index(body).unwrap();
+        assert_eq!(index["sf"].pre_install, vec!["dnf install -y epel-release"]);
+        assert_eq!(index["rJava"].post_install, vec!["R CMD javareconf"]);
+        assert!(index["sf"].post_install.is_empty());
+    }
+
+    #[test]
+    fn api_setup_commands_are_collected_only_when_something_is_missing() {
+        // Mirrors the local-path rule: an index entry with pre_install
+        // commands must not leak them into `out.pre_install` unless
+        // `filter_missing` actually reports something missing for that
+        // package — otherwise every sync on a covered distro would
+        // re-enable EPEL regardless of what's already installed.
+        let mut index = HashMap::new();
+        index.insert(
+            "sf".to_string(),
+            SysReqIndexEntry {
+                packages: vec![],
+                pre_install: vec!["dnf install -y epel-release".to_string()],
+                post_install: vec![],
+            },
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "sf".to_string(),
+            system_requirements: None,
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        assert!(
+            out.pre_install.is_empty(),
+            "sf has no packages, so nothing can be missing, so no setup command should be collected"
+        );
     }
 
     #[test]
