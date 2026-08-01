@@ -39,6 +39,17 @@ fn pattern_sets() -> &'static [RegexSet] {
     })
 }
 
+/// What the vendored rules say a package needs on this distribution.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LocalResolution {
+    /// Distro-native package names, deduplicated in stable order.
+    pub packages: Vec<String>,
+    /// Commands to run before installing `packages` (e.g. enabling EPEL).
+    pub pre_install: Vec<String>,
+    /// Commands to run after installing `packages` (e.g. `R CMD javareconf`).
+    pub post_install: Vec<String>,
+}
+
 /// Resolve sysreqs against the local rules.
 ///
 /// - `sys_req_text`: the raw `SystemRequirements` field from DESCRIPTION
@@ -49,14 +60,16 @@ fn pattern_sets() -> &'static [RegexSet] {
 ///   string if unknown; rules with empty `versions` still match.
 ///
 /// Returns the matched distro-native system package names, de-duplicated in
-/// stable order. Empty if no rules match or the distro isn't covered.
-pub fn resolve_local(sys_req_text: &str, distribution: &str, version: &str) -> Vec<String> {
+/// stable order, along with the pre/post install commands the matched rules
+/// carry (also de-duplicated). Empty if no rules match or the distro isn't
+/// covered.
+pub fn resolve_local(sys_req_text: &str, distribution: &str, version: &str) -> LocalResolution {
+    let mut out = LocalResolution::default();
     if sys_req_text.is_empty() {
-        return Vec::new();
+        return out;
     }
 
     let sets = pattern_sets();
-    let mut out: Vec<String> = Vec::new();
 
     for (rule, set) in RULES.iter().zip(sets.iter()) {
         if !set.is_match(sys_req_text) {
@@ -72,8 +85,18 @@ pub fn resolve_local(sys_req_text: &str, distribution: &str, version: &str) -> V
                 .any(|c| constraint_matches(c, distribution, version))
             {
                 for pkg in dep.packages {
-                    if !out.iter().any(|x| x == pkg) {
-                        out.push((*pkg).to_string());
+                    if !out.packages.iter().any(|x| x == pkg) {
+                        out.packages.push((*pkg).to_string());
+                    }
+                }
+                for cmd in dep.pre_install {
+                    if !out.pre_install.iter().any(|x| x == cmd) {
+                        out.pre_install.push((*cmd).to_string());
+                    }
+                }
+                for cmd in dep.post_install {
+                    if !out.post_install.iter().any(|x| x == cmd) {
+                        out.post_install.push((*cmd).to_string());
                     }
                 }
                 break;
@@ -162,7 +185,7 @@ mod tests {
         // Reproduces the scenario from issue #30.
         let pkgs = resolve_local("libxml2 (>= 2.6.3)", "alpine", "3.21");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-dev"),
+            pkgs.packages.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev, got {pkgs:?}"
         );
     }
@@ -173,7 +196,7 @@ mod tests {
         // but rules key on "3.23". The fallback truncates the patch.
         let pkgs = resolve_local("libxml2 (>= 2.6.3)", "alpine", "3.23.4");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-dev"),
+            pkgs.packages.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev for alpine-3.23.4, got {pkgs:?}"
         );
     }
@@ -191,7 +214,7 @@ mod tests {
     fn xml2_on_ubuntu_matches_libxml2_dev() {
         let pkgs = resolve_local("libxml2 (>= 2.6.3)", "ubuntu", "22.04");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-dev"),
+            pkgs.packages.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev, got {pkgs:?}"
         );
     }
@@ -204,26 +227,29 @@ mod tests {
             "alpine",
             "3.21",
         );
-        assert!(!pkgs.is_empty(), "expected at least one package, got empty");
+        assert!(
+            !pkgs.packages.is_empty(),
+            "expected at least one package, got empty"
+        );
     }
 
     #[test]
     fn unknown_distro_returns_empty() {
         let pkgs = resolve_local("libxml2", "haiku", "");
-        assert!(pkgs.is_empty(), "expected empty, got {pkgs:?}");
+        assert!(pkgs.packages.is_empty(), "expected empty, got {pkgs:?}");
     }
 
     #[test]
     fn empty_sys_reqs_returns_empty() {
         let pkgs = resolve_local("", "alpine", "3.21");
-        assert!(pkgs.is_empty());
+        assert!(pkgs.packages.is_empty());
     }
 
     #[test]
     fn dedupes_packages_across_rule_matches() {
         // A string that may match multiple rules shouldn't duplicate packages.
         let pkgs = resolve_local("libxml2 libxml2 libxml2", "alpine", "3.21");
-        let n_libxml = pkgs.iter().filter(|p| *p == "libxml2-dev").count();
+        let n_libxml = pkgs.packages.iter().filter(|p| *p == "libxml2-dev").count();
         assert_eq!(n_libxml, 1);
     }
 
@@ -268,5 +294,53 @@ mod tests {
                     .any(|c| c.distribution == Some(distro))
             })
             .expect("dependency entry for distro")
+    }
+
+    #[test]
+    fn pre_install_is_deduplicated_across_matched_rules() {
+        // sf's SystemRequirements matches gdal, geos and proj. In the VENDORED
+        // snapshot all three carry `dnf install -y dnf-plugins-core` and
+        // `dnf config-manager --set-enabled crb`; only geos.json also carries
+        // `dnf install -y epel-release`.
+        let r = resolve_local(
+            "GDAL (>= 2.0.1), GEOS (>= 3.4.0), PROJ (>= 4.8.0), sqlite3",
+            "rockylinux",
+            "9",
+        );
+        // Assert on a command that ALL THREE matched rules carry, otherwise
+        // the test proves nothing: in the vendored snapshot `epel-release`
+        // appears only in geos.json, so counting it would pass trivially even
+        // with dedup removed. `--set-enabled crb` and `dnf-plugins-core` are
+        // in gdal.json, geos.json and proj.json alike.
+        let crb: Vec<&String> = r
+            .pre_install
+            .iter()
+            .filter(|c| c.contains("--set-enabled crb"))
+            .collect();
+        assert_eq!(crb.len(), 1, "crb enable must be deduplicated across rules");
+        let plugins: Vec<&String> = r
+            .pre_install
+            .iter()
+            .filter(|c| c.contains("dnf-plugins-core"))
+            .collect();
+        assert_eq!(plugins.len(), 1, "dnf-plugins-core must be deduplicated");
+        assert!(r.packages.iter().any(|p| p.starts_with("gdal")));
+    }
+
+    #[test]
+    fn alpine_resolution_carries_no_setup_commands() {
+        let r = resolve_local("GDAL (>= 2.0.1)", "alpine", "3.23.5");
+        assert_eq!(r.packages, vec!["gdal-dev", "gdal-tools"]);
+        assert!(r.pre_install.is_empty());
+        assert!(r.post_install.is_empty());
+    }
+
+    #[test]
+    fn java_carries_a_post_install_command() {
+        let r = resolve_local("Java JDK 8 or higher", "ubuntu", "22.04");
+        assert!(
+            r.post_install.iter().any(|c| c.contains("javareconf")),
+            "rJava needs `R CMD javareconf` after install"
+        );
     }
 }
