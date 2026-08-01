@@ -18,10 +18,19 @@ struct Rule {
 }
 
 #[derive(Debug, Deserialize)]
+struct Command {
+    command: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct Dependency {
     packages: Vec<String>,
     #[serde(default)]
     constraints: Vec<Constraint>,
+    #[serde(default)]
+    pre_install: Vec<Command>,
+    #[serde(default)]
+    post_install: Vec<Command>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +78,7 @@ fn main() {
          // Do not edit by hand.\n\n",
     );
     out.push_str("pub struct ConstraintStatic {\n    pub os: Option<&'static str>,\n    pub distribution: Option<&'static str>,\n    pub versions: &'static [&'static str],\n}\n\n");
-    out.push_str("pub struct DependencyStatic {\n    pub packages: &'static [&'static str],\n    pub constraints: &'static [ConstraintStatic],\n}\n\n");
+    out.push_str("pub struct DependencyStatic {\n    pub packages: &'static [&'static str],\n    pub constraints: &'static [ConstraintStatic],\n    pub pre_install: &'static [&'static str],\n    pub post_install: &'static [&'static str],\n}\n\n");
     out.push_str("pub struct RuleStatic {\n    pub name: &'static str,\n    pub patterns: &'static [&'static str],\n    pub dependencies: &'static [DependencyStatic],\n}\n\n");
     writeln!(out, "pub static RULES: &[RuleStatic] = &[").unwrap();
     for (name, rule) in &rules {
@@ -107,6 +116,16 @@ fn main() {
                 writeln!(out, "] }},").unwrap();
             }
             writeln!(out, "                ],").unwrap();
+            write!(out, "                pre_install: &[").unwrap();
+            for c in &dep.pre_install {
+                write!(out, "{:?}, ", c.command).unwrap();
+            }
+            writeln!(out, "],").unwrap();
+            write!(out, "                post_install: &[").unwrap();
+            for c in &dep.post_install {
+                write!(out, "{:?}, ", c.command).unwrap();
+            }
+            writeln!(out, "],").unwrap();
             writeln!(out, "            }},").unwrap();
         }
         writeln!(out, "        ],").unwrap();

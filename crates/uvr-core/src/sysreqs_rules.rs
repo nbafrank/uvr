@@ -226,4 +226,47 @@ mod tests {
         let n_libxml = pkgs.iter().filter(|p| *p == "libxml2-dev").count();
         assert_eq!(n_libxml, 1);
     }
+
+    #[test]
+    fn gdal_carries_pre_install_on_rockylinux_but_not_alpine() {
+        // rules/gdal.json: the rockylinux 9/10 entry needs the CRB repo
+        // enabled first (dnf-plugins-core + config-manager --set-enabled
+        // crb); the alpine entry needs nothing.
+        // (The vendored gdal.json rockylinux 9/10 entry does not mention
+        // EPEL, unlike the sibling geos.json rule; asserting on "crb" here
+        // matches the actual vendored data.)
+        // Rule names in the generated table are file stems (build.rs uses
+        // `path.file_stem()`), so this is "gdal", not "gdal.json".
+        let gdal = RULES
+            .iter()
+            .find(|r| r.name == "gdal")
+            .expect("gdal rule is vendored");
+        let rocky_dep = gdal
+            .dependencies
+            .iter()
+            .find(|d| {
+                d.constraints.iter().any(|c| {
+                    c.distribution == Some("rockylinux") && c.versions.contains(&"9")
+                })
+            })
+            .expect("rockylinux 9 entry");
+        assert!(
+            rocky_dep.pre_install.iter().any(|c| c.contains("crb")),
+            "rockylinux gdal needs the CRB repo enabled first"
+        );
+
+        let alpine_dep = gdal_dep_for(gdal, "alpine");
+        assert!(alpine_dep.pre_install.is_empty());
+    }
+
+    fn gdal_dep_for<'a>(rule: &'a RuleStatic, distro: &str) -> &'a DependencyStatic {
+        rule.dependencies
+            .iter()
+            .find(|d| {
+                d.constraints
+                    .iter()
+                    .any(|c| c.distribution == Some(distro))
+            })
+            .expect("dependency entry for distro")
+    }
 }
