@@ -1068,12 +1068,13 @@ async fn install_from_lockfile_with_r(
                                     // so they go through `sh -c`. A failed
                                     // setup step bails: the package install
                                     // below would fail anyway.
-                                    run_rule_commands(
-                                        &check.pre_install,
-                                        "setup",
-                                        r_binary.parent(),
-                                        true,
-                                    )?;
+                                    //
+                                    // No R bin dir, hence no `PATH` override
+                                    // at all: nothing in a `pre_install` rule
+                                    // needs R, and leaving `PATH` alone keeps
+                                    // sudo's `secure_path` in force for these
+                                    // root-run shell strings.
+                                    run_rule_commands(&check.pre_install, "setup", None, true)?;
                                     ui::info(format!("Running: {install_cmd_display}"));
                                     let status = std::process::Command::new(&install_program)
                                         .args(&install_args)
@@ -1704,6 +1705,14 @@ fn local_check_incomplete(
 
 
 
+/// Base `PATH` for rule commands that run as root. Mirrors the default
+/// `secure_path` shipped in `/etc/sudoers` on Debian/Ubuntu, Fedora/RHEL
+/// and Alpine, so a rule command sees the same search path it would have
+/// seen under plain `sudo`. Only ever extended with the R bin directory
+/// uvr manages — never with the invoking user's `$PATH`.
+#[cfg(target_os = "linux")]
+const ROOT_SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 /// Run a rule's setup/post-install commands via `sh -c`: entries such as
 /// `rpm -q epel-release || yum install -y https://...` rely on shell
 /// operators, so a direct `Command::new` of the first token would break
@@ -1718,19 +1727,34 @@ fn local_check_incomplete(
 /// `sudo` is guaranteed to exist here whenever it's needed.
 ///
 /// `r_bin_dir` is the directory holding the R binary this sync is using
-/// (`r_binary`'s parent). A uvr-managed R install lives under uvr's own
-/// managed directory and is never added to `$PATH`, so a rule command
-/// such as `R CMD javareconf` (rJava) can't find `R` unless we put it
-/// there ourselves — it previously failed with exit 127 on every
-/// uvr-managed R. `sudo`'s default `env_reset` discards the environment
-/// it inherited and rebuilds one from its own policy (`secure_path`,
-/// `env_keep`), so setting `PATH` on the `sudo` child via `Command::env`
-/// would not reliably survive into the command sudo execs. Instead we
-/// run `sudo env PATH=<path> sh -c <cmd>`: `env` is the program sudo
-/// execs (resolved via `secure_path`, so it's found regardless of the
-/// sanitised `PATH`), and setting a variable via `env`'s own argv is not
-/// subject to `env_keep`/`env_delete` filtering the way an inherited
-/// variable would be — it reaches `sh` unconditionally.
+/// (`r_binary`'s parent). It is `Some` only for the `post_install`
+/// phase: that is the one phase whose commands need R on `PATH` (`R CMD
+/// javareconf` for rJava). A uvr-managed R install lives under uvr's own
+/// managed directory and is never added to `$PATH`, so that command
+/// failed with exit 127 on every uvr-managed R.
+///
+/// SECURITY — the `PATH` seen by a root shell is built from a fixed,
+/// known-safe base ([`ROOT_SAFE_PATH`]), never from the invoking user's
+/// `$PATH`. Inheriting `$PATH` into `sudo env PATH=…` would defeat
+/// `sudo`'s `secure_path`, which exists precisely to stop a root command
+/// resolving binaries out of an unprivileged user's search path: with
+/// conda or `~/.local/bin` active, `rpm -q epel-release || yum install
+/// -y …` would consult the *user's* `rpm`, and some vendored rules pipe
+/// a downloaded script through the user's `curl`, as root. `pre_install`
+/// therefore passes no `PATH` override at all, leaving `sudo`'s own
+/// `secure_path` in force; `post_install` prepends only the R bin
+/// directory, which uvr itself installed, to the safe base.
+///
+/// `sudo`'s default `env_reset` discards the environment it inherited
+/// and rebuilds one from its own policy (`secure_path`, `env_keep`), so
+/// setting `PATH` on the `sudo` child via `Command::env` would not
+/// reliably survive into the command sudo execs. Hence `sudo env
+/// PATH=<path> sh -c <cmd>` when a `PATH` is needed at all: `env` is the
+/// program sudo execs (resolved via `secure_path`, so it's found
+/// regardless of the sanitised `PATH`), and setting a variable via
+/// `env`'s own argv is not subject to `env_keep`/`env_delete` filtering
+/// the way an inherited variable would be — it reaches `sh`
+/// unconditionally.
 ///
 /// `bail_on_failure` is why `pre_install` and `post_install` are no
 /// longer symmetric: a `pre_install` failure (e.g. a repo that didn't
@@ -1750,13 +1774,8 @@ fn run_rule_commands(
     bail_on_failure: bool,
 ) -> Result<()> {
     let needs_sudo = !is_effective_root();
-    let path_env = r_bin_dir.map(|dir| {
-        format!(
-            "{}:{}",
-            dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        )
-    });
+    // Deliberately NOT `std::env::var("PATH")`: see the security note above.
+    let path_env = r_bin_dir.map(|dir| format!("{}:{ROOT_SAFE_PATH}", dir.display()));
     for cmd in cmds {
         ui::info(format!("Running: {cmd}"));
         let status = if needs_sudo {
