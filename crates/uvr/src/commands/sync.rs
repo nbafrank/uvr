@@ -1037,7 +1037,19 @@ async fn install_from_lockfile_with_r(
                                 ui::warn(
                                     "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
                                 );
+                                // Same shape as the `(false, _)` arm below:
+                                // the package-manager command alone is not a
+                                // working recipe when a rule needs a repo
+                                // enabled first (EPEL, crb), so print the
+                                // setup commands here too rather than handing
+                                // the user a line that fails when pasted.
+                                for cmd in &check.pre_install {
+                                    ui::hint(format!("First run: {cmd}"));
+                                }
                                 ui::hint(format!("Install manually: {install_cmd_display}"));
+                                for cmd in &check.post_install {
+                                    ui::hint(format!("Then run: {cmd}"));
+                                }
                                 ui::hint("Or run uvr as root in this container.");
                             }
                             (true, Some((install_program, install_args))) => {
@@ -1051,14 +1063,21 @@ async fn install_from_lockfile_with_r(
                                 // `confirm_sysreqs_install` proceeds without
                                 // prompting on a non-TTY — so nothing runs
                                 // without having been shown.
+                                //
+                                // On stderr, deliberately: the confirmation
+                                // prompt is written to stderr, so a stdout
+                                // disclosure would vanish under
+                                // `uvr sync --install-system-deps > build.log`
+                                // and leave the user consenting to a prompt
+                                // that names only the package-manager command.
                                 if !check.pre_install.is_empty() || !check.post_install.is_empty() {
-                                    ui::info("The following will run:");
+                                    ui::info_err("The following will run:");
                                     for cmd in &check.pre_install {
-                                        ui::bullet(cmd);
+                                        ui::bullet_err(cmd);
                                     }
-                                    ui::bullet(&install_cmd_display);
+                                    ui::bullet_err(&install_cmd_display);
                                     for cmd in &check.post_install {
-                                        ui::bullet(cmd);
+                                        ui::bullet_err(cmd);
                                     }
                                 }
                                 if confirm_sysreqs_install(&install_cmd_display)? {
@@ -1075,7 +1094,10 @@ async fn install_from_lockfile_with_r(
                                     // sudo's `secure_path` in force for these
                                     // root-run shell strings.
                                     run_rule_commands(&check.pre_install, "setup", None, true)?;
-                                    ui::info(format!("Running: {install_cmd_display}"));
+                                    // stderr, like the disclosure above: this
+                                    // is the audit trail for what was just
+                                    // consented to, not command output.
+                                    ui::info_err(format!("Running: {install_cmd_display}"));
                                     let status = std::process::Command::new(&install_program)
                                         .args(&install_args)
                                         .status()
@@ -1777,7 +1799,9 @@ fn run_rule_commands(
     // Deliberately NOT `std::env::var("PATH")`: see the security note above.
     let path_env = r_bin_dir.map(|dir| format!("{}:{ROOT_SAFE_PATH}", dir.display()));
     for cmd in cmds {
-        ui::info(format!("Running: {cmd}"));
+        // stderr: this is the audit line for a privileged command, and it
+        // belongs with the disclosure and the prompt that preceded it.
+        ui::info_err(format!("Running: {cmd}"));
         let status = if needs_sudo {
             let mut command = std::process::Command::new("sudo");
             if let Some(path) = &path_env {
