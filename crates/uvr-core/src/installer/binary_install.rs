@@ -1111,7 +1111,7 @@ mod tests {
         let pkgs = crate::sysreqs_rules::resolve_local(&sys_reqs, "alpine", "3.24.1");
         for expected in ["gdal-dev", "geos-dev", "proj-dev", "sqlite-dev"] {
             assert!(
-                pkgs.iter().any(|p| p == expected),
+                pkgs.packages.iter().any(|p| p == expected),
                 "expected {expected}, got {pkgs:?}"
             );
         }
