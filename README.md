@@ -10,9 +10,21 @@ A fast R package and project manager, written in Rust.
 
 `uvr` brings uv-style project management to R: a `uvr.toml` manifest, a reproducible `uvr.lock` lockfile, and a per-project isolated library. Packages install from pre-built [P3M](https://packagemanager.posit.co/) binaries by default — no compilation, no waiting — with automatic fallback to CRAN source. R versions are managed per-project with no `sudo` required.
 
-```sh
-$ curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh
+1.  Linux / MacOS
 
+    ``` sh
+    curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh
+    ```
+
+2.  Windows
+
+    ``` powershell
+    irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex
+    ```
+
+Here's a following demo of `uvr`: 
+
+``` sh
 $ uvr init my-analysis
 $ uvr add ggplot2 dplyr tidymodels
 $ uvr sync          # installs from lockfile, idempotent

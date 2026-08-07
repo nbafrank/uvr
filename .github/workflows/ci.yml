@@ -349,6 +349,38 @@ jobs:
       - name: Check the table still agrees with Posit's platform catalog
         run: cargo test -p uvr-core --test p3m_status_live -- --ignored --nocapture
 
+  # install.ps1 has no coverage anywhere above: the windows-x86_64 matrix
+  # entry in `test` builds uvr with cargo directly and never touches the
+  # installer. Run it for real, against the latest published release, the
+  # same way a user invoking `irm ... | iex` would. Catches asset-name
+  # drift, a changed zip layout, and PATH-writing regressions — the three
+  # things gdevenyi flagged as most likely to break silently between
+  # releases (PR #224).
+  test-install-script:
+    name: Test install.ps1 (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install.ps1 into a temp dir
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "uvr-install-smoke"
+          $env:UVR_INSTALL_DIR = $installDir
+          .\install.ps1
+          & (Join-Path $installDir "uvr.exe") --version
+
+      - name: Verify the install dir was added to the user PATH
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "uvr-install-smoke"
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if ($userPath -notlike "*$installDir*") {
+            Write-Error "install.ps1 did not add $installDir to the user PATH"
+            exit 1
+          }
+          Write-Host "OK: $installDir present in user PATH"
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
