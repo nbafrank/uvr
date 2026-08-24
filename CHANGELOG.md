@@ -7,6 +7,10 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`uvr scan` now detects `box::use()` imports.** Package declarations
+  (`box::use(dplyr[filter])`, `box::use(gg = ggplot2)`) are discovered;
+  local module paths (`box::use(./mod)`, `box::use(prefix/mod)`) are
+  ignored.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use
