@@ -1519,3 +1519,119 @@ fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
         .stdout(predicate::str::contains("RAN"))
         .stderr(predicate::str::contains("does not honour yet"));
 }
+
+// ─── IDE-mode scaffolding ─────────────────────────────────────────
+
+#[test]
+fn test_init_default_writes_rprofile_but_no_ide_config() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "plainproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_ide_positron_writes_vscode_settings() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "posproj", "--ide=positron"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".vscode").join("settings.json").exists());
+    let settings = fs::read_to_string(dir.path().join(".vscode").join("settings.json")).unwrap();
+    assert!(settings.contains("positron.r.interpreters.default"));
+}
+
+#[test]
+fn test_init_ide_rstudio_writes_rprofile_but_no_vscode() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "rstudioproj", "--ide=rstudio"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_positron_env_writes_vscode_settings() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "envposproj"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".vscode").join("settings.json").exists());
+}
+
+#[test]
+fn test_init_rstudio_env_writes_rprofile_but_no_vscode() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "envrstudioproj"])
+        .env("RSTUDIO", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_unattended_overrides_positron_env() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "unattendedproj", "--unattended"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_no_ide_overrides_positron_env() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "noideproj", "--no-ide"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_bare_writes_only_manifest_and_library() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "bareproj", "--bare"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join("uvr.toml").exists());
+    assert!(dir.path().join(".uvr").join("library").exists());
+    assert!(!dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".gitignore").exists());
+    assert!(!dir.path().join(".uvr").join("activate").exists());
+    assert!(!dir.path().join(".vscode").exists());
+    let manifest = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    assert!(manifest.contains("bare = true"));
+}

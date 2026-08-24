@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod ide;
 mod ui;
 
 use anyhow::Result;
@@ -60,6 +61,20 @@ async fn run() -> Result<()> {
         return Ok(());
     };
 
+    // Resolve IDE mode once, then thread it into the commands that write
+    // IDE config (`init`, `sync`, `import`). `--unattended` implies both
+    // `--no-ide` and `--no-companion`; the companion half is expressed as
+    // the env var so the deep install path can read it (same pattern as
+    // `UVR_NO_BINARY`).
+    let ide = ide::Ide::resolve(
+        cli.ide.map(ide::IdeArg::into_ide),
+        cli.no_ide,
+        cli.unattended,
+    );
+    if cli.no_companion || cli.unattended {
+        std::env::set_var("UVR_NO_COMPANION", "1");
+    }
+
     // #63/#64 phase 1: warn loudly if the project pin doesn't match the active R.
     // Only for library-affecting commands — `init`, `r ...`, `cache`, etc. don't
     // touch the library and the warning would be noise there.
@@ -81,7 +96,7 @@ async fn run() -> Result<()> {
 
     match command {
         Commands::Init(args) => {
-            commands::init::run(args.name, args.here, args.r_version)?;
+            commands::init::run(args.name, args.here, args.r_version, ide, args.bare)?;
         }
         Commands::Add(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;
@@ -125,7 +140,7 @@ async fn run() -> Result<()> {
             if args.no_binary {
                 std::env::set_var("UVR_NO_BINARY", "1");
             }
-            commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout).await?;
+            commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout, ide).await?;
         }
         Commands::Run(args) => {
             commands::run::run(args.script, args.r_version, args.with_packages, args.args).await?;
@@ -149,7 +164,8 @@ async fn run() -> Result<()> {
             // #71: --input/-i is an alternative spelling of the positional path.
             // clap's `conflicts_with` already rejects passing both.
             let path = args.input.or(args.path);
-            commands::import::run(path, args.name, args.lock, args.jobs, args.clean_renv).await?;
+            commands::import::run(path, args.name, args.lock, args.jobs, args.clean_renv, ide)
+                .await?;
         }
         Commands::Scan(args) => {
             commands::scan::run(args.all)?;

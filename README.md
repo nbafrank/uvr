@@ -247,12 +247,17 @@ or to the repository root.
 | Command | Description |
 |---------|-------------|
 | `uvr init [name]` | Create `uvr.toml` and `.uvr/library/` in the current directory |
+| `uvr init --ide=positron` | Also write `.vscode/settings.json` for Positron |
+| `uvr init --no-ide` | Skip IDE config even when an IDE is detected |
+| `uvr init --bare` | Create `uvr.toml` + `.uvr/library/` only (use via `uvr run`) |
 | `uvr add <pkg...>` | Add packages, update manifest + lockfile, install |
 | `uvr remove <pkg...>` | Remove packages from manifest and re-lock |
 | `uvr sync` | Install all packages from the lockfile |
 | `uvr sync -v` | Show the resolved install plan first — each package's source and whether it installs from binary or source |
 | `uvr sync --frozen` | Like `sync`, but fail if the lockfile is stale (CI mode) |
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
+| `uvr sync --no-companion` | Skip the uvr companion R package install |
+| `uvr sync --unattended` | CI mode: `--no-ide` + `--no-companion` |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
@@ -279,6 +284,22 @@ or to the repository root.
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+
+---
+
+### IDE integration and CI mode
+
+`uvr init` / `uvr sync` always write a `.Rprofile` block so any R session
+started from the project root links `.uvr/library/`. IDE-specific config is
+opt-in: uvr detects Positron (`POSITRON=1`) and RStudio (`RSTUDIO=1`) from
+their integrated terminals and, for Positron, writes
+`.vscode/settings.json`. Override detection with `--ide=positron|rstudio` or
+`--no-ide`.
+
+For CI/automation, `--unattended` (or `UVR_UNATTENDED=1`) disables IDE config
+and the companion R package in one switch. `--no-companion`
+(`UVR_NO_COMPANION=1`) skips just the companion. `uvr init --bare` creates a
+project with only `uvr.toml` and `.uvr/library/` — reach it through `uvr run`.
 
 ---
 

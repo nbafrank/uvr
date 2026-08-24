@@ -7,6 +7,17 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **IDE config is now opt-in; CI mode is explicit** (#176, #206).
+  `uvr init`/`sync`/`import` no longer assume an RStudio/Positron workflow:
+  the `.Rprofile` library wiring is still always written, but
+  `.vscode/settings.json` and IDE-oriented hints are only produced when an
+  IDE is detected (`POSITRON=1` / `RSTUDIO=1`) or forced with
+  `--ide=positron|rstudio`. `--no-ide` suppresses them, `--no-companion`
+  (`UVR_NO_COMPANION=1`) skips the injected companion R package, and
+  `--unattended` (`UVR_UNATTENDED=1`) is shorthand for `--no-ide
+  --no-companion`. `uvr init --bare` creates a bare project — `uvr.toml` and
+  `.uvr/library/` only, reachable through `uvr run` — and the choice persists
+  in `[project] bare = true`.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use

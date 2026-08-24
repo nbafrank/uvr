@@ -6,6 +6,7 @@ use clap_complete::Shell;
 
 use crate::commands::activate::ActivateShell;
 use crate::commands::export::ExportFormat;
+use crate::ide::IdeArg;
 
 /// Match the runtime palette: cyan accents for headers/usage, magenta for
 /// literal flag names, yellow for placeholders. Keeps `--help` visually of
@@ -33,6 +34,22 @@ pub struct Cli {
     /// Suppress all output except errors
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
+
+    /// Assume a specific IDE for config generation (positron | rstudio)
+    #[arg(long, global = true, value_enum, value_name = "IDE")]
+    pub ide: Option<IdeArg>,
+
+    /// Disable IDE-specific config files and messages
+    #[arg(long, global = true, conflicts_with = "ide")]
+    pub no_ide: bool,
+
+    /// Skip the uvr companion R package installation
+    #[arg(long, global = true)]
+    pub no_companion: bool,
+
+    /// CI/automation mode: shorthand for `--no-ide --no-companion`
+    #[arg(long, global = true, conflicts_with = "ide")]
+    pub unattended: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -116,6 +133,12 @@ pub struct InitArgs {
     /// R version constraint, e.g. ">=4.3.0"
     #[arg(long = "r-version", value_name = "CONSTRAINT")]
     pub r_version: Option<String>,
+
+    /// Bare project: `uvr.toml` + `.uvr/library/` only. No `.Rprofile`,
+    /// `.gitignore`, activation shims, IDE config, or companion package —
+    /// the library is reachable through `uvr run` only.
+    #[arg(long)]
+    pub bare: bool,
 }
 
 // ────────────────────────────────────────────────────────────

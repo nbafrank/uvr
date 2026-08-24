@@ -54,6 +54,13 @@ pub struct ProjectMeta {
 
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Created with `uvr init --bare`: the project ships only `uvr.toml`
+    /// and `.uvr/library/`. `.Rprofile`, `.gitignore`, activation shims,
+    /// IDE config, and the companion package are all skipped, and the
+    /// library is reachable through `uvr run` only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bare: bool,
 }
 
 /// Either a bare version string (`">=3.0.0"`, `"*"`) or a detailed table.
@@ -239,6 +246,7 @@ impl Manifest {
                 r_version,
                 bioc_version: None,
                 description: None,
+                bare: false,
             },
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
@@ -369,6 +377,7 @@ impl Manifest {
                 r_version,
                 bioc_version: None,
                 description: fields.get("Title").cloned(),
+                bare: false,
             },
             dependencies,
             dev_dependencies,
