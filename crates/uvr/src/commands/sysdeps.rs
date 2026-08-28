@@ -18,11 +18,14 @@ use anyhow::{Context, Result};
 use uvr_core::project::Project;
 
 use crate::ui;
-use crate::ui::palette;
 
 /// Exit code when system dependencies are missing, so CI can gate on it
 /// without parsing output. Mirrors `sync --frozen`'s "the check failed"
 /// contract rather than inventing a second one.
+///
+/// Linux-gated with everything else it belongs to: `clippy -D warnings`
+/// counts an unreachable constant as dead code on macOS and Windows.
+#[cfg(target_os = "linux")]
 const MISSING_DEPS_EXIT: i32 = 1;
 
 pub async fn run(all: bool) -> Result<()> {
@@ -61,6 +64,8 @@ async fn report(_lockfile: &uvr_core::lockfile::Lockfile, _all: bool) -> Result<
 async fn report(lockfile: &uvr_core::lockfile::Lockfile, all: bool) -> Result<()> {
     use std::collections::BTreeSet;
     use uvr_core::sysreqs;
+
+    use crate::ui::palette;
 
     let Some(distro) = sysreqs::detect_linux_distro() else {
         ui::warn("Could not identify this Linux distribution from /etc/os-release.");
