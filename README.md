@@ -375,6 +375,22 @@ or per-shell, which overrides the manifest either way:
 export UVR_ACTIVATE_PROMPT=1   # or 0 to opt out of a project that opts in
 ```
 
+### The user's `.Renviron`
+
+`uvr run` and a sourced activation both shadow `~/.Renviron`, so a
+`~/.Renviron` that sets `R_LIBS_USER` cannot silently replace the project
+library. That also hides everything else the file holds — API tokens,
+`GITHUB_PAT`, proxy settings, locale. To read it again:
+
+```sh
+export UVR_USER_ENVIRON=1
+```
+
+The site-wide `Renviron.site` stays shadowed either way. With the opt-out on,
+a `~/.Renviron` that sets `R_LIBS_USER` does override the project library —
+that is the trade the switch makes. `R CMD INSTALL` has always read the user
+file, so `uvr add` and `uvr sync` are unaffected by this setting.
+
 ---
 
 ## Shell completions

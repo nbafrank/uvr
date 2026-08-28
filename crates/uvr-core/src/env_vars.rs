@@ -90,6 +90,29 @@ pub fn library() -> Option<PathBuf> {
     read_env_var("UVR_LIBRARY").map(PathBuf::from)
 }
 
+/// UVR_USER_ENVIRON
+///
+/// Opt back in to the user's `~/.Renviron` (and a `./.Renviron` beside the
+/// script) inside `uvr run` and a sourced `uvr activate`.
+///
+/// uvr blanks `R_ENVIRON_USER` by default so a `~/.Renviron` setting
+/// `R_LIBS_USER` cannot silently override the project library. That defence
+/// is aimed at one variable but costs the whole file, so API tokens,
+/// `GITHUB_PAT`, proxy settings, TZ and locale all disappear too (#260) —
+/// while `R CMD INSTALL` deliberately keeps them
+/// (`installer/r_cmd_install.rs`). Setting this restores the file for the
+/// run/activate side, and accepts that a `~/.Renviron` which sets
+/// `R_LIBS_USER` will then win over the project library.
+///
+/// The *site* file (`R_ENVIRON`) stays blanked either way: it is machine
+/// configuration rather than the user's, and it is not what #260 asks for.
+pub fn user_environ() -> bool {
+    matches!(
+        read_env_var("UVR_USER_ENVIRON").as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
+}
+
 /// UVR_PACKAGES_DIR
 ///
 /// Gets the directory where uvr stores cached installed-package entries.

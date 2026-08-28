@@ -7,6 +7,13 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`UVR_USER_ENVIRON=1` restores the user's `~/.Renviron` inside `uvr run`
+  and `uvr activate`** (#260). uvr blanks `R_ENVIRON_USER` so a `~/.Renviron`
+  setting `R_LIBS_USER` cannot silently override the project library, but that
+  defence is aimed at one variable and costs the whole file — API tokens,
+  `GITHUB_PAT`, proxy settings, TZ and locale went with it, while
+  `R CMD INSTALL` kept them. The opt-out is off by default and leaves the
+  *site* Renviron blanked either way.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use

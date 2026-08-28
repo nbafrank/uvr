@@ -126,8 +126,13 @@ pub async fn run(
         cmd.env(key, value);
     }
     // Belt and braces alongside the blank `R_ENVIRON`: a process flag is
-    // available here, but not to a sourced activation script.
-    cmd.arg("--no-environ");
+    // available here, but not to a sourced activation script. Skipped under
+    // `UVR_USER_ENVIRON=1`, which exists to let `~/.Renviron` through (#260)
+    // — the flag suppresses every environment file, so leaving it on would
+    // undo the opt-out for `uvr run` while activation honoured it.
+    if !uvr_core::env_vars::user_environ() {
+        cmd.arg("--no-environ");
+    }
 
     if script_mode {
         // Set here rather than in `REnv::vars()` for the same reason as
