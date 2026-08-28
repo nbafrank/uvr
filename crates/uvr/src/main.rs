@@ -154,6 +154,9 @@ async fn run() -> Result<()> {
         Commands::Scan(args) => {
             commands::scan::run(args.all)?;
         }
+        Commands::Sysdeps(args) => {
+            commands::sysdeps::run(args.all).await?;
+        }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
         }

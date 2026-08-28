@@ -1519,3 +1519,34 @@ fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
         .stdout(predicate::str::contains("RAN"))
         .stderr(predicate::str::contains("does not honour yet"));
 }
+
+// ─── uvr sysdeps (#256) ───────────────────────────────────────────
+
+#[test]
+fn test_sysdeps_without_a_lockfile_says_to_run_lock() {
+    // The command reads the lockfile on purpose: system dependencies come
+    // from resolved DESCRIPTIONs, so answering from uvr.toml alone would
+    // mean a full resolution — the cost `uvr sysdeps` exists to avoid.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "sdproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    uvr_cmd()
+        .arg("sysdeps")
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uvr lock"));
+}
+
+#[test]
+fn test_sysdeps_outside_a_project_fails() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .arg("sysdeps")
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+}
