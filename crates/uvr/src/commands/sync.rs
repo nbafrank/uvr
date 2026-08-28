@@ -1400,8 +1400,9 @@ async fn install_from_lockfile_with_r(
 ///
 /// Guards: only real package dirs (with a DESCRIPTION) are candidates; the
 /// uvr companion package and non-package files (e.g. the `.uvr-r-version`
-/// sentinel) are skipped. Linux libraries hold symlinks into the global
-/// package cache — those are unlinked, never traversed. Callers gate this
+/// sentinel) are skipped. A library written before #248 can still hold a
+/// directory symlink into the global package cache — those are unlinked,
+/// never traversed. Callers gate this
 /// to the project's own `.uvr/library/` (never `--library`/`UVR_LIBRARY`
 /// targets, which may be shared) and to explicit `uvr sync` runs.
 ///

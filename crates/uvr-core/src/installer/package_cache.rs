@@ -9,15 +9,19 @@
 //! - **macOS (APFS)**: `clonefile()` — an instant copy-on-write operation. The
 //!   project library sees a normal directory; actual data is shared with the
 //!   cache until one side diverges.
-//! - **Linux**: a whole-directory symlink from the project library to the cached
-//!   tree. This dedupes disk usage across projects (issue #24 follow-up) and
-//!   matches renv's behavior. R resolves library paths through symlinks
-//!   transparently.
-//! - **Windows**: per-file hardlinks (#247). Symlinks there need admin
-//!   rights, but hardlinks do not — so the library gets ordinary-looking
-//!   files that share storage with the cache, instead of the full byte copy
-//!   this path used to pay on every warm sync. Falls back to a copy when
-//!   the cache and project sit on different volumes.
+//! - **Linux and Windows**: per-file hardlinks (#247, #248). The library gets
+//!   ordinary-looking files that share storage with the cache. Falls back to
+//!   a copy when the cache and project sit on different volumes, since a
+//!   hardlink cannot cross one.
+//!
+//! Linux attached a whole-directory symlink until #248. That deduped just as
+//! well, but it cost two things hardlinks do not. `uvr cache clean` left every
+//! existing project library pointing at deleted targets, because the link died
+//! with the target; a hardlinked file outlives the cache entry, so cleaning
+//! frees only what nothing else references. And anything that resolves
+//! symlinks — `.libPaths()`, `find.package()`, tooling walking the library —
+//! reported packages as living in the cache rather than in the project, which
+//! is the class of confusion renv spent years unwinding.
 
 use std::path::{Path, PathBuf};
 
@@ -275,36 +279,17 @@ pub fn clone_to_library(
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        // Symlink instead of copying: cache is the source of truth, each
-        // project library holds one cheap link per package. If `uvr cache
-        // clean` later removes the target, the next `uvr sync` reseeds the
-        // cache and rewrites the link.
-        match std::os::unix::fs::symlink(cached_pkg_dir, &dest) {
-            Ok(()) => {
-                debug!(
-                    "symlinked {} → {}",
-                    dest.display(),
-                    cached_pkg_dir.display()
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                debug!("symlink failed ({}), falling back to copy", e);
-                // Fall through
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // Hardlink each file rather than copying its bytes (#247). Windows
-        // had been paying a full recursive copy on every warm cache hit
-        // while macOS cloned and Linux symlinked. Hardlinks need no
-        // privileges on NTFS (unlike symlinks, the reason this path was a
-        // copy originally), but they do require one volume — a cache and
-        // project on different drives lands in the fallback below.
+        // Hardlink each file rather than copying its bytes (#247 for
+        // Windows, #248 for Linux). Hardlinks need no privileges on NTFS
+        // (unlike symlinks, the reason the Windows path was a copy
+        // originally), but they do require one volume — a cache and project
+        // on different drives or mounts lands in the fallback below.
+        //
+        // `remove_entry` above already cleared whatever was here, so a
+        // library still holding a pre-#248 directory symlink migrates on its
+        // next sync with no separate step.
         match hardlink_dir_recursive(cached_pkg_dir, &dest) {
             Ok(()) => {
                 debug!(
@@ -511,9 +496,8 @@ fn clone_dir_macos(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Returns `Err` on the first failure so the caller can fall back to a
 /// plain copy; partial output at `dst` is the caller's to clean up.
 // Compiled on every platform so the tree-walking logic stays under test
-// everywhere (Windows gets the least local testing of any target), but the
-// only non-test caller is the Windows arm of `clone_to_library`.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// everywhere, but macOS clones instead and has no non-test caller.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) fn hardlink_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1149,7 +1133,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn clone_to_library_uses_symlink_on_linux() {
+    fn clone_to_library_hardlinks_on_linux() {
+        use std::os::unix::fs::MetadataExt;
+
         let tmp = TempDir::new().unwrap();
         let cache_pkg = tmp.path().join("cache").join("ggplot2");
         std::fs::create_dir_all(&cache_pkg).unwrap();
@@ -1160,20 +1146,56 @@ mod tests {
 
         clone_to_library(&cache_pkg, &library, "ggplot2").unwrap();
 
+        // A real directory, not a link: this is what makes `.libPaths()` and
+        // `find.package()` report the project library rather than the cache.
         let dest = library.join("ggplot2");
         let md = std::fs::symlink_metadata(&dest).unwrap();
         assert!(
-            md.file_type().is_symlink(),
-            "expected symlink, got {:?}",
+            !md.file_type().is_symlink(),
+            "expected a real directory, got {:?}",
             md.file_type()
         );
-        // Package is readable through the link.
         assert!(dest.join("DESCRIPTION").exists());
+
+        // Storage is still shared, so the attach stays near-instant and the
+        // dedup across projects is unchanged.
+        let cached = std::fs::metadata(cache_pkg.join("DESCRIPTION")).unwrap();
+        let attached = std::fs::metadata(dest.join("DESCRIPTION")).unwrap();
+        assert_eq!(
+            cached.ino(),
+            attached.ino(),
+            "attach should share the inode"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn clone_to_library_replaces_real_dir_with_symlink() {
+    fn cache_clean_leaves_a_hardlinked_library_usable() {
+        // The reason for #248. Under the old directory-symlink attach this
+        // library went dangling the moment the cache entry was removed.
+        let tmp = TempDir::new().unwrap();
+        let cache_pkg = tmp.path().join("cache").join("rlang");
+        std::fs::create_dir_all(cache_pkg.join("R")).unwrap();
+        std::fs::write(cache_pkg.join("DESCRIPTION"), "Package: rlang\n").unwrap();
+        std::fs::write(cache_pkg.join("R/rlang.rdb"), b"payload").unwrap();
+
+        let library = tmp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        clone_to_library(&cache_pkg, &library, "rlang").unwrap();
+
+        std::fs::remove_dir_all(tmp.path().join("cache")).unwrap();
+
+        let dest = library.join("rlang");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("DESCRIPTION")).unwrap(),
+            "Package: rlang\n"
+        );
+        assert_eq!(std::fs::read(dest.join("R/rlang.rdb")).unwrap(), b"payload");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_to_library_replaces_a_stale_real_dir() {
         // Simulates upgrading from an old uvr that recursive-copied: library
         // already holds a real directory. clone_to_library must replace it.
         let tmp = TempDir::new().unwrap();
@@ -1188,15 +1210,15 @@ mod tests {
 
         clone_to_library(&cache_pkg, &library, "xml2").unwrap();
 
-        assert!(old.symlink_metadata().unwrap().file_type().is_symlink());
-        // Now reads from the cache.
+        // Now carries the cached content, and the stale tree is gone.
         let desc = std::fs::read_to_string(old.join("DESCRIPTION")).unwrap();
         assert!(desc.contains("xml2\n") && !desc.contains("stale"));
+        assert!(!old.join("R").exists(), "stale subtree must not survive");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn clone_to_library_overwrites_existing_symlink() {
+    fn clone_to_library_migrates_a_pre_248_symlink() {
         let tmp = TempDir::new().unwrap();
         let cache_a = tmp.path().join("cache-a").join("dplyr");
         let cache_b = tmp.path().join("cache-b").join("dplyr");
@@ -1208,12 +1230,14 @@ mod tests {
         let library = tmp.path().join("library");
         std::fs::create_dir_all(&library).unwrap();
 
-        clone_to_library(&cache_a, &library, "dplyr").unwrap();
+        // Stand in for a library written by a pre-#248 uvr.
+        let dest = library.join("dplyr");
+        std::os::unix::fs::symlink(&cache_a, &dest).unwrap();
+
         clone_to_library(&cache_b, &library, "dplyr").unwrap();
 
-        let link = library.join("dplyr");
-        let target = std::fs::read_link(&link).unwrap();
-        assert_eq!(target, cache_b);
+        assert!(!dest.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(dest.join("DESCRIPTION").exists());
     }
 
     /// The hardlink attach path is Windows-only in `clone_to_library`, but
