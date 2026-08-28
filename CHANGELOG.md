@@ -7,6 +7,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Linux attaches cached packages with per-file hardlinks instead of a
+  directory symlink** (#248). `uvr cache clean` no longer leaves every
+  existing project library pointing at deleted targets — a hardlinked file
+  outlives the cache entry, so cleaning frees only what nothing else
+  references. `.libPaths()`, `find.package()` and anything else walking the
+  library now report packages as living in the project rather than in the
+  cache. Dedup and attach speed are unchanged; a cache and project on
+  different mounts fall back to a copy, as they already did on Windows.
+  Existing symlinked libraries migrate one package at a time on their next
+  sync, with no separate step.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use
