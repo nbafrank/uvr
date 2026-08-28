@@ -21,7 +21,19 @@ use crate::ui::palette;
 /// `--all` reports every package referenced regardless of manifest
 /// presence; without it we only report the missing set, which is the
 /// signal for "you need to `uvr add` these".
-pub fn run(all: bool) -> Result<()> {
+///
+/// `--add` stops making the user retype that signal and hands the missing
+/// set straight to `uvr add` (#78, #251). Migrating an unmanaged project is
+/// the case both issues describe, and the scanner already knew the answer —
+/// what was missing was a writer.
+///
+/// It composes with `add` rather than writing the manifest itself, so
+/// resolution, the manifest write, the lockfile update, the install and the
+/// rollback-on-failure are all one implementation. That does mean `add`'s
+/// all-or-nothing semantics apply: one name that will not resolve fails the
+/// batch. See the PR discussion on #78 for why a tolerant mode needs
+/// resolver support and is not this change.
+pub async fn run(all: bool, add: bool) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     let manifest_deps: BTreeSet<String> = project
         .manifest
@@ -122,18 +134,28 @@ pub fn run(all: bool) -> Result<()> {
             palette::dim(&extra)
         );
     }
+    // `--all` is a report of everything, including what is already declared,
+    // so there is nothing to add from it. Only the missing set is actionable.
+    let actionable: Vec<String> = missing.keys().map(|n| (*n).to_string()).collect();
+
+    if add {
+        if actionable.is_empty() {
+            return Ok(());
+        }
+        println!();
+        // Defaults chosen to match a plain `uvr add <names>`: the jobs
+        // default from `AddArgs`, no dev/bioc/source (a scan cannot tell),
+        // and lock + install left on, since populating a manifest without
+        // resolving it is not the migration anyone asked for.
+        return crate::commands::add::run(actionable, false, false, None, 50, None, false, false)
+            .await;
+    }
+
     if !all && !to_report.is_empty() {
         println!();
         ui::hint(format!(
             "Run {} to add them.",
-            palette::bold(&format!(
-                "uvr add {}",
-                to_report
-                    .iter()
-                    .map(|(n, _)| *n)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )),
+            palette::bold(&format!("uvr add {}", actionable.join(" "))),
         ));
     }
 

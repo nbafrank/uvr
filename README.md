@@ -273,12 +273,47 @@ or to the repository root.
 | `uvr export -o renv.lock` | Export to a file |
 | `uvr import` | Import packages from an renv.lock file |
 | `uvr import --lock` | Import and immediately resolve + install |
+| `uvr scan` | Report packages the code uses but `uvr.toml` does not declare |
+| `uvr scan --add` | Add those packages, then lock and install them |
 | `uvr upgrade` | Update uvr itself to the latest GitHub release (alias: `uvr self-update`) |
 | `uvr doctor` | Diagnose environment issues (R, build tools, project status) |
 | `uvr completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+
+---
+
+## Adopting an existing project
+
+A project with no manifest still declares its dependencies — in the code.
+`uvr scan` reads them out, walking every `.R`, `.Rmd` and `.Qmd` file (honouring
+`.gitignore` and `.uvrignore`) and reporting each `library()`, `require()`,
+`pkg::fn` and roxygen `@import` whose package is not in `uvr.toml`:
+
+```console
+$ uvr scan
+> Found 2 package(s) used but not declared in uvr.toml:
+  jsonlite (missing) analysis.R
+  praise (missing) analysis.R
+```
+
+`--add` hands that list to `uvr add`, so adopting an unmanaged project is one
+command:
+
+```sh
+uvr scan --add
+```
+
+Take the direct dependencies from the code rather than from an installed
+library. `installed.packages()` returns the whole transitive closure, and
+pinning all of it as direct dependencies stops the resolver from ever
+upgrading a transitive package on its own.
+
+`--add` inherits `uvr add`'s behaviour, including its all-or-nothing rollback:
+if one scanned name does not resolve, nothing is written. A local package or
+one that lives on GitHub will do that — add those by hand with
+`uvr add user/repo` and re-run.
 
 ---
 

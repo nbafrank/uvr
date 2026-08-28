@@ -1519,3 +1519,43 @@ fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
         .stdout(predicate::str::contains("RAN"))
         .stderr(predicate::str::contains("does not honour yet"));
 }
+
+// ─── uvr scan --add (#78, #251) ───────────────────────────────────
+
+#[test]
+fn test_scan_add_conflicts_with_all() {
+    // `--all` reports what is already declared too, so there is nothing
+    // actionable in it. Rejecting the combination beats silently adding
+    // only the missing subset of a listing that claimed to be everything.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "scanproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    uvr_cmd()
+        .args(["scan", "--add", "--all"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_scan_add_with_nothing_missing_does_not_call_add() {
+    // No network involved: with nothing to add there is nothing to
+    // resolve, so the command must succeed offline.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "scanproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    fs::write(dir.path().join("only_base.R"), "x <- utils::head(1:3)\n").unwrap();
+    uvr_cmd()
+        .args(["scan", "--add"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("are declared in uvr.toml"));
+}
