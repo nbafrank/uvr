@@ -152,8 +152,11 @@ fn has_scannable_extension(path: &Path) -> bool {
     )
 }
 
-/// Strip R `#` comments from a snippet, preserving newlines so the
-/// surrounding comma-separated structure survives for the box spec regex.
+/// Strip R `#` comments from source, preserving newlines so line structure
+/// and the surrounding comma-separated structure survive for the box spec
+/// regex. Used by the `box::use` pass; it does not model `#` inside string
+/// literals, which is fine for the top-of-file/top-of-function statements
+/// box uses.
 fn strip_r_comments(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -211,13 +214,12 @@ impl PackageDetector {
         let roxygen_import = Regex::new(r"#'\s*@import(?:From)?\s+([A-Za-z][A-Za-z0-9._]*)")
             .expect("roxygen import regex compiles");
 
-        // `box::use(...)` imports packages and local modules. Capture the
-        // whole argument list first with a comment-aware scan: a naive
-        // `[^)]*` would stop at a `)` inside a trailing `# comment (...)`,
-        // truncating multi-line declarations. `#[^\n]*` treats `#...` as a
-        // comment so the real closing `)` is found.
-        let box_use = Regex::new(r#"\bbox\s*::\s*use\s*\(((?:[^)#]|#[^\n]*)*)\)"#)
-            .expect("box::use regex compiles");
+        // `box::use(...)` imports packages and local modules. The scan
+        // runs over comment-stripped source (see `extract`), so a simple
+        // `[^)]*` capture suffices: a `)` inside a trailing `# comment (...)`
+        // is already gone by the time this regex runs.
+        let box_use =
+            Regex::new(r#"\bbox\s*::\s*use\s*\(([^)]*)\)"#).expect("box::use regex compiles");
 
         // One import declaration inside a `box::use(...)` list. Captures
         // the raw package/module name (`pkg`, `alias = pkg`, `prefix/mod`,
@@ -256,10 +258,15 @@ impl PackageDetector {
                 found.insert(name.as_str().to_string());
             }
         }
-        for cap in self.box_use.captures_iter(content) {
+        // Scan `box::use` on comment-stripped source so a commented-out
+        // import block can't sweep the live code after it into the
+        // argument list. The other detectors keep running on raw content
+        // (roxygen needs `#'`, and `library`/`::` in comments is an
+        // accepted trade-off).
+        let decommented = strip_r_comments(content);
+        for cap in self.box_use.captures_iter(&decommented) {
             if let Some(args) = cap.get(1) {
-                let args = strip_r_comments(args.as_str());
-                for spec in self.box_use_spec.captures_iter(&args) {
+                for spec in self.box_use_spec.captures_iter(args.as_str()) {
                     if let Some(name) = spec.get(1) {
                         let name = name.as_str();
                         if name.contains('/') || name == "." || name == ".." {
@@ -400,6 +407,32 @@ box::use(
         let found = detector.extract(src);
         assert!(found.contains("pkg"), "got {found:?}");
         assert!(found.contains("pkg2"), "got {found:?}");
+    }
+
+    #[test]
+    fn extract_box_use_ignores_commented_out_block() {
+        // A whole `box::use` block that is commented out must not leak its
+        // package names, nor sweep the live code after it into the
+        // argument list. (`box` itself still appears via the namespace
+        // operator detector, which runs on raw source.)
+        let detector = PackageDetector::new();
+        let src = "# box::use(dplyr,\n#   tidyr)\nresult <- transform(df)\n";
+        let found = detector.extract(src);
+        assert!(!found.contains("dplyr"), "got {found:?}");
+        assert!(!found.contains("tidyr"), "got {found:?}");
+        assert!(!found.contains("result"), "got {found:?}");
+    }
+
+    #[test]
+    fn extract_box_use_indented_function_body() {
+        // `box::use` is valid inside a function body, so leading
+        // indentation must not stop detection.
+        let detector = PackageDetector::new();
+        let src = "f <- function() {\n  box::use(dplyr[filter],\n    tidyr)\n}\n";
+        let found = detector.extract(src);
+        assert!(found.contains("dplyr"), "got {found:?}");
+        assert!(found.contains("tidyr"), "got {found:?}");
+        assert!(!found.contains("filter"), "got {found:?}");
     }
 
     #[test]
