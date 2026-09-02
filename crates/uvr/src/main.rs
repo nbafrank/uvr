@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod ide;
 mod ui;
 
 use anyhow::Result;
@@ -60,6 +61,17 @@ async fn run() -> Result<()> {
         return Ok(());
     };
 
+    // CI/automation mode (`--unattended`) and the companion opt-out are
+    // expressed as env vars so the deep install/scaffolding paths can read
+    // them without threading bools through every call site (same pattern as
+    // `UVR_NO_BINARY`).
+    if cli.unattended {
+        std::env::set_var("UVR_UNATTENDED", "1");
+    }
+    if cli.no_companion || cli.unattended {
+        std::env::set_var("UVR_NO_COMPANION", "1");
+    }
+
     // #63/#64 phase 1: warn loudly if the project pin doesn't match the active R.
     // Only for library-affecting commands — `init`, `r ...`, `cache`, etc. don't
     // touch the library and the warning would be noise there.
@@ -81,7 +93,12 @@ async fn run() -> Result<()> {
 
     match command {
         Commands::Init(args) => {
-            commands::init::run(args.name, args.here, args.r_version)?;
+            let ide = ide::Ide::resolve(
+                args.ide.map(ide::IdeArg::into_ide),
+                args.no_ide,
+                cli.unattended,
+            );
+            commands::init::run(args.name, args.here, args.r_version, ide, args.bare)?;
         }
         Commands::Add(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;
@@ -125,7 +142,20 @@ async fn run() -> Result<()> {
             if args.no_binary {
                 std::env::set_var("UVR_NO_BINARY", "1");
             }
-            commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout).await?;
+            let ide = ide::Ide::resolve(
+                args.ide.map(ide::IdeArg::into_ide),
+                args.no_ide,
+                cli.unattended,
+            );
+            commands::sync::run(
+                args.frozen,
+                args.no_dev,
+                args.jobs,
+                args.library,
+                timeout,
+                ide,
+            )
+            .await?;
         }
         Commands::Run(args) => {
             commands::run::run(args.script, args.r_version, args.with_packages, args.args).await?;
@@ -149,7 +179,13 @@ async fn run() -> Result<()> {
             // #71: --input/-i is an alternative spelling of the positional path.
             // clap's `conflicts_with` already rejects passing both.
             let path = args.input.or(args.path);
-            commands::import::run(path, args.name, args.lock, args.jobs, args.clean_renv).await?;
+            let ide = ide::Ide::resolve(
+                args.ide.map(ide::IdeArg::into_ide),
+                args.no_ide,
+                cli.unattended,
+            );
+            commands::import::run(path, args.name, args.lock, args.jobs, args.clean_renv, ide)
+                .await?;
         }
         Commands::Scan(args) => {
             commands::scan::run(args.all)?;

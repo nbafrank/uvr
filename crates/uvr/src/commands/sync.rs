@@ -17,6 +17,7 @@ use uvr_core::r_version::downloader::Platform;
 use uvr_core::registry::p3m::P3MBinaryIndex;
 use uvr_core::resolver::topological_install_order;
 
+use crate::ide::Ide;
 use crate::ui;
 use crate::ui::palette;
 
@@ -160,11 +161,21 @@ pub async fn run(
     jobs: usize,
     library: Option<PathBuf>,
     timeout: Option<Duration>,
+    ide: Ide,
 ) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     // CLI --library takes precedence, then UVR_LIBRARY env var.
     let library = library.or_else(uvr_core::env_vars::library);
-    run_inner(&project, frozen, no_dev, jobs, library.as_deref(), timeout).await
+    run_inner(
+        &project,
+        frozen,
+        no_dev,
+        jobs,
+        library.as_deref(),
+        timeout,
+        ide,
+    )
+    .await
 }
 
 /// Install all packages from the existing lockfile.
@@ -182,6 +193,7 @@ pub async fn run_inner(
     jobs: usize,
     library_override: Option<&std::path::Path>,
     timeout: Option<Duration>,
+    ide: Ide,
 ) -> Result<()> {
     let lockfile = project
         .load_lockfile()
@@ -198,18 +210,28 @@ pub async fn run_inner(
             .context("Failed to create .uvr/library/")?;
     }
 
-    // Ensure .Rprofile exists so RStudio sees the uvr library
-    crate::commands::init::ensure_rprofile(&project.root).context("Failed to write .Rprofile")?;
+    // Ensure the project plumbing is present. Bare projects (`uvr init
+    // --bare`) stay bare: their library is reached through `uvr run`, so
+    // a later sync must not re-add the scaffolding it opted out of.
+    // `--unattended` / `UVR_UNATTENDED=1` likewise writes nothing here.
+    if !project.manifest.project.bare && !uvr_core::env_vars::unattended() {
+        // Ensure .Rprofile exists so any R session started from the project
+        // root links the uvr library.
+        crate::commands::init::ensure_rprofile(&project.root)
+            .context("Failed to write .Rprofile")?;
 
-    // Write .vscode/settings.json for Positron R interpreter
-    crate::commands::init::ensure_positron_settings(&project.root)
-        .context("Failed to write Positron settings")?;
+        // Write .vscode/settings.json only when targeting Positron.
+        if ide.is_positron() {
+            crate::commands::init::ensure_positron_settings(&project.root)
+                .context("Failed to write Positron settings")?;
+        }
 
-    // Add uvr entries to .Rbuildignore only when DESCRIPTION has `Package:`
-    // (real R package source tree). DESCRIPTION may have been created after
-    // `uvr init`, so we check on every sync.
-    if crate::commands::init::is_r_package_dir(&project.root) {
-        let _ = crate::commands::init::write_rbuildignore(&project.root);
+        // Add uvr entries to .Rbuildignore only when DESCRIPTION has `Package:`
+        // (real R package source tree). DESCRIPTION may have been created after
+        // `uvr init`, so we check on every sync.
+        if crate::commands::init::is_r_package_dir(&project.root) {
+            let _ = crate::commands::init::write_rbuildignore(&project.root);
+        }
     }
 
     if frozen {
@@ -502,9 +524,12 @@ async fn install_from_lockfile_with_r(
 
     // Install the uvr R companion package if not already present.
     // Skip the (expensive) R version check when all packages are up to date
-    // and the companion is already installed.
+    // and the companion is already installed. Opted out via `--no-companion`
+    // / `--unattended` / `UVR_NO_COMPANION=1` / `UVR_UNATTENDED=1`, and
+    // never installed in a bare project.
+    let companion_wanted = !uvr_core::env_vars::no_companion() && !project.manifest.project.bare;
     let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
-    if !companion_installed || !to_install.is_empty() {
+    if companion_wanted && (!companion_installed || !to_install.is_empty()) {
         if let Some((ref r_bin, ref current_r)) = r_info {
             ensure_companion_package(&library, current_r, r_bin);
         }
@@ -1753,10 +1778,7 @@ fn binary_repo_flavor() -> Option<String> {
 /// opting out of the preview portable `manylinux` repo — without having to
 /// pin a different distro.
 fn source_installs_forced() -> bool {
-    matches!(
-        std::env::var("UVR_NO_BINARY").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_NO_BINARY")
 }
 
 /// `--ignore-cache` flag or `UVR_IGNORE_CACHE=1` env var (#93).
@@ -1764,10 +1786,7 @@ fn source_installs_forced() -> bool {
 /// troubleshooting a single corrupted cached package without nuking
 /// the whole cache (which would force every other project to rebuild).
 fn cache_lookup_disabled() -> bool {
-    matches!(
-        std::env::var("UVR_IGNORE_CACHE").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_IGNORE_CACHE")
 }
 
 /// `--install-system-deps` flag or `UVR_INSTALL_SYSREQS=1` env var
@@ -1778,10 +1797,7 @@ fn cache_lookup_disabled() -> bool {
 /// Windows source builds need a separate Rtools story.
 #[cfg(target_os = "linux")]
 fn sysreqs_install_enabled() -> bool {
-    matches!(
-        std::env::var("UVR_INSTALL_SYSREQS").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_INSTALL_SYSREQS")
 }
 
 /// True when the effective UID is 0 (root). Used to decide whether the
@@ -3042,7 +3058,16 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
             .unwrap();
         let external_library = temp.path().join("external-library");
 
-        let result = run_inner(&project, false, false, 1, Some(&external_library), None).await;
+        let result = run_inner(
+            &project,
+            false,
+            false,
+            1,
+            Some(&external_library),
+            None,
+            Ide::None,
+        )
+        .await;
         assert!(result.is_err());
         assert!(!external_library.exists());
         assert!(!root.join(".Rprofile").exists());

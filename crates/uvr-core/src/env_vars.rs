@@ -90,6 +90,39 @@ pub fn library() -> Option<PathBuf> {
     read_env_var("UVR_LIBRARY").map(PathBuf::from)
 }
 
+/// UVR_NO_COMPANION
+///
+/// Disables the automatic installation of the `uvr` companion R package
+/// into the project library. The companion is a convenience for interactive
+/// R sessions (`uvr::add()`, `uvr::lock()`, …), not a project dependency.
+/// Accepts the same truthy values as the other boolean `UVR_*` switches.
+pub fn no_companion() -> bool {
+    truthy("UVR_NO_COMPANION") || unattended()
+}
+
+/// UVR_UNATTENDED
+///
+/// CI/automation mode. Disables the companion R package and every
+/// working-tree write — IDE config/messages, `.Rprofile`, `.gitignore`,
+/// activation shims, `.Rbuildignore` — so a checked-out repository stays
+/// byte-identical. Only the library (and `uvr.toml` on `uvr init`) is
+/// written; the library is reached through `uvr run` / `R_LIBS_USER`.
+/// `uvr init --bare` is the persistent form for interactive use.
+pub fn unattended() -> bool {
+    truthy("UVR_UNATTENDED")
+}
+
+/// Truthy-value parser shared by the boolean `UVR_*` switches. Accepts
+/// `1`, `true`, `yes`, and their uppercase forms — the set the pre-existing
+/// switches (`UVR_NO_BINARY`, `UVR_IGNORE_CACHE`, `UVR_INSTALL_SYSREQS`)
+/// already accepted.
+pub fn truthy(name: &str) -> bool {
+    matches!(
+        read_env_var(name).as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
+}
+
 /// UVR_PACKAGES_DIR
 ///
 /// Gets the directory where uvr stores cached installed-package entries.
@@ -242,10 +275,12 @@ mod tests {
             "UVR_INSTALL_DIR",
             "UVR_INSTALL_TIMEOUT",
             "UVR_LIBRARY",
+            "UVR_NO_COMPANION",
             "UVR_PACKAGES_DIR",
             "UVR_PROGRESS",
             "UVR_R_INSTALL_DIR",
             "UVR_REPOS",
+            "UVR_UNATTENDED",
         ];
 
         let _guard = EnvGuard::new(&vars_to_test);
@@ -260,6 +295,8 @@ mod tests {
         assert_eq!(install_dir(), None);
         assert_eq!(install_timeout(), None);
         assert_eq!(library(), None);
+        assert!(!no_companion());
+        assert!(!unattended());
         assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
 
@@ -282,6 +319,18 @@ mod tests {
 
         env::set_var("UVR_LIBRARY", "/custom/library");
         assert_eq!(library(), Some(PathBuf::from("/custom/library")));
+
+        env::set_var("UVR_NO_COMPANION", "1");
+        assert!(no_companion());
+        env::remove_var("UVR_NO_COMPANION");
+
+        env::set_var("UVR_UNATTENDED", "yes");
+        assert!(unattended());
+        // `--unattended` implies `--no-companion`.
+        assert!(no_companion());
+        env::remove_var("UVR_UNATTENDED");
+        assert!(!unattended());
+        assert!(!no_companion());
         // #97: the project's library path follows the override, so the
         // commands that *read* the library look where sync installed.
         let project = crate::project::Project {

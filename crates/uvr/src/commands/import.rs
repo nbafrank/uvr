@@ -41,6 +41,7 @@ use uvr_core::project::{Project, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 
 use crate::commands::init;
+use crate::ide::Ide;
 use crate::ui;
 use crate::ui::palette;
 
@@ -50,6 +51,7 @@ pub async fn run(
     lock: bool,
     jobs: usize,
     clean_renv: bool,
+    ide: Ide,
 ) -> Result<()> {
     // Validate `--name` before we touch any files. R package / project
     // names follow CRAN's rule: start with a letter, then letters /
@@ -222,16 +224,29 @@ pub async fn run(
     // migrating from renv ends up with `uvr.toml` but no `.Rprofile`
     // block (so R startup never sets `.libPaths()` to `.uvr/library/`),
     // no `.gitignore` entry, and no Positron config. Functions are
-    // idempotent so it's safe to call them in merge mode too.
-    init::write_gitignore(&cwd).context("Failed to write .gitignore")?;
-    if init::is_r_package_dir(&cwd) {
-        init::write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+    // idempotent so it's safe to call them in merge mode too. A bare
+    // project stays bare (no scaffolding, no companion — but the protective
+    // `.gitignore` is still written), and `--unattended` writes nothing
+    // beyond the manifest + library.
+    let unattended = uvr_core::env_vars::unattended();
+    if !unattended {
+        init::write_gitignore(&cwd).context("Failed to write .gitignore")?;
+        if !manifest.project.bare {
+            if init::is_r_package_dir(&cwd) {
+                init::write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+            }
+            init::ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
+            if ide.is_positron() {
+                init::ensure_positron_settings(&cwd)
+                    .context("Failed to write Positron settings")?;
+            }
+        }
     }
-    init::ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
-    init::ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
-    if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
-        if let Some(r_ver) = query_r_version(&r_binary) {
-            crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+    if !manifest.project.bare && !uvr_core::env_vars::no_companion() {
+        if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
+            if let Some(r_ver) = query_r_version(&r_binary) {
+                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+            }
         }
     }
 
