@@ -132,21 +132,24 @@ mod tests {
     fn resolve_order_is_cli_then_unattended_then_detected() {
         let _env = env_lock();
         // Explicit --ide wins over everything.
-        with_env(&[("POSITRON", Some("1")), ("UVR_UNATTENDED", Some("1"))], || {
-            assert_eq!(
-                Ide::resolve(Some(Ide::Rstudio), false, false),
-                Ide::Rstudio
-            );
-        });
+        with_env(
+            &[("POSITRON", Some("1")), ("UVR_UNATTENDED", Some("1"))],
+            || {
+                assert_eq!(Ide::resolve(Some(Ide::Rstudio), false, false), Ide::Rstudio);
+            },
+        );
 
         // --no-ide / --unattended / UVR_UNATTENDED all force None.
         with_env(&[("POSITRON", Some("1"))], || {
             assert_eq!(Ide::resolve(None, true, false), Ide::None);
             assert_eq!(Ide::resolve(None, false, true), Ide::None);
         });
-        with_env(&[("POSITRON", Some("1")), ("UVR_UNATTENDED", Some("1"))], || {
-            assert_eq!(Ide::resolve(None, false, false), Ide::None);
-        });
+        with_env(
+            &[("POSITRON", Some("1")), ("UVR_UNATTENDED", Some("1"))],
+            || {
+                assert_eq!(Ide::resolve(None, false, false), Ide::None);
+            },
+        );
 
         // No override: env detection wins.
         with_env(&[("RSTUDIO", Some("1"))], || {

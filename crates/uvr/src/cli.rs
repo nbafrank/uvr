@@ -35,20 +35,13 @@ pub struct Cli {
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
-    /// Assume a specific IDE for config generation (positron | rstudio)
-    #[arg(long, global = true, value_enum, value_name = "IDE")]
-    pub ide: Option<IdeArg>,
-
-    /// Disable IDE-specific config files and messages
-    #[arg(long, global = true, conflicts_with = "ide")]
-    pub no_ide: bool,
-
     /// Skip the uvr companion R package installation
     #[arg(long, global = true)]
     pub no_companion: bool,
 
-    /// CI/automation mode: shorthand for `--no-ide --no-companion`
-    #[arg(long, global = true, conflicts_with = "ide")]
+    /// CI/automation mode: no IDE config, no companion package, and no
+    /// working-tree writes (`.Rprofile`, `.gitignore`, activation shims)
+    #[arg(long, global = true)]
     pub unattended: bool,
 
     #[command(subcommand)]
@@ -134,9 +127,18 @@ pub struct InitArgs {
     #[arg(long = "r-version", value_name = "CONSTRAINT")]
     pub r_version: Option<String>,
 
-    /// Bare project: `uvr.toml` + `.uvr/library/` only. No `.Rprofile`,
-    /// `.gitignore`, activation shims, IDE config, or companion package —
-    /// the library is reachable through `uvr run` only.
+    /// Assume a specific IDE for config generation (positron | rstudio)
+    #[arg(long, value_enum, value_name = "IDE", conflicts_with = "unattended")]
+    pub ide: Option<IdeArg>,
+
+    /// Disable IDE-specific config files and messages
+    #[arg(long, conflicts_with = "ide")]
+    pub no_ide: bool,
+
+    /// Bare project: `uvr.toml` + `.uvr/library/` + a protective
+    /// `.gitignore`. No `.Rprofile`, activation shims (until you run
+    /// `uvr activate`), IDE config, or companion package — the library is
+    /// reachable through `uvr run` only.
     #[arg(long)]
     pub bare: bool,
 }
@@ -237,6 +239,14 @@ pub struct SyncArgs {
     /// (override via `UVR_INSTALL_TIMEOUT`).
     #[arg(long, value_name = "DURATION")]
     pub timeout: Option<String>,
+
+    /// Assume a specific IDE for config generation (positron | rstudio)
+    #[arg(long, value_enum, value_name = "IDE", conflicts_with = "unattended")]
+    pub ide: Option<IdeArg>,
+
+    /// Disable IDE-specific config files and messages
+    #[arg(long, conflicts_with = "ide")]
+    pub no_ide: bool,
 
     /// When missing system libraries are detected, run the platform's
     /// package manager (`apk add` / `apt-get install` / `dnf install`)
@@ -388,6 +398,14 @@ pub struct ImportArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
+
+    /// Assume a specific IDE for config generation (positron | rstudio)
+    #[arg(long, value_enum, value_name = "IDE", conflicts_with = "unattended")]
+    pub ide: Option<IdeArg>,
+
+    /// Disable IDE-specific config files and messages
+    #[arg(long, conflicts_with = "ide")]
+    pub no_ide: bool,
 
     /// Tear down the renv project after a successful import: remove the
     /// `renv/` directory and strip any `source("renv/activate.R")` hook

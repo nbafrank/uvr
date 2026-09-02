@@ -225,22 +225,27 @@ pub async fn run(
     // block (so R startup never sets `.libPaths()` to `.uvr/library/`),
     // no `.gitignore` entry, and no Positron config. Functions are
     // idempotent so it's safe to call them in merge mode too. A bare
-    // project (created via `uvr init --bare` or already marked bare) stays
-    // bare: no scaffolding, no companion, library reached via `uvr run`.
-    if !manifest.project.bare {
+    // project stays bare (no scaffolding, no companion — but the protective
+    // `.gitignore` is still written), and `--unattended` writes nothing
+    // beyond the manifest + library.
+    let unattended = uvr_core::env_vars::unattended();
+    if !unattended {
         init::write_gitignore(&cwd).context("Failed to write .gitignore")?;
-        if init::is_r_package_dir(&cwd) {
-            init::write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+        if !manifest.project.bare {
+            if init::is_r_package_dir(&cwd) {
+                init::write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+            }
+            init::ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
+            if ide.is_positron() {
+                init::ensure_positron_settings(&cwd)
+                    .context("Failed to write Positron settings")?;
+            }
         }
-        init::ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
-        if ide.is_positron() {
-            init::ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
-        }
-        if !uvr_core::env_vars::no_companion() {
-            if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
-                if let Some(r_ver) = query_r_version(&r_binary) {
-                    crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
-                }
+    }
+    if !manifest.project.bare && !uvr_core::env_vars::no_companion() {
+        if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
+            if let Some(r_ver) = query_r_version(&r_binary) {
+                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
             }
         }
     }

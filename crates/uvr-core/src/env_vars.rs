@@ -95,27 +95,31 @@ pub fn library() -> Option<PathBuf> {
 /// Disables the automatic installation of the `uvr` companion R package
 /// into the project library. The companion is a convenience for interactive
 /// R sessions (`uvr::add()`, `uvr::lock()`, …), not a project dependency.
-/// Accepts the same truthy values as `UVR_NO_BINARY`.
+/// Accepts the same truthy values as the other boolean `UVR_*` switches.
 pub fn no_companion() -> bool {
     truthy("UVR_NO_COMPANION") || unattended()
 }
 
 /// UVR_UNATTENDED
 ///
-/// CI/automation mode: disables IDE config files/messages and the companion
-/// R package (`--no-ide` + `--no-companion`). The `.Rprofile` library wiring
-/// is still written — use `uvr init --bare` to drop that as well.
+/// CI/automation mode. Disables the companion R package and every
+/// working-tree write — IDE config/messages, `.Rprofile`, `.gitignore`,
+/// activation shims, `.Rbuildignore` — so a checked-out repository stays
+/// byte-identical. Only the library (and `uvr.toml` on `uvr init`) is
+/// written; the library is reached through `uvr run` / `R_LIBS_USER`.
+/// `uvr init --bare` is the persistent form for interactive use.
 pub fn unattended() -> bool {
     truthy("UVR_UNATTENDED")
 }
 
-/// Truthy-value parser shared by the boolean `UVR_*` switches. Mirrors the
-/// values accepted elsewhere in the codebase (`1`, `true`, `yes`, `on`).
-fn truthy(name: &str) -> bool {
+/// Truthy-value parser shared by the boolean `UVR_*` switches. Accepts
+/// `1`, `true`, `yes`, and their uppercase forms — the set the pre-existing
+/// switches (`UVR_NO_BINARY`, `UVR_IGNORE_CACHE`, `UVR_INSTALL_SYSREQS`)
+/// already accepted.
+pub fn truthy(name: &str) -> bool {
     matches!(
         read_env_var(name).as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-            | Some("TRUE") | Some("YES") | Some("ON")
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
     )
 }
 

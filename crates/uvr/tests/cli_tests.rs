@@ -1593,7 +1593,7 @@ fn test_init_rstudio_env_writes_rprofile_but_no_vscode() {
 }
 
 #[test]
-fn test_init_unattended_overrides_positron_env() {
+fn test_init_unattended_writes_only_manifest_and_library() {
     let dir = TempDir::new().unwrap();
     uvr_cmd()
         .args(["init", "--here", "unattendedproj", "--unattended"])
@@ -1601,7 +1601,11 @@ fn test_init_unattended_overrides_positron_env() {
         .current_dir(dir.path())
         .assert()
         .success();
-    assert!(dir.path().join(".Rprofile").exists());
+    assert!(dir.path().join("uvr.toml").exists());
+    assert!(dir.path().join(".uvr").join("library").exists());
+    assert!(!dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".gitignore").exists());
+    assert!(!dir.path().join(".uvr").join("activate").exists());
     assert!(!dir.path().join(".vscode").exists());
 }
 
@@ -1619,7 +1623,7 @@ fn test_init_no_ide_overrides_positron_env() {
 }
 
 #[test]
-fn test_init_bare_writes_only_manifest_and_library() {
+fn test_init_bare_skips_scaffolding_but_ignores_library() {
     let dir = TempDir::new().unwrap();
     uvr_cmd()
         .args(["init", "--here", "bareproj", "--bare"])
@@ -1629,9 +1633,24 @@ fn test_init_bare_writes_only_manifest_and_library() {
     assert!(dir.path().join("uvr.toml").exists());
     assert!(dir.path().join(".uvr").join("library").exists());
     assert!(!dir.path().join(".Rprofile").exists());
-    assert!(!dir.path().join(".gitignore").exists());
+    assert!(dir.path().join(".gitignore").exists());
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("/.uvr/library/"));
     assert!(!dir.path().join(".uvr").join("activate").exists());
     assert!(!dir.path().join(".vscode").exists());
     let manifest = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
     assert!(manifest.contains("bare = true"));
+}
+
+#[test]
+fn test_ide_flag_is_scoped_to_init_sync_import() {
+    // `--ide` is only meaningful where IDE config is written. On `add` it
+    // must be rejected at parse time, not silently accepted and ignored.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["add", "--ide=positron", "ggplot2"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument"));
 }

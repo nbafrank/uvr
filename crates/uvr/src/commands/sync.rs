@@ -166,7 +166,16 @@ pub async fn run(
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     // CLI --library takes precedence, then UVR_LIBRARY env var.
     let library = library.or_else(uvr_core::env_vars::library);
-    run_inner(&project, frozen, no_dev, jobs, library.as_deref(), timeout, ide).await
+    run_inner(
+        &project,
+        frozen,
+        no_dev,
+        jobs,
+        library.as_deref(),
+        timeout,
+        ide,
+    )
+    .await
 }
 
 /// Install all packages from the existing lockfile.
@@ -204,10 +213,12 @@ pub async fn run_inner(
     // Ensure the project plumbing is present. Bare projects (`uvr init
     // --bare`) stay bare: their library is reached through `uvr run`, so
     // a later sync must not re-add the scaffolding it opted out of.
-    if !project.manifest.project.bare {
+    // `--unattended` / `UVR_UNATTENDED=1` likewise writes nothing here.
+    if !project.manifest.project.bare && !uvr_core::env_vars::unattended() {
         // Ensure .Rprofile exists so any R session started from the project
         // root links the uvr library.
-        crate::commands::init::ensure_rprofile(&project.root).context("Failed to write .Rprofile")?;
+        crate::commands::init::ensure_rprofile(&project.root)
+            .context("Failed to write .Rprofile")?;
 
         // Write .vscode/settings.json only when targeting Positron.
         if ide.is_positron() {
@@ -1767,10 +1778,7 @@ fn binary_repo_flavor() -> Option<String> {
 /// opting out of the preview portable `manylinux` repo — without having to
 /// pin a different distro.
 fn source_installs_forced() -> bool {
-    matches!(
-        std::env::var("UVR_NO_BINARY").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_NO_BINARY")
 }
 
 /// `--ignore-cache` flag or `UVR_IGNORE_CACHE=1` env var (#93).
@@ -1778,10 +1786,7 @@ fn source_installs_forced() -> bool {
 /// troubleshooting a single corrupted cached package without nuking
 /// the whole cache (which would force every other project to rebuild).
 fn cache_lookup_disabled() -> bool {
-    matches!(
-        std::env::var("UVR_IGNORE_CACHE").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_IGNORE_CACHE")
 }
 
 /// `--install-system-deps` flag or `UVR_INSTALL_SYSREQS=1` env var
@@ -1792,10 +1797,7 @@ fn cache_lookup_disabled() -> bool {
 /// Windows source builds need a separate Rtools story.
 #[cfg(target_os = "linux")]
 fn sysreqs_install_enabled() -> bool {
-    matches!(
-        std::env::var("UVR_INSTALL_SYSREQS").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
-    )
+    uvr_core::env_vars::truthy("UVR_INSTALL_SYSREQS")
 }
 
 /// True when the effective UID is 0 (root). Used to decide whether the
@@ -3056,7 +3058,16 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
             .unwrap();
         let external_library = temp.path().join("external-library");
 
-        let result = run_inner(&project, false, false, 1, Some(&external_library), None, Ide::None).await;
+        let result = run_inner(
+            &project,
+            false,
+            false,
+            1,
+            Some(&external_library),
+            None,
+            Ide::None,
+        )
+        .await;
         assert!(result.is_err());
         assert!(!external_library.exists());
         assert!(!root.join(".Rprofile").exists());

@@ -249,7 +249,7 @@ or to the repository root.
 | `uvr init [name]` | Create `uvr.toml` and `.uvr/library/` in the current directory |
 | `uvr init --ide=positron` | Also write `.vscode/settings.json` for Positron |
 | `uvr init --no-ide` | Skip IDE config even when an IDE is detected |
-| `uvr init --bare` | Create `uvr.toml` + `.uvr/library/` only (use via `uvr run`) |
+| `uvr init --bare` | Create `uvr.toml` + `.uvr/library/` + `.gitignore` (use via `uvr run`) |
 | `uvr add <pkg...>` | Add packages, update manifest + lockfile, install |
 | `uvr remove <pkg...>` | Remove packages from manifest and re-lock |
 | `uvr sync` | Install all packages from the lockfile |
@@ -257,7 +257,7 @@ or to the repository root.
 | `uvr sync --frozen` | Like `sync`, but fail if the lockfile is stale (CI mode) |
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
 | `uvr sync --no-companion` | Skip the uvr companion R package install |
-| `uvr sync --unattended` | CI mode: `--no-ide` + `--no-companion` |
+| `uvr sync --unattended` | CI mode: skip IDE config, companion, and working-tree writes |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
@@ -289,17 +289,21 @@ or to the repository root.
 
 ### IDE integration and CI mode
 
-`uvr init` / `uvr sync` always write a `.Rprofile` block so any R session
+By default `uvr init` / `uvr sync` write a `.Rprofile` block so any R session
 started from the project root links `.uvr/library/`. IDE-specific config is
 opt-in: uvr detects Positron (`POSITRON=1`) and RStudio (`RSTUDIO=1`) from
 their integrated terminals and, for Positron, writes
 `.vscode/settings.json`. Override detection with `--ide=positron|rstudio` or
 `--no-ide`.
 
-For CI/automation, `--unattended` (or `UVR_UNATTENDED=1`) disables IDE config
-and the companion R package in one switch. `--no-companion`
-(`UVR_NO_COMPANION=1`) skips just the companion. `uvr init --bare` creates a
-project with only `uvr.toml` and `.uvr/library/` — reach it through `uvr run`.
+For CI/automation, `--unattended` (or `UVR_UNATTENDED=1`) disables IDE config,
+the companion R package, and every working-tree write (`.Rprofile`,
+`.gitignore`, activation shims) in one switch — so a checked-out repository
+stays byte-identical and the library is reached through `uvr run` or
+`R_LIBS_USER`. `--no-companion` (`UVR_NO_COMPANION=1`) skips just the
+companion. `uvr init --bare` is the persistent, interactive form of the same
+minimal project: `uvr.toml`, `.uvr/library/`, and a protective `.gitignore`
+only — reach it through `uvr run`.
 
 ---
 
