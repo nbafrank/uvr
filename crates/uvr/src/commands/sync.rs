@@ -2937,8 +2937,23 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         let root = nested_locked("rlang", NESTED_SHA, None);
         let pkg_dir = library.path().join("rlang");
 
+        // Neither is installed while the package carries no marker: a root
+        // GitHub entry is pinned to its commit too, so an install of unknown
+        // provenance no longer counts as up to date.
         assert!(!is_installed(&nested, library.path()));
+        assert!(!is_installed(&root, library.path()));
+
+        let root_provenance = NestedProvenance::from_locked(&root).unwrap().unwrap();
+        nested_source::write_marker(&pkg_dir, &root_provenance).unwrap();
         assert!(is_installed(&root, library.path()));
+        assert!(!is_installed(&nested, library.path()));
+        // A root entry at a different commit is not satisfied by this install,
+        // which is the whole point: the version alone cannot tell them apart.
+        assert!(!is_installed(
+            &nested_locked("rlang", NESTED_OTHER_SHA, None),
+            library.path()
+        ));
+        nested_source::clear_marker(&pkg_dir).unwrap();
 
         let provenance = NestedProvenance::from_locked(&nested).unwrap().unwrap();
         nested_source::write_marker(&pkg_dir, &provenance).unwrap();
@@ -2955,7 +2970,7 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         ));
 
         nested_source::clear_marker(&pkg_dir).unwrap();
-        assert!(is_installed(&root, library.path()));
+        assert!(!is_installed(&root, library.path()));
 
         let mut version_mismatch = nested;
         version_mismatch.version = "1.1.7".into();

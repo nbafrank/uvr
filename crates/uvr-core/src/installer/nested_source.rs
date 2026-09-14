@@ -15,13 +15,33 @@ pub struct NestedProvenance {
 impl NestedProvenance {
     pub fn from_locked(p: &LockedPackage) -> Result<Option<Self>> {
         crate::registry::github::validate_nested_lock_entry(p)?;
-        let Some(subdirectory) = p.subdirectory.as_deref() else {
-            return Ok(None);
+        let subdirectory = match p.subdirectory.as_deref() {
+            Some(subdirectory) => subdirectory.to_string(),
+            // A plain (non-nested) GitHub package still needs its commit
+            // pinned. Without a marker the only thing left to compare is the
+            // DESCRIPTION version, and a package that carries the same
+            // development version across commits - `1.0.3.9001` for every
+            // commit of a fork, say - then looks up to date forever, no matter
+            // which commit the lockfile names.
+            None => {
+                if p.source != crate::lockfile::PackageSource::GitHub {
+                    return Ok(None);
+                }
+                let has_commit = p
+                    .checksum
+                    .as_deref()
+                    .and_then(|c| c.strip_prefix("git:"))
+                    .is_some_and(crate::registry::github::is_full_commit_sha);
+                if !has_commit || p.url.as_deref().unwrap_or_default().is_empty() {
+                    return Ok(None);
+                }
+                String::new()
+            }
         };
         Ok(Some(NestedProvenance {
             url: p.url.clone().unwrap_or_default(),
             checksum: p.checksum.clone().unwrap_or_default(),
-            subdirectory: subdirectory.to_string(),
+            subdirectory,
         }))
     }
 
@@ -60,7 +80,12 @@ impl NestedProvenance {
             *slot = Some(value.to_string());
         }
         let (source, url, checksum, subdirectory) = (source?, url?, checksum?, subdirectory?);
-        if source != "github" || url.is_empty() || !crate::subdirectory::is_valid(&subdirectory) {
+        // An empty subdirectory is the repository root: a plain GitHub package
+        // rather than one nested in a monorepo.
+        if source != "github"
+            || url.is_empty()
+            || (!subdirectory.is_empty() && !crate::subdirectory::is_valid(&subdirectory))
+        {
             return None;
         }
         if !checksum
@@ -285,6 +310,41 @@ mod tests {
             checksum: format!("git:{sha}"),
             subdirectory: subdirectory.to_string(),
         }
+    }
+
+    #[test]
+    fn from_locked_pins_a_plain_github_package() {
+        // Regression: a package with no subdirectory got no marker, so
+        // `is_installed` fell back to the DESCRIPTION version. A fork that
+        // carries the same development version across commits then looks up to
+        // date forever and a stale build is never replaced.
+        let p = NestedProvenance::from_locked(&locked(SHA, None))
+            .unwrap()
+            .expect("a plain GitHub package should still pin its commit");
+        assert_eq!(p.checksum, format!("git:{SHA}"));
+        assert_eq!(p.subdirectory, "");
+    }
+
+    #[test]
+    fn from_locked_ignores_a_non_github_source() {
+        let mut pkg = locked(SHA, None);
+        pkg.source = PackageSource::Cran;
+        assert!(NestedProvenance::from_locked(&pkg).unwrap().is_none());
+    }
+
+    #[test]
+    fn from_locked_ignores_a_package_without_a_commit() {
+        let mut pkg = locked(SHA, None);
+        pkg.checksum = Some("sha256:abc".to_string());
+        assert!(NestedProvenance::from_locked(&pkg).unwrap().is_none());
+    }
+
+    #[test]
+    fn marker_round_trips_an_empty_subdirectory() {
+        let want = provenance(SHA, "");
+        let parsed = NestedProvenance::parse(&want.to_file_contents())
+            .expect("an empty subdirectory is the repository root, not invalid");
+        assert_eq!(parsed, want);
     }
 
     fn locked(sha: &str, subdirectory: Option<&str>) -> LockedPackage {
