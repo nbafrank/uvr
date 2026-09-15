@@ -57,8 +57,9 @@ impl Platform {
     /// Return the download URL for the portable R build of `version`.
     ///
     /// Every platform pulls a relocatable build from the rstudio/r-builds CDN
-    /// (`cdn.posit.co/r`). These extract-and-run archives need no post-install
-    /// path patching — R locates its own `R_HOME` at runtime. Note the macOS
+    /// (`cdn.posit.co/r`). These extract-and-run archives need no binary
+    /// patching — R locates its own `R_HOME` at runtime (the `bin/R` text
+    /// wrapper does get one cosmetic edit for static readers, #271). Note the macOS
     /// binaries carry only an ad-hoc code signature (not notarized; verified
     /// with `codesign -dv`), so download integrity rests on TLS to the CDN —
     /// the index publishes no checksums to verify against.
@@ -994,8 +995,10 @@ pub async fn fetch_available_versions(
 ///
 /// The rstudio/r-builds portable archives are relocatable: R resolves its own
 /// `R_HOME` at runtime and bundles its dependency libraries. So there is no
-/// path patching and no install-name rewriting — we extract the archive and
-/// move the `R_HOME` directory into `dest` with a single rename.
+/// install-name rewriting — we extract the archive and move the `R_HOME`
+/// directory into `dest` with a single rename. The one text edit we do make
+/// is to the `bin/R` wrapper's first `R_HOME_DIR` assignment (#271) — see
+/// `patch_wrapper_r_home_dir`.
 ///
 /// Extraction stages in a dot-prefixed sibling of `dest`, not the OS temp
 /// dir: `/tmp` is commonly a different filesystem than `~/.uvr`, where a
@@ -1036,6 +1039,13 @@ fn install_r_portable(archive: &Path, dest: &Path, platform: Platform) -> Result
         )
     })?;
 
+    // Patch on the staged tree, before the rename, so `dest` appears
+    // complete-and-correct atomically (and the race loser's unpatched copy
+    // is simply discarded with its staging dir).
+    if !platform.is_windows() {
+        patch_wrapper_r_home_dir(&r_home, dest);
+    }
+
     if let Err(e) = std::fs::rename(&r_home, dest) {
         // Another uvr process may have installed the same version while this
         // one was downloading (#135): the existence check at the top of
@@ -1059,6 +1069,56 @@ fn install_r_portable(archive: &Path, dest: &Path, platform: Platform) -> Result
         )));
     }
     Ok(())
+}
+
+/// Point the first `R_HOME_DIR` assignment in the `bin/R` wrapper at the
+/// installation's real location (#271).
+///
+/// The portable builds make the wrapper relocatable by *appending* an
+/// override that recomputes `R_HOME_DIR` from the script's own path at
+/// runtime, leaving the build machine's path (e.g.
+/// `/Library/Frameworks/R.framework/Versions/4.4-arm64/Resources`) on the
+/// first assignment. R never reads that stale line, but tools that read the
+/// wrapper as text do: Positron resolves the interpreter from the first
+/// `R_HOME_DIR=` it sees and then either fails to start or silently launches
+/// a different R. Rewriting the first assignment is inert for shell
+/// execution (the appended override recomputes the same value) and corrects
+/// what static readers see.
+///
+/// Best-effort by design: a wrapper we don't recognize (no such line, or not
+/// UTF-8) is left alone rather than failing the install — that's the
+/// pre-#271 status quo, and R itself still runs.
+fn patch_wrapper_r_home_dir(r_home: &Path, dest: &Path) {
+    let wrapper = r_home.join("bin").join("R");
+    let Ok(content) = std::fs::read_to_string(&wrapper) else {
+        return;
+    };
+    let dest = dest.display().to_string();
+    // Quote iff needed: the assignment is a live shell statement, so an
+    // unquoted path with whitespace would break execution, but the upstream
+    // wrapper (and the common case) is unquoted and some static readers may
+    // not strip quotes.
+    let value = if dest.chars().any(char::is_whitespace) {
+        format!("\"{dest}\"")
+    } else {
+        dest
+    };
+    let mut patched = String::with_capacity(content.len());
+    let mut done = false;
+    for line in content.split_inclusive('\n') {
+        if !done && line.trim_start().starts_with("R_HOME_DIR=") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let newline = if line.ends_with('\n') { "\n" } else { "" };
+            patched.push_str(&format!("{indent}R_HOME_DIR={value}{newline}"));
+            done = true;
+        } else {
+            patched.push_str(line);
+        }
+    }
+    if done {
+        // In-place truncating write preserves the wrapper's exec bit.
+        let _ = std::fs::write(&wrapper, patched);
+    }
 }
 
 /// True when `dir` holds an R installation root (`bin/R`, or `bin/R.exe` on
@@ -1513,6 +1573,66 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".uvr-stage-"))
             .collect();
         assert!(leftovers.is_empty(), "staging dir leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn install_r_portable_patches_stale_r_home_dir_in_wrapper() {
+        // #271: the portable wrapper carries the build machine's R_HOME_DIR
+        // on its first assignment and only overrides it later at runtime.
+        // Static readers (Positron) trust the first assignment, so the
+        // install must rewrite it to the real location — and leave the
+        // runtime override untouched.
+        let wrapper = b"#!/bin/sh\n\
+# Shell wrapper for R executable.\n\
+\n\
+R_HOME_DIR=/Library/Frameworks/R.framework/Versions/4.4-arm64/Resources\n\
+# Override R_HOME_DIR for relocatable installation\n\
+R_HOME_DIR=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\n";
+        let archive = write_tar_gz(&[("R-4.4.1/bin/R", wrapper, 0o755)]);
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.1");
+        install_r_portable(archive.path(), &dest, Platform::MacOsArm64).unwrap();
+
+        let patched = std::fs::read_to_string(dest.join("bin").join("R")).unwrap();
+        let lines: Vec<&str> = patched.lines().collect();
+        assert_eq!(
+            lines[3],
+            format!("R_HOME_DIR={}", dest.display()),
+            "first assignment must point at the install"
+        );
+        assert_eq!(
+            lines[5], "R_HOME_DIR=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"",
+            "runtime override must be untouched"
+        );
+        assert!(
+            !patched.contains("/Library/Frameworks"),
+            "build-time path must be gone"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dest.join("bin").join("R"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "wrapper must stay executable");
+        }
+    }
+
+    #[test]
+    fn install_r_portable_leaves_unrecognized_wrapper_alone() {
+        // A wrapper with no R_HOME_DIR line (our other tests' fake scripts,
+        // or a future upstream layout change) must install unmodified.
+        let archive = write_tar_gz(&[("R-4.4.2/bin/R", b"#!/bin/sh\necho R\n", 0o755)]);
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.2");
+        install_r_portable(archive.path(), &dest, Platform::LinuxX86_64).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("bin").join("R")).unwrap(),
+            "#!/bin/sh\necho R\n"
+        );
     }
 
     #[test]

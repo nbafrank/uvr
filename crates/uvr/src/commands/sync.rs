@@ -357,8 +357,10 @@ async fn install_from_lockfile_with_r(
     // ...) fails to load with "symbol not found in flat namespace". Runs
     // before the up-to-date early return below, because a fully-installed
     // library is exactly the case where the packages are present but won't
-    // load. Only uvr-managed installs are touched — a system/CRAN R is not
-    // ours to edit (and doesn't need it: CRAN's R links libomp itself).
+    // load. Only uvr-managed installs are edited — a system/CRAN R is not
+    // ours to write into. It needs the shim just the same (#261: CRAN's R
+    // does *not* link libomp), and gets it per invocation instead, via the
+    // `R_PROFILE` that `REnv::vars()` and `R CMD INSTALL` set.
     if let Some((ref r_bin, _)) = r_info {
         if let Some(r_home) = uvr_core::r_version::openmp::r_home_from_binary(r_bin) {
             let managed = uvr_core::env_vars::r_install_dir()

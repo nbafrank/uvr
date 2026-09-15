@@ -31,6 +31,11 @@ pub struct REnv {
     pub with_library: Option<PathBuf>,
     /// Raw `UVR_EXTRA_LIBS` value, appended last. See [`REnv::r_libs_user`].
     pub extra_libs: Option<String>,
+    /// uvr's runtime site profile, when this R needs the OpenMP shim (#261).
+    /// Resolved by the caller via
+    /// `r_version::openmp::runtime_site_profile_for_binary` so this struct
+    /// stays a pure function of its fields.
+    pub site_profile: Option<PathBuf>,
 }
 
 impl REnv {
@@ -155,6 +160,14 @@ impl REnv {
             vars.push(("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH")));
         }
 
+        // The OpenMP shim for R installs uvr does not own (#261). `R_PROFILE`
+        // is the *site* profile — distinct from the `R_PROFILE_USER` that
+        // `uvr run` blanks in script mode — and the generated file chains to
+        // whatever site profile it displaces, so nothing is lost.
+        if let Some(profile) = &self.site_profile {
+            vars.extend(crate::r_version::openmp::site_profile_env(profile));
+        }
+
         vars
     }
 }
@@ -169,7 +182,37 @@ mod tests {
             library: PathBuf::from("/proj/.uvr/library"),
             with_library: None,
             extra_libs: None,
+            site_profile: None,
         }
+    }
+
+    #[test]
+    fn vars_export_the_site_profile_only_when_the_r_needs_it() {
+        let _env = crate::env_vars::env_lock();
+        std::env::remove_var("R_PROFILE");
+
+        // No shim needed (Linux, or a macOS R without libomp): R_PROFILE is
+        // left entirely alone — not blanked, since a user's own site profile
+        // must keep working.
+        let vars = renv().vars();
+        assert!(!vars.iter().any(|(k, _)| *k == "R_PROFILE"));
+        assert!(!vars.iter().any(|(k, _)| *k == "UVR_SITE_PROFILE_ORIG"));
+
+        // Shim needed: both the profile and the chain-to variable are set,
+        // so `uvr run` and `uvr activate` agree (#261).
+        let env = REnv {
+            site_profile: Some(PathBuf::from("/home/u/.uvr/etc/Rprofile.site")),
+            ..renv()
+        };
+        let vars = env.vars();
+        let get = |k: &str| {
+            vars.iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{k} not exported"))
+        };
+        assert_eq!(get("R_PROFILE"), "/home/u/.uvr/etc/Rprofile.site");
+        assert_eq!(get("UVR_SITE_PROFILE_ORIG"), "");
     }
 
     #[test]

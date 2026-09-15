@@ -114,11 +114,13 @@ pub async fn run(
     // libraries, and R's runtime lib dir. Built by `uvr_core::r_env` so that
     // `uvr run` and `uvr activate` export exactly the same set and cannot
     // drift apart.
+    let site_profile = uvr_core::r_version::openmp::runtime_site_profile_for_binary(&r_binary);
     let r_env = REnv {
         r_binary,
         library,
         with_library,
         extra_libs: uvr_core::env_vars::extra_libs(),
+        site_profile,
     };
 
     let mut cmd = Command::new(&r_env.r_binary);
@@ -144,8 +146,9 @@ pub async fn run(
         // large. Pointing `R_PROFILE_USER` at the null device skips both, the
         // same way the installer does (`installer/r_cmd_install.rs`).
         //
-        // `R_PROFILE` (the *site* profile) is deliberately left alone — uvr
-        // writes its own OpenMP fix into a managed R's `Rprofile.site`.
+        // `R_PROFILE` (the *site* profile) is not touched here: `REnv::vars()`
+        // owns it, pointing it at uvr's OpenMP shim profile when the R needs
+        // one (#261).
         cmd.env(
             "R_PROFILE_USER",
             if cfg!(windows) { "NUL" } else { "/dev/null" },

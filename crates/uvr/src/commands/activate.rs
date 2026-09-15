@@ -131,11 +131,13 @@ fn resolve() -> Result<(String, REnv, bool)> {
     let r_binary = find_r_binary(project.manifest.project.r_version.as_deref())
         .context("R not found. Install R or use `uvr r install <version>`")?;
 
+    let site_profile = uvr_core::r_version::openmp::runtime_site_profile_for_binary(&r_binary);
     let env = REnv {
         r_binary,
         library: project.library_path(),
         with_library: None,
         extra_libs: uvr_core::env_vars::extra_libs(),
+        site_profile,
     };
     Ok((project.manifest.project.name.clone(), env, prompt))
 }
@@ -470,6 +472,7 @@ mod tests {
             library: PathBuf::from("/proj/.uvr/library"),
             with_library: None,
             extra_libs: None,
+            site_profile: None,
         }
     }
 

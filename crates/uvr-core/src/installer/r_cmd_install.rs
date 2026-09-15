@@ -357,6 +357,18 @@ impl RCmdInstall {
         let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
         cmd.env("R_PROFILE_USER", null_device);
 
+        // The *site* profile goes the other way: point it at uvr's own so the
+        // OpenMP runtime is loaded in the lazy-loading child sessions too
+        // (#261). Inherited by every R this install spawns, which is the
+        // point.
+        if let Some(profile) =
+            crate::r_version::openmp::runtime_site_profile_for_binary(Path::new(&self.r_binary))
+        {
+            for (k, v) in crate::r_version::openmp::site_profile_env(&profile) {
+                cmd.env(k, v);
+            }
+        }
+
         if cfg!(target_os = "windows") {
             let mut path_ext = String::new();
             let rtools_candidates: Vec<String> = [
