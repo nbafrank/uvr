@@ -39,6 +39,15 @@ Pure tracking section — fixes and small features land here between tags.
   `uvr r uninstall <ver> && uvr r install <ver>`. Reported with a
   verified one-line diagnosis by @Felixmil.
 
+- **`uvr scan --add` adds the packages a scan reports** (#78, #251). `uvr scan`
+  already found every `library()`, `require()`, `pkg::fn` and roxygen `@import`
+  the code uses, then asked the user to retype the list into `uvr add`.
+  `--add` hands the missing set straight to `uvr add`, which makes adopting an
+  unmanaged project one command. Composing with `add` rather than writing the
+  manifest directly means resolution, the lockfile update, the install and the
+  rollback-on-failure stay one implementation — including `add`'s
+  all-or-nothing semantics. Conflicts with `--all`, which reports declared
+  packages too and so has nothing actionable in it.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use
