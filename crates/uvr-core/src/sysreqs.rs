@@ -596,11 +596,44 @@ pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
                 .stderr(std::process::Stdio::null())
                 .status();
             match output {
-                Ok(status) => !status.success(),
+                Ok(status) => {
+                    !status.success()
+                        && !(cmd == "rpm" && rpm_compat_devel_is_satisfied(&req.package))
+                }
                 Err(_) => false, // command failed to run — don't report as missing
             }
         })
         .collect()
+}
+
+/// The EL9 catalog still requests EPEL's GDAL 3.4 development package, which
+/// conflicts with the newer canonical gdal-devel shipped by RHEL. Accept the
+/// installed canonical headers when they meet that version floor. Do not alias
+/// gdal3.4 itself: binary R packages may still link its older library SONAME.
+fn rpm_compat_devel_is_satisfied(package: &str) -> bool {
+    if package != "gdal3.4-devel" {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("rpm")
+        .args(["-q", "--qf", "%{VERSION}\\n", "gdal-devel"])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && canonical_gdal_devel_is_compatible(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn canonical_gdal_devel_is_compatible(versions: &str) -> bool {
+    // There may be multiple installed architectures. Be conservative if any
+    // reported version is unrecognised or too old.
+    !versions.trim().is_empty()
+        && versions.lines().all(|version| {
+            semver::Version::parse(version.trim())
+                .map(|version| version >= semver::Version::new(3, 4, 0))
+                .unwrap_or(false)
+        })
 }
 
 /// Aggregate result of a sysreqs check across many packages.
@@ -808,6 +841,39 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_gdal_devel_accepts_compatible_versions() {
+        for version in ["3.4.0", "3.4.3\n", "3.10.3\n", "3.10.3\n3.10.3\n"] {
+            assert!(canonical_gdal_devel_is_compatible(version), "{version:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_gdal_devel_rejects_old_or_unknown_versions() {
+        for version in [
+            "",
+            "\n",
+            "3.3.3",
+            "3.4.0-rc.1",
+            "unknown",
+            "3.10.3\n3.3.3\n",
+        ] {
+            assert!(!canonical_gdal_devel_is_compatible(version), "{version:?}");
+        }
+    }
+
+    #[test]
+    fn rpm_compat_devel_never_substitutes_runtime_or_unrelated_packages() {
+        for package in [
+            "gdal3.4",
+            "gdal3.4-libs",
+            "udunits2-devel",
+            "abseil-cpp-devel",
+        ] {
+            assert!(!rpm_compat_devel_is_satisfied(package));
+        }
+    }
 
     #[test]
     fn every_package_manager_names_a_runnable_install_command() {
