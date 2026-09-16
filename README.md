@@ -495,6 +495,31 @@ anything executes as root. Requirements are resolved from the
 rules vendored into uvr, cross-checked against Posit's sysreqs API when
 reachable.
 
+RPM checks recognize installed virtual providers as well as exact package names.
+For catalog names that your image deliberately replaces, set `UVR_SYSREQS_OVERRIDES` to an operator-maintained TOML file:
+
+```toml
+[[overrides]]
+distro = "redhat-9"
+package = "gdal3.4-devel"
+installed = "gdal-devel"
+pkg_config = "gdal"
+minimum_version = "3.4"
+```
+
+Each rule applies only to the exact normalized distro/release and catalog package name.
+The alternative package or RPM capability must already be installed.
+When `pkg_config` is supplied, that module must exist; `minimum_version` additionally requires it to pass `pkg-config --atleast-version` and cannot be used without `pkg_config`.
+This checks the SDK version rather than assuming that arbitrary distribution package versions follow semantic versioning.
+Both optional fields can be omitted for an operator-verified package alias.
+
+Overrides apply to both Posit's API and the local rules, and each applied override is printed during sync.
+If an alternative is absent or its check fails, the original requirement remains in the installation plan.
+Overrides do not install alternatives, infer compatibility from names, or suppress runtime requirements: in the example, `gdal3.4` still gets installed if required by binary R packages.
+Only declare an alternative after verifying its compatibility with the packages your image builds.
+A missing or invalid explicitly configured file, unknown fields, and duplicate distro/package rules stop the dependency check with an error.
+No override file is loaded unless `UVR_SYSREQS_OVERRIDES` is set to a nonempty path.
+
 ---
 
 ## Environment diagnostics
