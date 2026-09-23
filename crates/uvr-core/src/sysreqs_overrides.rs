@@ -2,8 +2,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+
+use crate::error::{Result, UvrError};
 
 /// Operator-supplied alternatives to catalog package names. These only accept
 /// verified installed providers; they never erase packages or guess aliases.
@@ -26,24 +27,31 @@ struct Override {
 
 impl Overrides {
     pub(crate) fn load() -> Result<Self> {
-        let Some(path) = std::env::var_os("UVR_SYSREQS_OVERRIDES").filter(|p| !p.is_empty()) else {
+        let Some(path) = crate::env_vars::sysreqs_overrides() else {
             return Ok(Self::default());
         };
         Self::from_path(Path::new(&path))
     }
 
     fn from_path(path: &Path) -> Result<Self> {
-        let source = std::fs::read_to_string(path).with_context(|| {
-            format!("Cannot read system dependency overrides {}", path.display())
+        let source = std::fs::read_to_string(path).map_err(|err| {
+            UvrError::Other(format!(
+                "Cannot read system dependency overrides {}: {err}",
+                path.display()
+            ))
         })?;
-        Self::parse(&source)
-            .with_context(|| format!("Invalid system dependency overrides {}", path.display()))
+        Self::parse(&source).map_err(|err| {
+            UvrError::Other(format!(
+                "Invalid system dependency overrides {}: {err}",
+                path.display()
+            ))
+        })
     }
 
     pub(crate) fn parse(source: &str) -> Result<Self> {
-        let policy: Self = toml::from_str(source)?;
+        let mut policy: Self = toml::from_str(source)?;
         let mut seen = HashSet::new();
-        for rule in &policy.overrides {
+        for rule in &mut policy.overrides {
             for (field, value) in [
                 ("distro", rule.distro.as_str()),
                 ("package", rule.package.as_str()),
@@ -51,20 +59,33 @@ impl Overrides {
             ] {
                 validate_token(field, value)?;
             }
-            if !rule.distro.contains('-') {
-                bail!("distro must include an explicit release, e.g. redhat-9");
-            }
+            let Some((id, release)) = rule
+                .distro
+                .rsplit_once('-')
+                .filter(|(id, release)| !id.is_empty() && !release.is_empty())
+            else {
+                return Err(UvrError::Other(
+                    "distro must include an explicit release, e.g. redhat-9".into(),
+                ));
+            };
+            let (id, release) = crate::sysreqs::normalize_distro(id, release);
+            rule.distro = format!("{id}-{release}");
             if let Some(module) = &rule.pkg_config {
                 validate_token("pkg_config", module)?;
             }
             if let Some(version) = &rule.minimum_version {
                 validate_token("minimum_version", version)?;
                 if rule.pkg_config.is_none() {
-                    bail!("minimum_version requires pkg_config");
+                    return Err(UvrError::Other(
+                        "minimum_version requires pkg_config".into(),
+                    ));
                 }
             }
             if !seen.insert((&rule.distro, &rule.package)) {
-                bail!("duplicate override for {} on {}", rule.package, rule.distro);
+                return Err(UvrError::Other(format!(
+                    "duplicate override for {} on {}",
+                    rule.package, rule.distro
+                )));
             }
         }
         Ok(policy)
@@ -116,7 +137,9 @@ fn validate_token(field: &str, value: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._+-():~".contains(c))
     {
-        bail!("{field} must be a nonempty name/version, not an option, path, or expression");
+        return Err(UvrError::Other(format!(
+            "{field} must be a nonempty name/version, not an option, path, or expression"
+        )));
     }
     Ok(())
 }
@@ -145,6 +168,30 @@ minimum_version = "3.4"
             &RULE.replace("pkg_config = \"modern\"\nminimum_version = \"3.4\"", "")
         )
         .is_ok());
+    }
+
+    #[test]
+    fn normalize_configured_distro_like_host_detection() {
+        for (configured, normalized) in [
+            ("redhat-9", "redhat-9"),
+            ("rhel-9.4", "redhat-9"),
+            ("redhat-9.4", "redhat-9"),
+            ("ol-9.4", "redhat-9"),
+            ("rocky-9", "rockylinux-9"),
+            ("almalinux-9.4", "rockylinux-9"),
+            ("opensuse-leap-15.6", "opensuse-15.6"),
+            ("sles-15.6", "sle-15.6"),
+            ("ubuntu-22.04", "ubuntu-22.04"),
+        ] {
+            let policy = Overrides::parse(&RULE.replace("redhat-9", configured)).unwrap();
+            assert_eq!(policy.overrides[0].distro, normalized, "{configured}");
+        }
+        for alias in ["rhel-9.4", "ol-9", "redhat-9.4"] {
+            let source = format!("{RULE}\n{}", RULE.replace("redhat-9", alias));
+            let error = Overrides::parse(&source).unwrap_err();
+            assert!(error.to_string().contains("duplicate override"));
+        }
+        assert!(Overrides::parse(&RULE.replace("redhat-9", "redhat-")).is_err());
     }
 
     #[test]

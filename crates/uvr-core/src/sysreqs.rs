@@ -583,18 +583,19 @@ fn package_query() -> Option<(&'static str, &'static [&'static str])> {
     }
 }
 
-fn query_installed(cmd: &str, args: &[&str], package: &str) -> bool {
+fn query_installed(cmd: &str, args: &[&str], package: &str) -> Option<bool> {
     std::process::Command::new(cmd)
         .args(args)
         .arg(package)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .ok()
+        .map(|status| status.success())
 }
 
 pub(crate) fn has_installed_package(package: &str) -> bool {
-    package_query().is_some_and(|(cmd, args)| query_installed(cmd, args, package))
+    package_query().is_some_and(|(cmd, args)| query_installed(cmd, args, package) == Some(true))
 }
 
 /// Check which packages are missing on the system.
@@ -607,7 +608,7 @@ pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
     };
     packages
         .iter()
-        .filter(|req| !query_installed(cmd, args, &req.package))
+        .filter(|req| query_installed(cmd, args, &req.package) == Some(false))
         .collect()
 }
 
@@ -715,7 +716,7 @@ pub async fn check_system_deps(
     client: &reqwest::Client,
     packages: &[PackageSysReqQuery],
     distro: &str,
-) -> anyhow::Result<SysReqsCheck> {
+) -> crate::error::Result<SysReqsCheck> {
     let overrides = crate::sysreqs_overrides::Overrides::load()?;
     let mut out = SysReqsCheck::default();
 
@@ -847,11 +848,16 @@ fn check_pkg_local(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn api_overrides_are_deduplicated_and_drop_unneeded_setup_commands() {
-        if !has_installed_package("bash") {
+        if !with_fake_rpm(
+            "api_overrides_are_deduplicated_and_drop_unneeded_setup_commands",
+            "#!/bin/sh\n[ \"$*\" = '-q --whatprovides bash' ]\n",
+        ) {
             return;
         }
+        assert!(has_installed_package("bash"));
         let overrides = crate::sysreqs_overrides::Overrides::parse(
             "[[overrides]]\ndistro = 'redhat-9'\npackage = 'uvr-test-legacy-devel'\ninstalled = 'bash'",
         )
@@ -898,6 +904,62 @@ mod tests {
         assert!(unmatched.overrides_applied.is_empty());
         assert_eq!(unmatched.pre_install.len(), 1);
         assert_eq!(unmatched.post_install.len(), 1);
+    }
+
+    // Each test runs itself in a child with an isolated PATH, including on
+    // hosts such as Arch that have none of the supported package databases.
+    #[cfg(unix)]
+    fn with_fake_rpm(test: &str, script: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        // Other unit tests change loader variables; inherit a stable snapshot.
+        let _env = crate::env_vars::env_lock();
+        if std::env::var("UVR_TEST_SYSREQS_CHILD").as_deref() == Ok(test) {
+            return true;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rpm = dir.path().join("rpm");
+        std::fs::write(&rpm, script).unwrap();
+        std::fs::set_permissions(&rpm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("sysreqs::tests::{test}"), "--nocapture"])
+            .env("PATH", dir.path())
+            .env("UVR_TEST_SYSREQS_CHILD", test)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_spawn_failure_is_neither_missing_nor_an_installed_alternative() {
+        // which finds the executable, but exec cannot find its interpreter.
+        if !with_fake_rpm(
+            "probe_spawn_failure_is_neither_missing_nor_an_installed_alternative",
+            "#!/uvr-nonexistent-interpreter\n",
+        ) {
+            return;
+        }
+        assert!(package_query().is_some());
+        assert_eq!(
+            query_installed("rpm", &["-q", "--whatprovides"], "sdk"),
+            None
+        );
+        assert!(!has_installed_package("sdk"));
+        let reqs = [SysReq {
+            package: "sdk".into(),
+        }];
+        assert!(filter_missing(&reqs).is_empty());
+        let overrides = crate::sysreqs_overrides::Overrides::parse(
+            "[[overrides]]\ndistro = 'redhat-9'\npackage = 'legacy'\ninstalled = 'sdk'",
+        )
+        .unwrap();
+        assert!(overrides.satisfied_by("redhat-9", "legacy").is_none());
     }
 
     #[test]
@@ -975,8 +1037,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn bioc_packages_skip_the_posit_api_entirely() {
+    #[test]
+    fn bioc_packages_skip_the_posit_api_entirely() {
+        let _env = crate::env_vars::env_lock();
         // #202: the Posit sysreqs API 500s for every Bioc name. Bioc-flagged
         // queries must go straight to local rules: no request is made, so
         // neither lookup_failed (API contact failed) nor unsupported_distro
@@ -998,8 +1061,9 @@ mod tests {
                 bioc: true,
             },
         ];
-        let check = check_system_deps(&client, &queries, "ubuntu-22.04")
-            .await
+        let check = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(check_system_deps(&client, &queries, "ubuntu-22.04"))
             .unwrap();
         assert!(!check.lookup_failed, "no API contact → no failed lookups");
         assert!(!check.unsupported_distro);

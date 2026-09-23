@@ -176,6 +176,26 @@ impl REnv {
 mod tests {
     use super::*;
 
+    // Subprocess tests may need the runner's loader paths to start at all.
+    struct LibraryPathGuard([(&'static str, Option<std::ffi::OsString>); 2]);
+
+    impl LibraryPathGuard {
+        fn new() -> Self {
+            Self(["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"].map(|key| (key, std::env::var_os(key))))
+        }
+    }
+
+    impl Drop for LibraryPathGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     fn renv() -> REnv {
         REnv {
             r_binary: PathBuf::from("/opt/R/4.4.2/bin/R"),
@@ -266,6 +286,7 @@ mod tests {
     #[test]
     fn vars_isolate_the_project_from_system_libraries() {
         let _env = crate::env_vars::env_lock();
+        let _paths = LibraryPathGuard::new();
         // Clear module-provided paths so the test is deterministic.
         std::env::remove_var("LD_LIBRARY_PATH");
         std::env::remove_var("DYLD_LIBRARY_PATH");
@@ -302,6 +323,7 @@ mod tests {
         // and activation scripts.
         let _env = crate::env_vars::env_lock();
         let module_blas = "/apps/rocs/OpenBLAS/lib";
+        let _paths = LibraryPathGuard::new();
         std::env::set_var("LD_LIBRARY_PATH", module_blas);
         std::env::remove_var("DYLD_LIBRARY_PATH");
 
@@ -335,6 +357,7 @@ mod tests {
         // a security hazard.
         let _env = crate::env_vars::env_lock();
         let inherited = "/some/blas/lib";
+        let _paths = LibraryPathGuard::new();
         std::env::set_var("LD_LIBRARY_PATH", inherited);
         std::env::set_var("DYLD_LIBRARY_PATH", inherited);
 
