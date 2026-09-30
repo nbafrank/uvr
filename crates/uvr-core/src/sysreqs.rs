@@ -571,33 +571,63 @@ async fn fetch_sysreqs_index(client: &reqwest::Client, distro: &str) -> SysReqIn
     }
 }
 
-/// Check which packages are missing on the system.
-/// Uses `dpkg -s` on Debian/Ubuntu, `rpm -q` on Fedora/RHEL/SUSE.
-/// If neither package manager is found, returns an empty list (skip check).
-pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
-    let (cmd, args): (&str, &[&str]) = if which::which("dpkg").is_ok() {
-        ("dpkg", &["-s"])
+fn package_query() -> Option<(&'static str, &'static [&'static str])> {
+    if which::which("dpkg").is_ok() {
+        Some(("dpkg", &["-s"]))
     } else if which::which("rpm").is_ok() {
-        ("rpm", &["-q"])
+        Some(("rpm", &["-q", "--whatprovides"]))
     } else if which::which("apk").is_ok() {
-        ("apk", &["info", "-e"])
+        Some(("apk", &["info", "-e"]))
     } else {
+        None
+    }
+}
+
+fn query_installed(cmd: &str, args: &[&str], package: &str) -> Option<bool> {
+    std::process::Command::new(cmd)
+        .args(args)
+        .arg(package)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()
+        .map(|status| status.success())
+}
+
+pub(crate) fn has_installed_package(package: &str) -> bool {
+    package_query().is_some_and(|(cmd, args)| query_installed(cmd, args, package) == Some(true))
+}
+
+/// Check which packages are missing on the system.
+/// RPM queries include declared virtual providers, not just exact package names.
+/// If no supported package database is found, skip the check.
+pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
+    let Some((cmd, args)) = package_query() else {
         debug!("No supported package manager (dpkg/rpm/apk) found, skipping sysreqs check");
         return vec![];
     };
-
     packages
         .iter()
+        .filter(|req| query_installed(cmd, args, &req.package) == Some(false))
+        .collect()
+}
+
+fn filter_with_overrides<'a>(
+    out: &mut SysReqsCheck,
+    packages: &'a [SysReq],
+    distro: &str,
+    overrides: &crate::sysreqs_overrides::Overrides,
+) -> Vec<&'a SysReq> {
+    filter_missing(packages)
+        .into_iter()
         .filter(|req| {
-            let output = std::process::Command::new(cmd)
-                .args(args)
-                .arg(&req.package)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            match output {
-                Ok(status) => !status.success(),
-                Err(_) => false, // command failed to run — don't report as missing
+            if let Some(description) = overrides.satisfied_by(distro, &req.package) {
+                if !out.overrides_applied.contains(&description) {
+                    out.overrides_applied.push(description);
+                }
+                false
+            } else {
+                true
             }
         })
         .collect()
@@ -606,6 +636,8 @@ pub fn filter_missing(packages: &[SysReq]) -> Vec<&SysReq> {
 /// Aggregate result of a sysreqs check across many packages.
 #[derive(Debug, Default)]
 pub struct SysReqsCheck {
+    /// Explicit installed-provider overrides applied during this check.
+    pub overrides_applied: Vec<String>,
     /// Missing system packages keyed by R package name.
     pub missing: HashMap<String, Vec<SysReq>>,
     /// Set when the Posit API reported the distro as unsupported.
@@ -684,7 +716,8 @@ pub async fn check_system_deps(
     client: &reqwest::Client,
     packages: &[PackageSysReqQuery],
     distro: &str,
-) -> SysReqsCheck {
+) -> crate::error::Result<SysReqsCheck> {
+    let overrides = crate::sysreqs_overrides::Overrides::load()?;
     let mut out = SysReqsCheck::default();
 
     // Skip the fetch entirely when every package in the sync is Bioc-sourced:
@@ -711,9 +744,9 @@ pub async fn check_system_deps(
         None
     };
 
-    apply_index(&mut out, packages, index.as_ref(), distro);
+    apply_index(&mut out, packages, index.as_ref(), distro, &overrides);
 
-    out
+    Ok(out)
 }
 
 /// Decide, per package, whether to use the fetched index or the vendored
@@ -728,12 +761,13 @@ fn apply_index(
     packages: &[PackageSysReqQuery],
     index: Option<&HashMap<String, SysReqIndexEntry>>,
     distro: &str,
+    overrides: &crate::sysreqs_overrides::Overrides,
 ) {
     for pkg in packages {
         // The Posit API is CRAN-only; Bioc names are absent from its index,
         // so check them against the vendored local rules directly (#202).
         let Some(index) = index.filter(|_| !pkg.bioc) else {
-            check_pkg_local(out, pkg, distro);
+            check_pkg_local(out, pkg, distro, overrides);
             continue;
         };
         let Some(entry) = index.get(&pkg.name) else {
@@ -741,7 +775,7 @@ fn apply_index(
             // requirements, which is the common case.
             continue;
         };
-        let missing = filter_missing(&entry.packages);
+        let missing = filter_with_overrides(out, &entry.packages, distro, overrides);
         if !missing.is_empty() {
             // Same rule as the local path: setup commands only matter when
             // something is actually missing — otherwise every sync on a
@@ -767,7 +801,12 @@ fn apply_index(
 /// `r-system-requirements` rules and record any missing system packages.
 /// Shared by the unsupported-distro / lookup-failed fallback in
 /// `apply_index` and the direct Bioc bypass in the same function.
-fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &str) {
+fn check_pkg_local(
+    out: &mut SysReqsCheck,
+    pkg: &PackageSysReqQuery,
+    distro: &str,
+    overrides: &crate::sysreqs_overrides::Overrides,
+) {
     let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
     let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
         return;
@@ -790,7 +829,7 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     // Past this point the local rules produced a real answer for this
     // package, whether or not anything turns out to be missing.
     out.local_resolved += 1;
-    let missing = filter_missing(&resolved);
+    let missing = filter_with_overrides(out, &resolved, distro, overrides);
     if !missing.is_empty() {
         // Setup commands only matter when something is actually missing —
         // otherwise every sync on a Rocky box would re-enable EPEL.
@@ -808,6 +847,120 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn api_overrides_are_deduplicated_and_drop_unneeded_setup_commands() {
+        if !with_fake_rpm(
+            "api_overrides_are_deduplicated_and_drop_unneeded_setup_commands",
+            "#!/bin/sh\n[ \"$*\" = '-q --whatprovides bash' ]\n",
+        ) {
+            return;
+        }
+        assert!(has_installed_package("bash"));
+        let overrides = crate::sysreqs_overrides::Overrides::parse(
+            "[[overrides]]\ndistro = 'redhat-9'\npackage = 'uvr-test-legacy-devel'\ninstalled = 'bash'",
+        )
+        .unwrap();
+        // Use the actual API entry type so this also tests the API path when
+        // both packages share a single overridden requirement.
+        let mut index = HashMap::new();
+        for name in ["first", "second"] {
+            index.insert(
+                name.to_string(),
+                SysReqIndexEntry {
+                    packages: vec![SysReq {
+                        package: "uvr-test-legacy-devel".into(),
+                    }],
+                    pre_install: vec!["echo setup".into()],
+                    post_install: vec!["echo done".into()],
+                },
+            );
+        }
+        let packages: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| PackageSysReqQuery {
+                name: name.into(),
+                system_requirements: None,
+                bioc: false,
+            })
+            .collect();
+        let mut out = SysReqsCheck::default();
+        apply_index(&mut out, &packages, Some(&index), "redhat-9", &overrides);
+        assert!(out.missing.is_empty());
+        assert_eq!(out.overrides_applied.len(), 1);
+        assert!(out.pre_install.is_empty());
+        assert!(out.post_install.is_empty());
+
+        let mut unmatched = SysReqsCheck::default();
+        apply_index(
+            &mut unmatched,
+            &packages,
+            Some(&index),
+            "redhat-10",
+            &overrides,
+        );
+        assert_eq!(unmatched.missing.len(), 2);
+        assert!(unmatched.overrides_applied.is_empty());
+        assert_eq!(unmatched.pre_install.len(), 1);
+        assert_eq!(unmatched.post_install.len(), 1);
+    }
+
+    // Each test runs itself in a child with an isolated PATH, including on
+    // hosts such as Arch that have none of the supported package databases.
+    #[cfg(unix)]
+    fn with_fake_rpm(test: &str, script: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        // Other unit tests change loader variables; inherit a stable snapshot.
+        let _env = crate::env_vars::env_lock();
+        if std::env::var("UVR_TEST_SYSREQS_CHILD").as_deref() == Ok(test) {
+            return true;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let rpm = dir.path().join("rpm");
+        std::fs::write(&rpm, script).unwrap();
+        std::fs::set_permissions(&rpm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("sysreqs::tests::{test}"), "--nocapture"])
+            .env("PATH", dir.path())
+            .env("UVR_TEST_SYSREQS_CHILD", test)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_spawn_failure_is_neither_missing_nor_an_installed_alternative() {
+        // which finds the executable, but exec cannot find its interpreter.
+        if !with_fake_rpm(
+            "probe_spawn_failure_is_neither_missing_nor_an_installed_alternative",
+            "#!/uvr-nonexistent-interpreter\n",
+        ) {
+            return;
+        }
+        assert!(package_query().is_some());
+        assert_eq!(
+            query_installed("rpm", &["-q", "--whatprovides"], "sdk"),
+            None
+        );
+        assert!(!has_installed_package("sdk"));
+        let reqs = [SysReq {
+            package: "sdk".into(),
+        }];
+        assert!(filter_missing(&reqs).is_empty());
+        let overrides = crate::sysreqs_overrides::Overrides::parse(
+            "[[overrides]]\ndistro = 'redhat-9'\npackage = 'legacy'\ninstalled = 'sdk'",
+        )
+        .unwrap();
+        assert!(overrides.satisfied_by("redhat-9", "legacy").is_none());
+    }
 
     #[test]
     fn every_package_manager_names_a_runnable_install_command() {
@@ -884,8 +1037,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn bioc_packages_skip_the_posit_api_entirely() {
+    #[test]
+    fn bioc_packages_skip_the_posit_api_entirely() {
+        let _env = crate::env_vars::env_lock();
         // #202: the Posit sysreqs API 500s for every Bioc name. Bioc-flagged
         // queries must go straight to local rules: no request is made, so
         // neither lookup_failed (API contact failed) nor unsupported_distro
@@ -907,7 +1061,10 @@ mod tests {
                 bioc: true,
             },
         ];
-        let check = check_system_deps(&client, &queries, "ubuntu-22.04").await;
+        let check = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(check_system_deps(&client, &queries, "ubuntu-22.04"))
+            .unwrap();
         assert!(!check.lookup_failed, "no API contact → no failed lookups");
         assert!(!check.unsupported_distro);
     }
@@ -1178,7 +1335,12 @@ mod tests {
             ),
             bioc: false,
         };
-        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        check_pkg_local(
+            &mut out,
+            &pkg,
+            "alpine-3.23.5",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(
             out.local_resolved, 1,
             "libxml2 resolves to libxml2-dev on alpine; that is a real answer"
@@ -1193,7 +1355,12 @@ mod tests {
             system_requirements: None,
             bioc: false,
         };
-        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        check_pkg_local(
+            &mut out,
+            &pkg,
+            "alpine-3.23.5",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(out.local_resolved, 0);
     }
 
@@ -1208,7 +1375,12 @@ mod tests {
             system_requirements: Some("a-library-no-rule-mentions-xyzzy".to_string()),
             bioc: false,
         };
-        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        check_pkg_local(
+            &mut out,
+            &pkg,
+            "alpine-3.23.5",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(out.local_resolved, 0);
     }
 
@@ -1228,7 +1400,13 @@ mod tests {
             ),
             bioc: false,
         }];
-        apply_index(&mut out, &packages, None, "alpine-3.23.5");
+        apply_index(
+            &mut out,
+            &packages,
+            None,
+            "alpine-3.23.5",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(
             out.local_resolved, 1,
             "with no index, xml2 must be resolved via the local rules"
@@ -1257,7 +1435,13 @@ mod tests {
             system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
             bioc: false,
         }];
-        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "ubuntu-22.04",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(
             out.local_resolved, 0,
             "curl is in the index, so the local rules must be bypassed entirely"
@@ -1293,7 +1477,13 @@ mod tests {
             system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
             bioc: false,
         }];
-        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "ubuntu-22.04",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert!(
             out.missing.is_empty(),
             "a package absent from the index must not produce a missing entry"
@@ -1334,7 +1524,13 @@ mod tests {
                 bioc: false,
             },
         ];
-        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "ubuntu-22.04",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(
             out.local_resolved, 1,
             "only the Bioc package (Rhtslib) should have gone through the local rules"
@@ -1374,7 +1570,13 @@ mod tests {
                 bioc: false,
             },
         ];
-        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "ubuntu-22.04",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(out.local_resolved, 0);
         assert_eq!(
             out.local_unresolved, 1,
@@ -1402,7 +1604,13 @@ mod tests {
                 bioc: true,
             },
         ];
-        apply_index(&mut out, &packages, None, "ubuntu-22.04");
+        apply_index(
+            &mut out,
+            &packages,
+            None,
+            "ubuntu-22.04",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(out.local_unresolved, 0);
         assert_eq!(out.local_resolved, 0);
     }
@@ -1490,7 +1698,13 @@ mod tests {
             system_requirements: None,
             bioc: false,
         }];
-        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "rockylinux-9",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert!(
             out.pre_install.is_empty(),
             "sf has no packages, so nothing can be missing, so no setup command should be collected"
@@ -1545,7 +1759,13 @@ mod tests {
                 bioc: false,
             },
         ];
-        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "rockylinux-9",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         assert_eq!(
             out.missing.len(),
             2,
@@ -1614,7 +1834,13 @@ mod tests {
                 bioc: true,
             },
         ];
-        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        apply_index(
+            &mut out,
+            &packages,
+            Some(&index),
+            "rockylinux-9",
+            &crate::sysreqs_overrides::Overrides::default(),
+        );
         let shared = out
             .pre_install
             .iter()

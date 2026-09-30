@@ -76,6 +76,32 @@ pub fn install_timeout() -> Option<String> {
     read_env_var("UVR_INSTALL_TIMEOUT")
 }
 
+/// UVR_SYSREQS_OVERRIDES
+///
+/// Path to an operator-maintained TOML file of installed-provider alternatives.
+/// Unset, empty, and whitespace-only values disable overrides.
+/// Missing or invalid explicitly selected files fail the dependency check.
+///
+/// ```toml
+/// [[overrides]]
+/// distro = "rhel-9.4"
+/// package = "gdal3.4-devel"
+/// installed = "gdal-devel"
+/// pkg_config = "gdal"
+/// minimum_version = "3.4"
+/// ```
+///
+/// Distro IDs are normalized as in host detection: `rhel`/`ol` become `redhat`,
+/// `rocky`/`almalinux` become `rockylinux`, and RHEL-family releases use the major
+/// version. `opensuse-leap-15.6` becomes `opensuse-15.6`, retaining the minor.
+/// The alternative must be installed; optional `pkg_config` and
+/// `minimum_version` fields additionally verify its SDK. A minimum requires
+/// a module. Failed checks retain the catalog requirement, including runtime
+/// packages not explicitly matched by a rule. Duplicate normalized rules fail.
+pub fn sysreqs_overrides() -> Option<PathBuf> {
+    read_env_var("UVR_SYSREQS_OVERRIDES").map(PathBuf::from)
+}
+
 /// UVR_LIBRARY
 ///
 /// Defines a custom library directory in place of the project-local
@@ -278,6 +304,7 @@ mod tests {
             "UVR_EXTRA_LIBS",
             "UVR_INSTALL_DIR",
             "UVR_INSTALL_TIMEOUT",
+            "UVR_SYSREQS_OVERRIDES",
             "UVR_LIBRARY",
             "UVR_NO_COMPANION",
             "UVR_PACKAGES_DIR",
@@ -298,6 +325,7 @@ mod tests {
         assert_eq!(extra_libs(), None);
         assert_eq!(install_dir(), None);
         assert_eq!(install_timeout(), None);
+        assert_eq!(sysreqs_overrides(), None);
         assert_eq!(library(), None);
         assert!(!no_companion());
         assert!(!unattended());
@@ -320,6 +348,12 @@ mod tests {
 
         env::set_var("UVR_INSTALL_TIMEOUT", "60s");
         assert_eq!(install_timeout(), Some("60s".to_string()));
+
+        env::set_var("UVR_SYSREQS_OVERRIDES", "/custom/sysreqs.toml");
+        assert_eq!(
+            sysreqs_overrides(),
+            Some(PathBuf::from("/custom/sysreqs.toml"))
+        );
 
         env::set_var("UVR_LIBRARY", "/custom/library");
         assert_eq!(library(), Some(PathBuf::from("/custom/library")));
@@ -357,6 +391,7 @@ mod tests {
         for &var in &vars_to_test {
             env::set_var(var, "");
         }
+        assert_eq!(sysreqs_overrides(), None);
 
         let empty_cache = cache_dir();
         assert!(empty_cache.is_some());
@@ -380,6 +415,7 @@ mod tests {
             env::set_var(var, "   ");
         }
         assert_eq!(extra_libs(), None);
+        assert_eq!(sysreqs_overrides(), None);
     }
 
     // #161: the last-resort cache location must never be the working
