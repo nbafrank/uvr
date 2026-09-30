@@ -357,6 +357,14 @@ impl RCmdInstall {
         let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
         cmd.env("R_PROFILE_USER", null_device);
 
+        // Package build scripts are third-party code; they get no
+        // repository credentials (#185).
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(crate::auth::is_credential_var) {
+                cmd.env_remove(key);
+            }
+        }
+
         // The *site* profile goes the other way: point it at uvr's own so the
         // OpenMP runtime is loaded in the lazy-loading child sessions too
         // (#261). Inherited by every R this install spawns, which is the
@@ -566,6 +574,21 @@ mod tests {
         std::env::remove_var("UVR_INSTALL_TIMEOUT");
         let d = effective_install_timeout(None);
         assert_eq!(d, DEFAULT_INSTALL_TIMEOUT);
+    }
+
+    #[test]
+    fn build_cmd_withholds_repository_credentials() {
+        let _env = crate::env_vars::env_lock();
+        std::env::set_var("UVR_REPO_TOKEN_BUILDTEST", "tok123");
+        let cmd = RCmdInstall::new("R").build_cmd(Path::new("a.tar.gz"), Path::new("lib"));
+        std::env::remove_var("UVR_REPO_TOKEN_BUILDTEST");
+        let removed = cmd
+            .get_envs()
+            .any(|(k, v)| k == "UVR_REPO_TOKEN_BUILDTEST" && v.is_none());
+        assert!(
+            removed,
+            "the credential must be removed from R's environment"
+        );
     }
 
     #[test]

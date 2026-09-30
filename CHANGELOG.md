@@ -5,7 +5,97 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
+- Verify installed and cached generic Git package provenance before reuse, including same-version content or origin changes. Frozen sync validates manifest inputs locally and restores the locked commit without following remote branch changes.
+
 Pure tracking section — fixes and small features land here between tags.
+
+- **IDE config is now opt-in; CI mode is explicit** (#176, #206).
+  `uvr init`/`sync`/`import` no longer assume an RStudio/Positron workflow:
+  `.vscode/settings.json` and IDE-oriented hints are only produced when
+  Positron is detected (`POSITRON=1`) or forced with `--ide=positron` (now
+  scoped to `init`/`sync`/`import`).
+  `--no-ide` suppresses them, `--no-companion` (`UVR_NO_COMPANION=1`) skips
+  the injected companion R package, and `--unattended` (`UVR_UNATTENDED=1`)
+  disables all of the above *and* every working-tree write (`.Rprofile`,
+  `.gitignore`, activation shims) so a checked-out repository stays
+  byte-identical. `uvr sync --frozen` runs its staleness check before writing
+  any scaffolding, so a stale lockfile fails without dirtying the checkout.
+  `uvr init --bare` is the persistent form for interactive
+  use: `uvr.toml`, `.uvr/library/`, and a protective `.gitignore`, persisted
+  in `[project] bare = true`.
+
+- **`uvr scan` now detects `box::use()` imports.** Package declarations
+  (`box::use(dplyr[filter])`, `box::use(gg = ggplot2)`) are discovered;
+  local module paths (`box::use(./mod)`, `box::use(prefix/mod)`) are
+  ignored.
+
+- **Packages from any git host** (#190). A dependency can now name a git
+  repository by its clone URL: `uvr add git::https://git.example.com/team/pkg.git@v1.0`,
+  or `pkg = { git = "git::<url>", rev = "v1.0" }` in `uvr.toml`. This covers
+  Bitbucket, a self-hosted GitLab or Gitea, and company git servers. uvr runs
+  `git` to find and fetch the commit, locks it (`source = "git:<url>"`,
+  `checksum = "git:<sha>"`), installs it from source, and keeps it in the
+  download cache. `https://`, `ssh://` and `user@host:path` URLs work;
+  `http://` and `file://` work with a warning. A private https repository
+  takes `UVR_GIT_TOKEN_<HOST>` (with an optional `UVR_GIT_USER_<HOST>`) or a
+  `~/.netrc` entry; without one, git uses its own credential helpers or ssh
+  keys. `uvr doctor` now shows whether git is installed, and `uvr export`
+  writes these packages as renv `git` remotes.
+
+- **One credential path for GitHub, GitLab and Forgejo** (#187). The three
+  git hosts now get their tokens from the same resolver as `[[sources]]`
+  repositories, with the same variables and order as before. Private GitHub
+  dependencies now install: uvr also sends the token with the tarball
+  download, not only at lock time. A git host's token now goes only to URLs
+  on that host. Before, `uvr sync` could send a GitLab or Forgejo token to a
+  P3M or custom-source binary URL for a package with the same name. If a
+  host refuses a `~/.netrc` password, uvr shows a warning and continues
+  without credentials, so an old entry does not break public repositories.
+
+- **Credentials from `~/.netrc`** (#186). If no `UVR_REPO_*` variable is set
+  for a `[[sources]]` repository, uvr uses the `~/.netrc` entry for its host
+  (HTTP basic auth). GitHub, GitLab and Forgejo dependencies also use the
+  entry's password as their access token when their token variables are
+  not set. An environment credential always has precedence. `NETRC` gives a
+  different file. On Unix, uvr shows a warning and ignores a netrc file
+  that other users can access. uvr never uses a `default` entry. The
+  `401`/`403` message now also names the netrc entry to add.
+
+- **Install from authenticated repositories** (#185). A `[[sources]]`
+  repository (a private Posit Package Manager, an internal mirror) can now
+  require credentials. uvr reads them from the environment, keyed by the
+  source name: `UVR_REPO_TOKEN_<NAME>` for a bearer token, or
+  `UVR_REPO_USER_<NAME>` and `UVR_REPO_PASSWORD_<NAME>` for HTTP basic auth,
+  so `uvr.toml` never holds a secret. uvr sends the credential with the index
+  request and with each package download, but only to URLs under that
+  repository. A `401`/`403` names the repository and the variables to set.
+  Credentials never show in output, `-v` included, and `user:pass@` URLs are
+  redacted. `uvr add --source` now refuses a URL that has credentials in it.
+- Verify installed and cached URL tarball package provenance before reuse, including same-version content or origin changes. Downloads are verified against the locked checksum; frozen sync checks the declared URL locally.
+
+
+- **Depend on a source tarball by URL** (#189). `uvr add
+  https://…/pkg_1.2.0.tar.gz` records `pkg = { url = "…" }` in `uvr.toml`;
+  the lockfile pins the URL and a `sha256` checksum (`source = "url"`), and
+  `uvr sync` installs that exact file from source, never a same-named binary.
+  If the file changes, sync fails with both checksums and asks you to run
+  `uvr lock --upgrade`. A URL that is not an R source package (a web page, a built
+  binary, a tarball without one top-level package directory) is rejected
+  when you add or lock it. `uvr export` writes these as renv `URL` remotes.
+
+- **Frozen sync checks the manifest locally** (#305). New lockfiles record a
+  fingerprint of resolution inputs, so upstream releases cannot make an
+  unchanged lock fail in CI. Graph completeness and development flags are also
+  checked. Older CRAN/Bioconductor locks get a local dependency check; older
+  Git/custom-repository locks need a one-time `uvr lock` migration. Plain
+  `uvr lock` reuses the entire resolution when its inputs match; changed inputs
+  trigger a fresh resolution. Use `--upgrade` to refresh unchanged inputs.
+- **Add and remove preserve comments and other tools' manifest metadata**
+  (#306), including `[project] version` and `[tool.*]` tables.
+- **Git packages stay tied to their pinned source** (#300). Sync no longer
+  substitutes a same-name registry binary for a GitHub, GitLab, or Forgejo
+  dependency, and it checks installed and cached packages against the commit.
+- **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption

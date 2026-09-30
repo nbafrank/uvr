@@ -127,7 +127,24 @@ pm_install() {
 
 pm_refresh() {
     case "$PM" in
-        apt-get) apt-get update ;;
+        apt-get)
+            # Debian 11 left LTS on 2026-08-31. deb.debian.org still indexes
+            # bullseye-security but serves 404 for its packages, and dropping
+            # the suite does not help: the image already carries some of those
+            # updates, so the base suite cannot satisfy their dependents
+            # (#268). The image names the snapshot.debian.org copy of the
+            # security archive it was built from; switch to that. The snapshot
+            # Release file is past its Valid-Until, so every later apt run
+            # (uvr's sysreqs install included) needs the check off.
+            if grep -qs '^VERSION_CODENAME=bullseye' /etc/os-release \
+                && grep -qs '^# deb http://snapshot.debian.org/archive/debian-security/' /etc/apt/sources.list; then
+                sed -i \
+                    -e 's|^deb http://deb.debian.org/debian-security bullseye-security|# &|' \
+                    -e 's|^# \(deb http://snapshot.debian.org/archive/debian-security/[0-9TZ]* bullseye-security\)|\1|' \
+                    /etc/apt/sources.list
+                echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-uvr-snapshot
+            fi
+            apt-get update ;;
         zypper) zypper --non-interactive --gpg-auto-import-keys refresh ;;
         pacman) pacman -Sy --noconfirm ;;
         *) : ;;

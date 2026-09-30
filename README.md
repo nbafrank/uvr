@@ -221,6 +221,8 @@ uvr add DESeq2 --bioc
 uvr add tidymodels@>=1.0.0
 uvr add user/repo@main
 uvr add 'user/monorepo@main#subdirectory=packages/nestedPkg'
+uvr add git::https://git.example.com/team/anyPkg.git@v1.0   # any git host
+uvr add https://example.org/builds/mypkg_1.2.0.tar.gz
 
 # Install everything from the lockfile
 uvr sync
@@ -247,12 +249,17 @@ or to the repository root.
 | Command | Description |
 |---------|-------------|
 | `uvr init [name]` | Create `uvr.toml` and `.uvr/library/` in the current directory |
+| `uvr init --ide=positron` | Also write `.vscode/settings.json` for Positron |
+| `uvr init --no-ide` | Skip IDE config even when an IDE is detected |
+| `uvr init --bare` | Create `uvr.toml` + `.uvr/library/` + `.gitignore` (use via `uvr run`) |
 | `uvr add <pkg...>` | Add packages, update manifest + lockfile, install |
 | `uvr remove <pkg...>` | Remove packages from manifest and re-lock |
 | `uvr sync` | Install all packages from the lockfile |
 | `uvr sync -v` | Show the resolved install plan first — each package's source and whether it installs from binary or source |
 | `uvr sync --frozen` | Like `sync`, but fail if the lockfile is stale (CI mode) |
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
+| `uvr sync --no-companion` | Skip the uvr companion R package install |
+| `uvr sync --unattended` | CI mode: skip IDE config, companion, and working-tree writes |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
@@ -279,6 +286,26 @@ or to the repository root.
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+
+---
+
+### IDE integration and CI mode
+
+By default `uvr init` / `uvr sync` write a `.Rprofile` block so any R session
+started from the project root links `.uvr/library/`. IDE-specific config is
+opt-in: uvr detects Positron (`POSITRON=1`) from its integrated terminal and
+writes `.vscode/settings.json`. Override detection with `--ide=positron` or
+`--no-ide`. `--ide` is the extension point for other editors, which can be
+added once there is config worth writing.
+
+For CI/automation, `--unattended` (or `UVR_UNATTENDED=1`) disables IDE config,
+the companion R package, and every working-tree write (`.Rprofile`,
+`.gitignore`, activation shims) in one switch — so a checked-out repository
+stays byte-identical and the library is reached through `uvr run` or
+`R_LIBS_USER`. `--no-companion` (`UVR_NO_COMPANION=1`) skips just the
+companion. `uvr init --bare` is the persistent, interactive form of the same
+minimal project: `uvr.toml`, `.uvr/library/`, and a protective `.gitignore`
+only — reach it through `uvr run`.
 
 ---
 
@@ -439,6 +466,10 @@ R versions are installed to `~/.uvr/r-versions/` and managed independently of an
   run: uvr run tests/run_tests.R
 ```
 
+A `--frozen` sync validates the lockfile before writing any project
+scaffolding, so a stale lockfile fails without dirtying the checkout; add
+`--unattended` to also skip the scaffolding writes on success.
+
 ---
 
 ## Project layout
@@ -465,14 +496,100 @@ dplyr = "*"
 DESeq2 = { bioc = true }
 myPkg = { git = "user/repo", rev = "main" }
 nestedPkg = { git = "user/monorepo", rev = "main", subdirectory = "packages/nestedPkg" }
+anyPkg = { git = "git::https://git.example.com/team/anyPkg.git", rev = "v1.0" }
+tarPkg = { url = "https://example.org/builds/tarPkg_1.2.0.tar.gz" }
 
 [dev-dependencies]
 testthat = "*"
 ```
 
+A `url` dependency is a source package tarball (`.tar.gz` or `.tgz`) at a fixed
+URL, such as an internal build artifact or an archived release. `uvr lock`
+downloads it, checks that it is an R source package (not a built binary), and
+records its `sha256` in `uvr.lock`. If the file at that URL changes later,
+`uvr sync` stops with a checksum error; run `uvr lock` to accept the change.
+After re-locking, sync reinstalls changed content even if `Version:` is unchanged.
+Installed packages and cached builds are reused only when their URL and checksum
+match the lock; older unmarked installs are rebuilt once. `sync --frozen` rejects
+a changed checksum without updating the lock.
+The entry name must match the tarball's DESCRIPTION `Package:` field. uvr sends
+no credentials for these downloads.
+
 Generated or imported git entries may also carry `exact = true`, which preserves an explicit DESCRIPTION `PackageName=` alias and requires the fetched DESCRIPTION `Package:` field to match the manifest dependency name.
 
+### Packages from any git host
+
+`git::` names a package by the clone URL of its repository, so it works for any git host: Bitbucket, a self-hosted GitLab or Gitea, or a company git server. uvr runs the `git` program for these packages. `uvr doctor` shows whether git is installed.
+
+```sh
+uvr add git::https://git.example.com/team/anyPkg.git@v1.0   # a tag, a branch, or a full commit SHA
+uvr add git::git@bitbucket.org:team/anyPkg.git              # ssh; no ref = the default branch
+```
+
+- uvr accepts `https://`, `ssh://` and `user@host:path` URLs. It also accepts `http://` and `file://` URLs, with a warning: `http` has no transport security, and a `file` path works only on your machine. A URL must not contain credentials (see **Private git repositories** below).
+- `uvr lock` records the commit (`checksum = "git:<sha>"`). `uvr sync` installs that commit from source, and never a binary package of the same name. The commit stays in the download cache, so uvr fetches it only once.
+- To pin a commit, give its full SHA. The host lists branches and tags, so uvr cannot find an abbreviated SHA.
+- The host must let git fetch a commit by its SHA (git protocol v2). GitHub, GitLab, Bitbucket and Codeberg do.
+- Not supported yet: a package in a subdirectory (`#subdirectory=`), and `git::` entries in the `Remotes:` field of a package.
+
+### Private repositories
+
+A `[[sources]]` entry adds a CRAN-like repository (for example, a private Posit Package Manager or an internal mirror). `uvr.toml` names the repository. It never holds the secret: uvr reads the credential from the environment, keyed by the repository name.
+
+```toml
+[[sources]]
+name = "internal-ppm"
+url = "https://ppm.corp.example/cran/latest"
+```
+
+```sh
+export UVR_REPO_TOKEN_INTERNAL_PPM=...        # sent as "Authorization: Bearer ..."
+# or HTTP basic auth:
+export UVR_REPO_USER_INTERNAL_PPM=alice
+export UVR_REPO_PASSWORD_INTERNAL_PPM=...
+```
+
+- `<NAME>` is the source `name` with any `:port` suffix removed, in upper case, and with each character that is not a letter or digit changed to `_` (`internal-ppm` → `INTERNAL_PPM`). For `uvr add --source <url>` and `UVR_REPOS`, the name is the URL host (`ppm.corp.example:8443` → `PPM_CORP_EXAMPLE`).
+- If the token is set, uvr uses it and ignores the user and password. uvr removes spaces at the start and end of each value. An empty value counts as not set.
+- uvr sends the credential with the index (`PACKAGES.gz`) request and with each package download, but only to URLs under the source `url`. When a redirect goes to a different host or port, uvr does not send it. uvr never shows it in output (`-v` included), and does not pass it to `R CMD INSTALL`.
+- If none of these variables is set, uvr uses the `~/.netrc` entry for the repository host, with HTTP basic auth:
+
+  ```
+  machine ppm.corp.example
+    login alice
+    password ...
+  ```
+
+  - uvr reads the file in `NETRC` if it is set. On Windows, uvr reads `%USERPROFILE%\_netrc` when there is no `.netrc`.
+  - `machine` is the host name only. It never includes a port, so an entry applies to all ports on that host.
+  - uvr does not use a `default` entry, because it would send the same credential to every repository and git host.
+  - On Unix, if the file gives any access to users other than you (for example, mode `644` or `640`), uvr shows a warning and does not use the file. The run continues. To fix this, run `chmod 600 ~/.netrc`.
+  - Git hosts also use `~/.netrc`. See **Private git repositories** below.
+- A `401` or `403` response gives an error that names the repository and the variables or netrc entry to set.
+- Credentials written into the URL (`https://user:pass@host/...`) still work, and uvr hides them in its output. But they are also saved in `uvr.lock`, so use the variables. `uvr add --source` does not accept such a URL.
+
+**Private git repositories.** For git dependencies, uvr uses the first of these variables that is set as the access token:
+
+| Host | Variables, in order |
+|---|---|
+| GitHub | `GITHUB_PAT`, `GITHUB_TOKEN` |
+| GitLab | `UVR_GITLAB_TOKEN_<HOST>`, `UVR_GITLAB_TOKEN` |
+| Forgejo | `UVR_FORGEJO_TOKEN_<HOST>`, `UVR_FORGEJO_TOKEN` |
+| Any other host (`git::`) | `UVR_GIT_TOKEN_<HOST>` |
+
+- `<HOST>` is the host, changed as `<NAME>` is above (`git.local:3000` → `GIT_LOCAL`).
+- If none of these variables is set, uvr uses the `password` of the `~/.netrc` entry for the host (for GitHub, `machine github.com`). The password must be an access token, not your account password.
+- uvr sends the token with the API requests, the `DESCRIPTION` request and the tarball download (GitHub and GitLab: `Authorization: Bearer`, Forgejo: `Authorization: token`). uvr sends it only to that host: for GitHub, `api.github.com` and `raw.githubusercontent.com`. uvr never sends it to CRAN, P3M, a `[[sources]]` repository, or a different git host.
+- If a host refuses a netrc password (`401`, or `404` from `raw.githubusercontent.com`), uvr shows a warning and does not use that entry again in the same run. uvr then continues without credentials, so public repositories still work. uvr never ignores a token from a variable: if the host refuses it, uvr stops with an error.
+- For a `git::` dependency, git servers take HTTP basic auth, so uvr sends the token as the password. The user name is `UVR_GIT_USER_<HOST>`, or `x-token-auth` if that is not set (Bitbucket Cloud access tokens need that name; GitLab accepts any name). From `~/.netrc`, uvr uses the `login` and `password` of the entry. uvr gives the header to git in `GIT_CONFIG_*` environment variables, which need git 2.31 or later, and never on the command line. git sends it only to the `https://` origin of the URL. There is no variable for all `git::` hosts, because it would send one token to every host that a dependency names.
+- If uvr has no token for a `git::` host, git uses its own credential helpers. For `ssh://` and `user@host:path` URLs, git uses your ssh keys and agent, and uvr sends nothing. uvr turns off the terminal prompts of git, so a private repository without credentials fails instead of waiting for input.
+
 ---
+
+For `git::` dependencies, installed packages and cached builds must match the
+locked clone URL and commit, even when the package version is unchanged. Older
+unmarked installs are rebuilt once. `sync --frozen` rejects a changed commit
+without updating the lock.
 
 ## System dependencies (Linux)
 

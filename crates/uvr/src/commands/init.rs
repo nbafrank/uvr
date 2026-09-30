@@ -8,10 +8,17 @@ use uvr_core::project::{
 };
 use uvr_core::r_version::detector::find_r_binary;
 
+use crate::ide::Ide;
 use crate::ui;
 use crate::ui::palette;
 
-pub fn run(name: Option<String>, here: bool, r_version: Option<String>) -> Result<()> {
+pub fn run(
+    name: Option<String>,
+    here: bool,
+    r_version: Option<String>,
+    ide: Ide,
+    bare: bool,
+) -> Result<()> {
     let starting_cwd = std::env::current_dir().context("Cannot determine current directory")?;
 
     // #56 — `uvr init <name>` creates a new directory `<name>/` and
@@ -63,6 +70,9 @@ pub fn run(name: Option<String>, here: bool, r_version: Option<String>) -> Resul
     if let Some(rv) = r_version {
         manifest.project.r_version = Some(rv);
     }
+    if bare {
+        manifest.project.bare = true;
+    }
     let project_name = manifest.project.name.clone();
 
     let imported_count = manifest.dependencies.len() + manifest.dev_dependencies.len();
@@ -74,29 +84,47 @@ pub fn run(name: Option<String>, here: bool, r_version: Option<String>) -> Resul
     let library_path = cwd.join(DOT_UVR_DIR).join(LIBRARY_DIR);
     std::fs::create_dir_all(&library_path).context("Failed to create .uvr/library/")?;
 
-    // Write .gitignore
-    write_gitignore(&cwd).context("Failed to write .gitignore")?;
+    // Project scaffolding. In `--unattended` / `UVR_UNATTENDED=1` mode uvr
+    // must not modify the checked-out tree, so nothing is written beyond
+    // `uvr.toml` and `.uvr/library/` (reached via `uvr run` / `R_LIBS_USER`).
+    // `uvr init --bare` is the persistent form for interactive use: it skips
+    // the scaffolding too, but still writes a protective `.gitignore` so the
+    // library never gets committed.
+    let unattended = uvr_core::env_vars::unattended();
+    if !unattended {
+        // Write .gitignore (also in bare projects).
+        write_gitignore(&cwd).context("Failed to write .gitignore")?;
 
-    // Write the `source .uvr/activate` shim
-    crate::commands::activate::write_shims(&cwd).context("Failed to write activation shim")?;
+        if !bare {
+            // Write the `source .uvr/activate` shim
+            crate::commands::activate::write_shims(&cwd)
+                .context("Failed to write activation shim")?;
 
-    // Add uvr files to .Rbuildignore only for actual R package source trees
-    // (DESCRIPTION with a `Package:` field). Non-package projects may still
-    // carry a DESCRIPTION for dependency tracking.
-    if is_r_package_dir(&cwd) {
-        write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+            // Add uvr files to .Rbuildignore only for actual R package source
+            // trees (DESCRIPTION with a `Package:` field). Non-package projects
+            // may still carry a DESCRIPTION for dependency tracking.
+            if is_r_package_dir(&cwd) {
+                write_rbuildignore(&cwd).context("Failed to write .Rbuildignore")?;
+            }
+
+            // Write .Rprofile so any R session started from the project root
+            // links the uvr library.
+            ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
+
+            // Write .vscode/settings.json only when targeting Positron.
+            if ide.is_positron() {
+                ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
+            }
+        }
     }
 
-    // Write .Rprofile so RStudio sees the uvr library
-    ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
-
-    // Write .vscode/settings.json for Positron R interpreter
-    ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
-
-    // Install the uvr R companion package if R is available
-    if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
-        if let Some(r_ver) = uvr_core::r_version::detector::query_r_version(&r_binary) {
-            crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+    // Install the uvr R companion package if R is available. Never in
+    // unattended (`--no-companion` implied) or bare mode.
+    if !bare && !uvr_core::env_vars::no_companion() {
+        if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
+            if let Some(r_ver) = uvr_core::r_version::detector::query_r_version(&r_binary) {
+                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+            }
         }
     }
 

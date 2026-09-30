@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
+use crate::auth::{self, GitHost, Repository};
 use crate::checksum;
 use crate::error::{Result, UvrError};
 use crate::lockfile::LockedPackage;
@@ -15,6 +16,7 @@ pub struct Downloader {
     client: reqwest::Client,
     cache_dir: PathBuf,
     concurrency: usize,
+    repositories: Arc<[Repository]>,
 }
 
 impl Downloader {
@@ -23,7 +25,16 @@ impl Downloader {
             client,
             cache_dir,
             concurrency,
+            repositories: Arc::new([]),
         }
+    }
+
+    /// Authenticated repositories (#185). Every request to a URL one of
+    /// them serves carries that repository's credential — primary,
+    /// fallback, and CRAN-Archive retry alike — and no other request does.
+    pub fn with_repositories(mut self, repositories: Vec<Repository>) -> Self {
+        self.repositories = repositories.into();
+        self
     }
 
     /// Download all packages in parallel (bounded by `self.concurrency`).
@@ -44,13 +55,17 @@ impl Downloader {
                 let mp = mp.clone();
                 let client = self.client.clone();
                 let cache_dir = self.cache_dir.clone();
+                let repos = self.repositories.clone();
                 let pkg_name = spec.pkg.name.clone();
                 let pkg_version = spec.pkg.version.clone();
                 let url = spec.url.to_string();
                 let fallback_url = spec.fallback_url.map(str::to_string);
                 let is_binary = spec.is_binary;
                 let user_agent = spec.user_agent.map(str::to_string);
-                let auth_header = spec.auth_header.map(str::to_string);
+                // A GitHub/GitLab/Forgejo package: its host's token goes to
+                // the URLs on that host (#187), whichever of them this is. A
+                // `git::` package is fetched with git instead (#190).
+                let source = spec.pkg.source.clone();
                 // Binary packages: lockfile checksum is for the source tarball, not the
                 // P3M binary. Skip verification on binary downloads, but keep the
                 // checksum for the fallback path which downloads the source tarball.
@@ -63,6 +78,7 @@ impl Downloader {
 
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
+                    let git = GitHost::for_source(&source);
 
                     // Try primary URL. The UA override only applies to the
                     // primary path — fallbacks (CRAN source) don't need it.
@@ -74,7 +90,8 @@ impl Downloader {
                         &url,
                         primary_checksum.as_deref(),
                         user_agent.as_deref(),
-                        auth_header.as_deref(),
+                        git,
+                        &repos,
                         &mp,
                     )
                     .await;
@@ -106,7 +123,8 @@ impl Downloader {
                                 fallback,
                                 source_checksum.as_deref(),
                                 None, // fallback URL is plain CRAN source — no UA override needed
-                                None, // fallback is a different host; never forward primary auth
+                                git,
+                                &repos,
                                 &mp,
                             )
                             .await?;
@@ -141,12 +159,40 @@ pub struct DownloadSpec<'a> {
     /// served at the same URL, and the default `uvr/x.y.z` UA gets you
     /// source. None = use the client's default UA.
     pub user_agent: Option<&'a str>,
-    /// Optional `Authorization` header value (e.g. `"token <forgejo>"` or
-    /// `"Bearer <github/gitlab>"`). Forwarded to the primary URL only.
-    /// Fallback URLs (CRAN Archive, P3M → source) deliberately drop the
-    /// header — the token is registry-scoped and shouldn't leak to other
-    /// hosts.
-    pub auth_header: Option<&'a str>,
+}
+
+/// Download the tarball of resolved git package `info` as `uvr sync` does,
+/// and return its bytes.
+#[cfg(all(test, not(target_os = "windows")))]
+pub(crate) fn test_download(
+    rt: &tokio::runtime::Runtime,
+    info: &crate::registry::PackageInfo,
+) -> Result<Vec<u8>> {
+    let pkg = LockedPackage {
+        name: info.name.clone(),
+        version: info.version.to_string(),
+        raw_version: None,
+        source: info.source.clone(),
+        url: Some(info.url.clone()),
+        checksum: info.checksum.clone(),
+        subdirectory: None,
+        requires: vec![],
+        system_requirements: None,
+        dev: false,
+    };
+    let cache = tempfile::tempdir()?;
+    let results = rt.block_on(
+        Downloader::new(reqwest::Client::new(), cache.path().to_path_buf(), 1).download_all(&[
+            DownloadSpec {
+                pkg: &pkg,
+                url: &info.url,
+                fallback_url: None,
+                is_binary: false,
+                user_agent: None,
+            },
+        ]),
+    )?;
+    Ok(std::fs::read(&results[0].path)?)
 }
 
 /// Result of downloading a single package.
@@ -227,7 +273,8 @@ async fn download_one(
     url: &str,
     expected_checksum: Option<&str>,
     user_agent: Option<&str>,
-    auth_header: Option<&str>,
+    git: Option<GitHost<'_>>,
+    repos: &[Repository],
     mp: &MultiProgress,
 ) -> Result<PathBuf> {
     // Cache filename = short hash of (URL + User-Agent) prefixed onto the URL
@@ -240,6 +287,20 @@ async fn download_one(
     // R-minor lives in the URL path, so the URL alone already distinguishes
     // them. Keeping the basename suffix preserves the .tar.gz/.tgz extension
     // (source vs binary) and keeps cache entries human-recognizable.
+    // A `git::` package (#190): `url` is the clone URL, the same for every
+    // commit, so git_generic keys its own cache entry by URL and commit.
+    if let Some(GitHost::Git(clone_url)) = git {
+        let commit = expected_checksum
+            .and_then(|c| c.strip_prefix("git:"))
+            .ok_or_else(|| {
+                UvrError::Other(format!(
+                    "Locked git package '{name}' has no `git:<commit>` checksum. Re-run \
+                     `uvr lock`."
+                ))
+            })?;
+        return crate::registry::git_generic::cached_tarball(cache_dir, clone_url, commit).await;
+    }
+
     let fallback_name = format!("{name}_{version}.tar.gz");
     let filename = cache_filename(url, user_agent, &fallback_name);
     let dest = cache_dir.join(&filename);
@@ -258,31 +319,12 @@ async fn download_one(
                 let _ = std::fs::remove_file(&dest);
                 // fall through to re-download
             }
+            // No upstream checksum covers these bytes: `git:` entries (the
+            // lockfile pins a commit, not a tarball hash) and P3M binaries
+            // (the lockfile checksum is for the *source* tarball, checksum
+            // here is None).
             _ => {
-                // No upstream checksum covers these bytes: `git:` entries (the
-                // lockfile pins a commit, not a tarball hash) and P3M binaries
-                // (the lockfile checksum is for the *source* tarball, checksum
-                // here is None). Verify against the sha256 sidecar pinned on
-                // first download (#129, #140).
-                let checksum_path = dest.with_extension("sha256");
-                if let Ok(stored_checksum) = std::fs::read_to_string(&checksum_path) {
-                    let cached = std::fs::read(&dest)?;
-                    if checksum::verify(stored_checksum.trim(), &cached, name).is_ok() {
-                        debug!("Cache hit (sidecar sha256 verified): {filename}");
-                        return Ok(dest);
-                    }
-                    debug!("Cache corrupt for {name}, re-downloading");
-                    let _ = std::fs::remove_file(&dest);
-                    let _ = std::fs::remove_file(&checksum_path);
-                    // fall through to re-download
-                } else {
-                    // No sidecar yet (entry from an older uvr, or a crash
-                    // between download and sidecar write). Backfill it from
-                    // the cached bytes so the entry is pinned from now on
-                    // instead of staying permanently unverified (#140).
-                    let cached = std::fs::read(&dest)?;
-                    write_sidecar(&checksum_path, &checksum::sha256_hex(&cached), name);
-                    debug!("Cache hit (sidecar backfilled): {filename}");
+                if sidecar_cache_hit(&dest, name)? {
                     return Ok(dest);
                 }
             }
@@ -302,34 +344,60 @@ async fn download_one(
 
     // Stream response to a temp file to avoid buffering entire packages in RAM.
     // Compute checksums on-the-fly during the stream.
-    let request = |target: &str, auth: Option<&str>| {
+    // A repository credential goes only to URLs that repository serves,
+    // and a git host's token only to URLs on that host, which it replaces
+    // the repository credential for.
+    let send = |target: &str| {
         let mut req = client.get(target);
         if let Some(ua) = user_agent {
             req = req.header(reqwest::header::USER_AGENT, ua);
         }
-        if let Some(auth) = auth {
-            req = req.header(reqwest::header::AUTHORIZATION, auth);
+        let credential = auth::repository_for(repos, target).and_then(|r| r.credential.as_ref());
+        if let Some(credential) = credential {
+            req = credential.apply(req);
         }
-        req
+        async move {
+            match git {
+                Some(git) => git.send(req).await,
+                None => req.send().await,
+            }
+        }
     };
-    let mut resp_result = match request(url, auth_header).send().await {
+    let mut resp_result = match send(url).await {
         Ok(r) => r.error_for_status(),
         Err(e) => Err(e),
     };
+    // A 401/403 from a git host or a known repository is the error to
+    // report, even if the Archive retry below fails for some other reason.
+    let denied = resp_result
+        .as_ref()
+        .err()
+        .and_then(reqwest::Error::status)
+        .and_then(|status| match git.filter(|git| git.serves(url)) {
+            Some(git) => git.denied_error(status, url),
+            None => auth::repository_for(repos, url)?.denied_error(status),
+        });
     if resp_result.is_err() {
         if let Some(archive_url) = cran_archive_url(url) {
-            debug!("{name}: {url} failed, retrying via CRAN Archive: {archive_url}");
+            debug!(
+                "{name}: {} failed, retrying via CRAN Archive: {}",
+                auth::redact_url(url),
+                auth::redact_url(&archive_url)
+            );
             // CRAN Archive doesn't require the R-shaped UA, but plumbing the
-            // override here is harmless and keeps requests symmetric. Pass None
-            // for auth: a host-scoped token (e.g. Forgejo) must never leak onto
-            // the CRAN Archive URL, matching download_all's fallback (#105).
-            resp_result = match request(&archive_url, None).send().await {
+            // override here is harmless and keeps requests symmetric. A git
+            // host's token reaches the Archive URL only if it is on that
+            // host (#105, #187).
+            resp_result = match send(&archive_url).await {
                 Ok(r) => r.error_for_status(),
                 Err(e) => Err(e),
             };
         }
     }
-    let mut resp = resp_result?;
+    let mut resp = match resp_result {
+        Ok(resp) => resp,
+        Err(e) => return Err(denied.unwrap_or_else(|| e.into())),
+    };
 
     let cache_dir = dest.parent().unwrap_or(std::path::Path::new("."));
     let mut tmp_file = tempfile::Builder::new()
@@ -403,11 +471,38 @@ async fn download_one(
     Ok(dest)
 }
 
+/// Whether `dest` is a usable cache entry for bytes that no lockfile
+/// checksum covers: it matches the sha256 sidecar pinned on first download
+/// (#129, #140). A mismatched entry is removed, so the caller downloads
+/// again. An entry with no sidecar yet (from an older uvr, or a crash
+/// between download and sidecar write) is accepted once, and the sidecar is
+/// backfilled so that the entry is pinned from now on.
+pub(crate) fn sidecar_cache_hit(dest: &Path, name: &str) -> Result<bool> {
+    if !dest.exists() {
+        return Ok(false);
+    }
+    let checksum_path = dest.with_extension("sha256");
+    let cached = std::fs::read(dest)?;
+    let Ok(stored_checksum) = std::fs::read_to_string(&checksum_path) else {
+        write_sidecar(&checksum_path, &checksum::sha256_hex(&cached), name);
+        debug!("Cache hit (sidecar backfilled): {}", dest.display());
+        return Ok(true);
+    };
+    if checksum::verify(stored_checksum.trim(), &cached, name).is_ok() {
+        debug!("Cache hit (sidecar sha256 verified): {}", dest.display());
+        return Ok(true);
+    }
+    debug!("Cache corrupt for {name}, re-downloading");
+    let _ = std::fs::remove_file(dest);
+    let _ = std::fs::remove_file(&checksum_path);
+    Ok(false)
+}
+
 /// Write a `.sha256` sidecar next to a cached tarball. Failure is non-fatal —
 /// the cache entry still works and the sidecar is backfilled on the next hit —
 /// but it must not be silent (#140): without the sidecar the entry cannot be
 /// integrity-verified.
-fn write_sidecar(checksum_path: &Path, checksum: &str, name: &str) {
+pub(crate) fn write_sidecar(checksum_path: &Path, checksum: &str, name: &str) {
     if let Err(e) = std::fs::write(checksum_path, checksum) {
         tracing::warn!(
             "{name}: failed to write checksum sidecar {}: {e} — cached file stays unverified until the sidecar can be written",
@@ -449,6 +544,7 @@ mod tests {
             expected_checksum,
             None,
             None,
+            &[],
             &indicatif::MultiProgress::new(),
         )
         .await
@@ -521,6 +617,31 @@ mod tests {
         assert!(!sidecar.exists());
     }
 
+    // #189: served bytes that differ from the lockfile's sha256 (a URL
+    // dependency whose file changed) are a hard error, and nothing is cached.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn sha256_mismatch_on_download_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = crate::registry::url::serve_for_test("200 OK", b"changed bytes".to_vec());
+        let url = format!("{base}/pkg_1.0.0.tar.gz");
+        let pinned = checksum::sha256_hex(b"original bytes");
+
+        let err = run_download_one(tmp.path(), &url, Some(&pinned))
+            .await
+            .unwrap_err();
+        match err {
+            crate::error::UvrError::ChecksumMismatch {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, pinned);
+                assert_eq!(actual, checksum::sha256_hex(b"changed bytes"));
+            }
+            other => panic!("expected ChecksumMismatch, got {other}"),
+        }
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
     // #140: same backfill applies to git: entries — the branch that used to
     // say "accept it this time" must not accept it every time.
     #[tokio::test]
@@ -537,6 +658,62 @@ mod tests {
         let stored = std::fs::read_to_string(dest.with_extension("sha256"))
             .expect("git sidecar must be backfilled");
         assert_eq!(stored.trim(), checksum::sha256_hex(bytes));
+    }
+
+    // #190: a `git::` package downloads as the archive of its locked
+    // commit, keyed by commit (the clone URL is the same for all of them),
+    // and a cached archive needs no fetch.
+    #[tokio::test]
+    async fn git_package_downloads_its_commit_once() {
+        use crate::lockfile::{LockedPackage, PackageSource};
+        use crate::registry::git_generic::TestRepo;
+
+        let Some(repo) = TestRepo::new() else { return };
+        let locked = |commit: Option<&str>| LockedPackage {
+            name: "gitpkg".into(),
+            version: "0.1.0".into(),
+            source: PackageSource::Git {
+                url: repo.url.clone(),
+            },
+            raw_version: None,
+            url: None,
+            checksum: commit.map(|c| format!("git:{c}")),
+            subdirectory: None,
+            requires: vec![],
+            system_requirements: None,
+            dev: false,
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let download = |pkg: LockedPackage| {
+            let cache = cache.path().to_path_buf();
+            let url = repo.url.clone();
+            async move {
+                super::Downloader::new(reqwest::Client::new(), cache, 1)
+                    .download_all(&[super::DownloadSpec {
+                        pkg: &pkg,
+                        url: &url,
+                        fallback_url: None,
+                        is_binary: false,
+                        user_agent: None,
+                    }])
+                    .await
+                    .map(|mut results| results.remove(0))
+            }
+        };
+
+        let first = download(locked(Some(&repo.first))).await.unwrap();
+        assert!(!first.used_binary);
+        let meta = crate::installer::binary_install::inspect_tarball(&first.path, "gitpkg");
+        assert!(meta.is_some_and(|m| m.pure_r), "{}", first.path.display());
+        let second = download(locked(Some(&repo.second))).await.unwrap();
+        assert_ne!(first.path, second.path);
+
+        std::fs::remove_dir_all(repo.dir.path()).unwrap();
+        let again = download(locked(Some(&repo.first))).await.unwrap();
+        assert_eq!(again.path, first.path);
+
+        let err = download(locked(None)).await.err().unwrap().to_string();
+        assert!(err.contains("no `git:<commit>` checksum"), "{err}");
     }
 
     // #122: the Linux collision. PPM serves a different-R-ABI binary at the
@@ -676,5 +853,265 @@ mod tests {
             cran_archive_url("https://cran.r-project.org/src/contrib/PACKAGES.gz"),
             None
         );
+    }
+
+    // ── authenticated repositories (#185) ──────────────────────────────
+
+    #[cfg(not(target_os = "windows"))]
+    mod auth {
+        use super::super::{download_one, DownloadSpec, Downloader};
+        use crate::auth::{test_authorization, test_response, test_server, Credential, Repository};
+        use crate::lockfile::{LockedPackage, PackageSource};
+
+        fn repo(url: &str, credential: Option<Credential>) -> Repository {
+            Repository {
+                name: "private".into(),
+                url: url.into(),
+                credential,
+            }
+        }
+
+        fn bearer() -> Option<Credential> {
+            Some(Credential::Bearer("tok123".into()))
+        }
+
+        /// A repository that serves `bytes` only to `Bearer tok123`.
+        fn private_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+            test_server(|head| {
+                if test_authorization(head) == Some("Bearer tok123") {
+                    test_response("200 OK", "", b"tarball bytes")
+                } else {
+                    test_response("401 Unauthorized", "WWW-Authenticate: Bearer\r\n", b"")
+                }
+            })
+        }
+
+        async fn fetch(url: &str, repos: &[Repository]) -> crate::error::Result<()> {
+            let tmp = tempfile::tempdir().unwrap();
+            download_one(
+                &reqwest::Client::new(),
+                tmp.path(),
+                "a",
+                "1.0",
+                url,
+                None,
+                None,
+                None,
+                repos,
+                &indicatif::MultiProgress::new(),
+            )
+            .await
+            .map(drop)
+        }
+
+        #[tokio::test]
+        async fn credential_goes_to_the_repository_and_nowhere_else() {
+            let (private, private_seen) = private_server();
+            let (public, public_seen) = test_server(|_| test_response("404 Not Found", "", b""));
+            let pkg = LockedPackage {
+                name: "a".into(),
+                version: "1.0".into(),
+                source: PackageSource::Custom {
+                    name: "private".into(),
+                },
+                raw_version: None,
+                url: None,
+                checksum: None,
+                subdirectory: None,
+                requires: vec![],
+                system_requirements: None,
+                dev: false,
+            };
+            // A binary from another host that 404s, then the source
+            // fallback from the private repository.
+            let binary = format!("{public}/bin/a_1.0.tgz");
+            let source = format!("{private}/cran/src/contrib/a_1.0.tar.gz");
+            let tmp = tempfile::tempdir().unwrap();
+            let results = Downloader::new(reqwest::Client::new(), tmp.path().to_path_buf(), 1)
+                .with_repositories(vec![repo(&format!("{private}/cran"), bearer())])
+                .download_all(&[DownloadSpec {
+                    pkg: &pkg,
+                    url: &binary,
+                    fallback_url: Some(&source),
+                    is_binary: true,
+                    user_agent: None,
+                }])
+                .await
+                .expect("the fallback download carries the repository credential");
+            assert!(!results[0].used_binary);
+            assert_eq!(std::fs::read(&results[0].path).unwrap(), b"tarball bytes");
+
+            let public_seen = public_seen.lock().unwrap();
+            assert_eq!(public_seen.len(), 1);
+            assert_eq!(test_authorization(&public_seen[0]), None, "{public_seen:?}");
+            let private_seen = private_seen.lock().unwrap();
+            assert_eq!(test_authorization(&private_seen[0]), Some("Bearer tok123"));
+        }
+
+        // #187: sync used to send a Forgejo/GitLab token to the plan's
+        // primary URL, whatever its host: a P3M or custom-source binary for
+        // a package of the same name got the token. Now a git host's token
+        // goes only to URLs on that host, the source fallback included.
+        #[test]
+        fn git_host_token_stays_on_its_host() {
+            use crate::auth::{test_git_origin, test_private_git_host, GitEnv};
+
+            let _env = GitEnv::new(&["UVR_FORGEJO_TOKEN_FORGEJO_TEST"]);
+            std::env::set_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST", "fj-tok");
+            let (forgejo, forgejo_seen) = test_private_git_host("token fj-tok", |_| {
+                test_response("200 OK", "", b"forgejo tarball")
+            });
+            let (binary, binary_seen) = test_server(|_| test_response("404 Not Found", "", b""));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            test_git_origin("forgejo.test", &forgejo);
+
+            let pkg = LockedPackage {
+                name: "a".into(),
+                version: "1.0".into(),
+                source: PackageSource::Forgejo {
+                    host: "forgejo.test".into(),
+                },
+                raw_version: None,
+                url: None,
+                checksum: Some("git:abc".into()),
+                subdirectory: None,
+                requires: vec![],
+                system_requirements: None,
+                dev: false,
+            };
+            let binary_url = format!("{binary}/bin/a_1.0.tgz");
+            let archive_url = format!("{forgejo}/api/v1/repos/o/a/archive/abc.tar.gz");
+            let tmp = tempfile::tempdir().unwrap();
+            let download = |url: &str, fallback_url: Option<&str>, is_binary: bool| {
+                rt.block_on(
+                    Downloader::new(reqwest::Client::new(), tmp.path().to_path_buf(), 1)
+                        .download_all(&[DownloadSpec {
+                            pkg: &pkg,
+                            url,
+                            fallback_url,
+                            is_binary,
+                            user_agent: None,
+                        }]),
+                )
+                .map(|mut results| results.remove(0))
+            };
+
+            // A binary on another host, then the source on the Forgejo host.
+            let result = download(&binary_url, Some(&archive_url), true)
+                .expect("the fallback download carries the Forgejo token");
+            assert!(!result.used_binary);
+            assert_eq!(std::fs::read(&result.path).unwrap(), b"forgejo tarball");
+            // A locked URL on another host gets no token either.
+            let err = download(
+                &format!("{binary}/api/v1/repos/o/a/archive/x.tar.gz"),
+                None,
+                false,
+            )
+            .err()
+            .expect("another host does not serve the package")
+            .to_string();
+            assert!(!err.contains("fj-tok"), "{err}");
+
+            let binary_seen = binary_seen.lock().unwrap();
+            assert_eq!(binary_seen.len(), 2);
+            for head in binary_seen.iter() {
+                assert_eq!(test_authorization(head), None, "{head}");
+            }
+            let forgejo_seen = forgejo_seen.lock().unwrap();
+            assert_eq!(forgejo_seen.len(), 1);
+            assert_eq!(test_authorization(&forgejo_seen[0]), Some("token fj-tok"));
+            drop(forgejo_seen);
+
+            // A refused token names the variable, not a repository one.
+            std::env::set_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST", "wrong-tok");
+            let other = format!("{forgejo}/api/v1/repos/o/a/archive/def.tar.gz");
+            let err = download(&other, None, false)
+                .err()
+                .expect("a wrong token is refused")
+                .to_string();
+            assert!(
+                err.contains("Forgejo host forgejo.test returned HTTP 401 Unauthorized")
+                    && err.contains("refused the token in UVR_FORGEJO_TOKEN_FORGEJO_TEST"),
+                "{err}"
+            );
+            assert!(
+                !err.contains("wrong-tok") && !err.contains("UVR_REPO_"),
+                "{err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn basic_auth_reaches_the_repository() {
+            let (url, seen) = test_server(|head| match test_authorization(head) {
+                // base64("alice:s3cret")
+                Some("Basic YWxpY2U6czNjcmV0") => test_response("200 OK", "", b"ok"),
+                _ => test_response("401 Unauthorized", "", b""),
+            });
+            let basic = Credential::Basic {
+                username: "alice".into(),
+                password: "s3cret".into(),
+            };
+            fetch(
+                &format!("{url}/src/contrib/a_1.0.tar.gz"),
+                &[repo(&url, Some(basic))],
+            )
+            .await
+            .expect("basic auth accepted");
+            assert_eq!(seen.lock().unwrap().len(), 1);
+        }
+
+        // reqwest 0.12 drops `Authorization` when a redirect changes host or
+        // port; this pins that behaviour for repository credentials.
+        #[tokio::test]
+        async fn redirect_to_another_host_drops_the_credential() {
+            let (cdn, cdn_seen) = test_server(|_| test_response("200 OK", "", b"from cdn"));
+            let location = format!("Location: {cdn}/blob/a_1.0.tar.gz\r\n");
+            let (private, private_seen) =
+                test_server(move |_| test_response("302 Found", &location, b""));
+
+            fetch(
+                &format!("{private}/a_1.0.tar.gz"),
+                &[repo(&private, bearer())],
+            )
+            .await
+            .expect("redirect followed");
+            let private_seen = private_seen.lock().unwrap();
+            assert_eq!(test_authorization(&private_seen[0]), Some("Bearer tok123"));
+            let cdn_seen = cdn_seen.lock().unwrap();
+            assert_eq!(cdn_seen.len(), 1);
+            assert_eq!(test_authorization(&cdn_seen[0]), None, "{cdn_seen:?}");
+        }
+
+        #[tokio::test]
+        async fn refusal_names_the_repository_and_the_variable() {
+            let (url, seen) = private_server();
+            let tarball = format!("{url}/src/contrib/a_1.0.tar.gz");
+
+            // No credential: say which variable to set, even though the
+            // CRAN-Archive retry is what failed last.
+            let err = fetch(&tarball, &[repo(&url, None)])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("repository 'private'"), "{err}");
+            assert!(err.contains("401 Unauthorized"), "{err}");
+            assert!(err.contains("UVR_REPO_TOKEN_PRIVATE"), "{err}");
+            assert_eq!(seen.lock().unwrap().len(), 2, "primary + Archive retry");
+
+            // A wrong token: say it was refused, never print it.
+            let wrong = Some(Credential::Bearer("wrong-token".into()));
+            let err = fetch(&tarball, &[repo(&url, wrong)])
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("refused the token"), "{err}");
+            assert!(!err.contains("wrong-token"), "{err}");
+            // The Archive retry is on the same repository, so it had the token too.
+            let seen = seen.lock().unwrap();
+            assert_eq!(test_authorization(&seen[3]), Some("Bearer wrong-token"));
+        }
     }
 }

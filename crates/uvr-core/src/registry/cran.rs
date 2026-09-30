@@ -275,6 +275,7 @@ impl CranRegistry {
             PackageSource::Cran,
             force_refresh,
             None,
+            None,
         )
         .await
     }
@@ -285,6 +286,9 @@ impl CranRegistry {
     /// `user_agent` is forwarded on every HTTP request so hosts like
     /// cran.rpkgs.com can route to the correct binary flavour (musl vs gnu)
     /// based on the R-shaped UA. Pass `None` to use the default client UA.
+    ///
+    /// The repository's credential, if the environment has one, goes on the
+    /// index request (see [`crate::auth::resolve`]).
     pub async fn fetch_custom(
         client: &reqwest::Client,
         repo_name: &str,
@@ -300,6 +304,7 @@ impl CranRegistry {
         use md5::{Digest, Md5};
         let hash = hex::encode(Md5::digest(base_url.as_bytes()));
         let cache_key = format!("{repo_name}-{}", &hash[..8]);
+        let repo = crate::auth::Repository::new(repo_name, base_url);
         Self::fetch_from(
             client,
             &cache_key,
@@ -310,6 +315,7 @@ impl CranRegistry {
             },
             force_refresh,
             user_agent,
+            Some(&repo),
         )
         .await
     }
@@ -371,6 +377,7 @@ impl CranRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_from(
         client: &reqwest::Client,
         cache_key: &str,
@@ -379,24 +386,38 @@ impl CranRegistry {
         source: PackageSource,
         force_refresh: bool,
         user_agent: Option<&str>,
+        repo: Option<&crate::auth::Repository>,
     ) -> Result<Self> {
         let cache_path = cache_path_for(cache_key);
         let has_cache = cache_path.exists();
+        let get = |url: &str| {
+            let mut req = client.get(url);
+            if let Some(ua) = user_agent {
+                req = req.header(reqwest::header::USER_AGENT, ua);
+            }
+            match repo.and_then(|r| r.credential.as_ref()) {
+                Some(credential) => credential.apply(req),
+                None => req,
+            }
+        };
+        let denied = |status| repo.and_then(|r| r.denied_error(status));
 
         // Try HTTP conditional request if we have a cached index and aren't forcing refresh.
         if !force_refresh && has_cache {
             if let Some((etag, last_modified)) = read_cache_meta(cache_key) {
-                let mut req = client.get(packages_url);
-                if let Some(ua) = user_agent {
-                    req = req.header(reqwest::header::USER_AGENT, ua);
-                }
+                let mut req = get(packages_url);
                 if let Some(ref e) = etag {
                     req = req.header("If-None-Match", e.as_str());
                 }
                 if let Some(ref lm) = last_modified {
                     req = req.header("If-Modified-Since", lm.as_str());
                 }
-                match req.send().await {
+                let resp = req.send().await;
+                // A refused credential must not hide behind the stale cache.
+                if let Some(e) = resp.as_ref().ok().and_then(|r| denied(r.status())) {
+                    return Err(e);
+                }
+                match resp {
                     Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
                         debug!("{} index: HTTP 304 Not Modified, using cache", cache_key);
                         let raw = std::fs::read(&cache_path)?;
@@ -490,14 +511,14 @@ impl CranRegistry {
 
         // No cache or force refresh — full download
         debug!("Downloading {} PACKAGES.gz...", cache_key);
-        let mut req = client.get(packages_url);
-        if let Some(ua) = user_agent {
-            req = req.header(reqwest::header::USER_AGENT, ua);
-        }
-        let resp = req.send().await?;
+        let resp = get(packages_url).send().await?;
         if !resp.status().is_success() {
+            if let Some(e) = denied(resp.status()) {
+                return Err(e);
+            }
             return Err(UvrError::Other(format!(
-                "Failed to fetch package index from {packages_url} (HTTP {})",
+                "Failed to fetch package index from {} (HTTP {})",
+                crate::auth::redact_url(packages_url),
                 resp.status()
             )));
         }
@@ -1184,5 +1205,114 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         assert_eq!(normalize_triple_drop_vendor("aarch64"), "aarch64");
         assert_eq!(normalize_triple_drop_vendor("aarch64-musl"), "aarch64-musl");
         assert_eq!(normalize_triple_drop_vendor(""), "");
+    }
+
+    // #185: the repository's env credential reaches the index request, a
+    // refusal is actionable (also when a cached index exists), and a public
+    // repository gets no `Authorization` header at all. #186: with no env
+    // credential, the netrc entry for the host is used instead.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn fetch_custom_authenticates_the_index_request() {
+        use crate::auth::{test_authorization, test_response, test_server};
+        use std::io::Write;
+
+        let _env = crate::env_vars::env_lock();
+        let cache = tempfile::tempdir().unwrap();
+        let vars = ["UVR_CACHE_DIR", "UVR_REPO_TOKEN_AUTHREPO", "NETRC"];
+        let saved: Vec<_> = vars.iter().map(std::env::var_os).collect();
+        std::env::set_var("UVR_CACHE_DIR", cache.path());
+        std::env::set_var("UVR_REPO_TOKEN_AUTHREPO", "tok123");
+        // No netrc file yet: the user's own ~/.netrc must not interfere.
+        std::env::set_var("NETRC", cache.path().join("no-netrc"));
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"Package: privpkg\nVersion: 1.0\n").unwrap();
+        let gz = gz.finish().unwrap();
+        let index = gz.clone();
+        let (private, private_seen) = test_server(move |head| {
+            // base64("alice:n3trc-pw")
+            let auth = test_authorization(head);
+            if auth == Some("Bearer tok123") || auth == Some("Basic YWxpY2U6bjN0cmMtcHc=") {
+                test_response("200 OK", "ETag: \"v1\"\r\n", &index)
+            } else {
+                test_response("401 Unauthorized", "", b"")
+            }
+        });
+        let (public, public_seen) = test_server(move |_| test_response("200 OK", "", &gz));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let fetch = |name: &'static str, url: String, force: bool| {
+            rt.block_on(CranRegistry::fetch_custom(&client, name, &url, force, None))
+        };
+
+        let reg = fetch("authrepo", private.clone(), true).expect("token accepted");
+        assert!(reg.resolve_package("privpkg", None).is_ok());
+
+        // Without the token: an actionable error, from the fresh fetch and
+        // from the conditional one that would otherwise fall back to cache.
+        std::env::remove_var("UVR_REPO_TOKEN_AUTHREPO");
+        for force in [false, true] {
+            let err = fetch("authrepo", private.clone(), force)
+                .err()
+                .expect("401 must fail")
+                .to_string();
+            assert!(err.contains("repository 'authrepo'"), "{err}");
+            assert!(err.contains("UVR_REPO_TOKEN_AUTHREPO"), "{err}");
+        }
+
+        // Regression: a public repository is fetched exactly as before.
+        let reg = fetch("public", public, true).expect("public repo");
+        assert!(reg.resolve_package("privpkg", None).is_ok());
+        let seen = public_seen.lock().unwrap();
+        assert_eq!(test_authorization(&seen[0]), None, "{seen:?}");
+        drop(seen);
+
+        // #186: no env credential, but a netrc entry for the host.
+        let write_netrc = |name: &str, password: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            // A new file name each time: netrc is cached per path.
+            let path = cache.path().join(name);
+            std::fs::write(
+                &path,
+                format!("machine 127.0.0.1 login alice password {password}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::env::set_var("NETRC", &path);
+        };
+        write_netrc("netrc-good", "n3trc-pw");
+        let reg = fetch("authrepo", private.clone(), true).expect("netrc accepted");
+        assert!(reg.resolve_package("privpkg", None).is_ok());
+        let last = private_seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            test_authorization(&last),
+            Some("Basic YWxpY2U6bjN0cmMtcHc=")
+        );
+
+        write_netrc("netrc-bad", "wrong-pw");
+        let err = fetch("authrepo", private.clone(), true)
+            .err()
+            .expect("a wrong netrc password must fail")
+            .to_string();
+        assert!(err.contains("`machine 127.0.0.1` entry in"), "{err}");
+        assert!(!err.contains("wrong-pw"), "{err}");
+
+        // An env token takes precedence over netrc.
+        std::env::set_var("UVR_REPO_TOKEN_AUTHREPO", "tok123");
+        fetch("authrepo", private, true).expect("token accepted");
+        let last = private_seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(test_authorization(&last), Some("Bearer tok123"));
+
+        for (var, value) in vars.iter().zip(saved) {
+            match value {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
+            }
+        }
     }
 }

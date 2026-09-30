@@ -328,6 +328,7 @@ impl<'a> Resolver<'a> {
         packages.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(Lockfile {
+            manifest_fingerprint: Some(manifest.lock_fingerprint()?),
             r: crate::lockfile::RVersionPin {
                 version: r_version,
                 bioc_version: bioc_version.map(str::to_string),

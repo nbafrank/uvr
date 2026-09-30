@@ -128,8 +128,16 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
         // gitlab's "owner" is a full (possibly nested) namespace path
         // rather than a single segment — same field, different shape.
         let git_host_info = forgejo_info.as_ref().or(gitlab_info.as_ref());
+        // renv restores `RemoteType: url` records via `remotes::install_url`.
+        let url_source = pkg.source == PackageSource::Url;
 
-        let remote_sha = if pkg.subdirectory.is_some() {
+        // A `git::` package (#190), as renv itself records a git remote.
+        let git_url = match &pkg.source {
+            PackageSource::Git { url } => Some(url.clone()),
+            _ => None,
+        };
+
+        let remote_sha = if pkg.subdirectory.is_some() || git_url.is_some() {
             pkg.checksum
                 .as_deref()
                 .and_then(|c| c.strip_prefix("git:"))
@@ -158,9 +166,17 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
                 .or_else(|| git_host_info.map(|(_, _, _, sha)| sha.clone())),
             remote_sha,
             remote_subdir: pkg.subdirectory.clone(),
-            remote_url: git_host_info
-                .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}")),
-            remote_type: git_host_info.map(|_| "git2r".to_string()),
+            remote_type: match (&git_url, git_host_info) {
+                (Some(_), _) => Some("git".to_string()),
+                (None, Some(_)) => Some("git2r".to_string()),
+                (None, None) => url_source.then(|| "url".to_string()),
+            },
+            remote_url: git_url
+                .or_else(|| {
+                    git_host_info
+                        .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}"))
+                })
+                .or_else(|| pkg.url.clone().filter(|_| url_source)),
         };
         packages.insert(pkg.name.clone(), entry);
     }
@@ -211,6 +227,9 @@ fn export_source_and_repository(src: &PackageSource) -> (String, Option<String>)
         PackageSource::GitHub => ("GitHub".to_string(), None),
         PackageSource::Forgejo { .. } => ("Git".to_string(), None),
         PackageSource::Gitlab { .. } => ("Git".to_string(), None),
+        // renv's own spelling for a git remote.
+        PackageSource::Git { .. } => ("git".to_string(), None),
+        PackageSource::Url => ("URL".to_string(), None),
         PackageSource::Local => ("Local".to_string(), None),
         PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
     }
@@ -412,6 +431,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
@@ -466,6 +486,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: Some("3.18".to_string()),
@@ -536,6 +557,7 @@ mod tests {
         // bioc_version is set, but there are no Bioconductor packages, so no
         // spurious Bioconductor section or Bioc repos should be emitted.
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: Some("3.18".to_string()),
@@ -568,6 +590,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
@@ -617,6 +640,7 @@ mod tests {
     fn single_package_lockfile(pkg: LockedPackage) -> Lockfile {
         use uvr_core::lockfile::RVersionPin;
         Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
@@ -642,6 +666,35 @@ mod tests {
         assert_eq!(entry["RemoteSubdir"], "pkgs/nested");
         assert_eq!(entry["RemoteSha"], COMMIT);
         assert_eq!(entry["RemoteRef"], COMMIT);
+    }
+
+    #[test]
+    fn export_renv_url_package() {
+        // #189: renv's own shape for a `remotes::install_url` package.
+        let url = "https://example.org/tpkg_1.2-0.tar.gz";
+        let lockfile = single_package_lockfile(LockedPackage {
+            name: "tpkg".to_string(),
+            version: "1.2.0".to_string(),
+            raw_version: Some("1.2-0".to_string()),
+            source: PackageSource::Url,
+            checksum: Some(format!("sha256:{}", "ab".repeat(32))),
+            requires: vec![],
+            url: Some(url.to_string()),
+            system_requirements: None,
+            dev: false,
+            subdirectory: None,
+        });
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let entry = &parsed["Packages"]["tpkg"];
+        assert_eq!(entry["Source"], "URL");
+        assert_eq!(entry["Version"], "1.2-0");
+        assert_eq!(entry["RemoteType"], "url");
+        assert_eq!(entry["RemoteUrl"], url);
+        let entry = entry.as_object().unwrap();
+        assert!(!entry.contains_key("Repository"));
+        assert!(!entry.contains_key("RemoteUsername"));
     }
 
     #[test]
@@ -699,6 +752,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
@@ -776,6 +830,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
@@ -812,6 +867,47 @@ mod tests {
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "abc123");
     }
 
+    // #190: renv records a git remote as Source "git", RemoteType "git",
+    // RemoteUrl, and the installed commit in RemoteSha, and restores it by
+    // fetching RemoteSha from RemoteUrl.
+    #[test]
+    fn export_renv_generic_git_package_matches_renv() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let url = "git@bitbucket.org:team/anypkg.git";
+        let lockfile = Lockfile {
+            manifest_fingerprint: None,
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "anypkg".to_string(),
+                version: "0.1.0".to_string(),
+                raw_version: None,
+                source: PackageSource::Git { url: url.into() },
+                checksum: Some(format!("git:{sha}")),
+                requires: vec!["jsonlite".into()],
+                url: None,
+                system_requirements: None,
+                dev: false,
+                subdirectory: None,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pkg = &parsed["Packages"]["anypkg"];
+        assert_eq!(pkg["Source"], "git");
+        assert_eq!(pkg["RemoteType"], "git");
+        assert_eq!(pkg["RemoteUrl"], url);
+        assert_eq!(pkg["RemoteSha"], sha);
+        for absent in ["Repository", "RemoteUsername", "RemoteRepo", "RemoteRef"] {
+            assert!(pkg.get(absent).is_none(), "{absent}: {pkg}");
+        }
+    }
+
     #[test]
     fn parse_gitlab_remote_archive_url() {
         let url = "https://gitlab.com/api/v4/projects/my-group%2Fmypkg/repository/archive.tar.gz?sha=abc123";
@@ -837,6 +933,7 @@ mod tests {
         use uvr_core::lockfile::{LockedPackage, Lockfile, RVersionPin};
 
         let lockfile = Lockfile {
+            manifest_fingerprint: None,
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,

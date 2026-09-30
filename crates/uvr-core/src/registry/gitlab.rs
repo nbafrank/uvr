@@ -1,6 +1,7 @@
 use semver::Version;
 use tracing::debug;
 
+use crate::auth::{git_origin, GitHost};
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
 use crate::registry::PackageInfo;
@@ -116,36 +117,6 @@ pub fn parse_gitlab_spec(spec: &str) -> Option<(String, String, String)> {
     ))
 }
 
-/// Look up a GitLab API token from the environment.
-///
-/// Lookup order:
-/// 1. `UVR_GITLAB_TOKEN_<NORMALIZED_HOST>` — per-host.
-/// 2. `UVR_GITLAB_TOKEN` — single token for users with one instance.
-///
-/// Host normalization: strip `:port`, uppercase, replace `.` and `-`
-/// with `_`. E.g. `gitlab.com` → `GITLAB_COM`, `git.local:3000` →
-/// `GIT_LOCAL`. Whitespace-only env values are treated as unset so a
-/// shell that exports `UVR_GITLAB_TOKEN=` doesn't fail authenticated
-/// requests with a literal empty bearer.
-pub fn gitlab_token(host: &str) -> Option<String> {
-    let host_no_port = host.split_once(':').map_or(host, |(h, _port)| h);
-    let normalized: String = host_no_port
-        .to_ascii_uppercase()
-        .chars()
-        .map(|c| if c == '.' || c == '-' { '_' } else { c })
-        .collect();
-    let per_host = format!("UVR_GITLAB_TOKEN_{normalized}");
-    for var in [per_host.as_str(), "UVR_GITLAB_TOKEN"] {
-        if let Ok(v) = std::env::var(var) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Resolve a GitLab-hosted R package while deliberately discarding rich
 /// `Remotes:` entries before the fallible legacy-tuple adapter.
 pub async fn resolve_gitlab_package(
@@ -235,16 +206,14 @@ pub async fn resolve_gitlab_package_with_remote_entries_and_install_dependencies
     std::collections::BTreeSet<String>,
 )> {
     let project_id = urlencoding::encode(project_path);
+    let origin = git_origin(host);
     let desc_url = format!(
-        "https://{host}/api/v4/projects/{project_id}/repository/files/DESCRIPTION/raw?ref={commit_sha}"
+        "{origin}/api/v4/projects/{project_id}/repository/files/DESCRIPTION/raw?ref={commit_sha}"
     );
-    let mut desc_req = client
+    let desc_req = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
-    if let Some(tok) = gitlab_token(host) {
-        desc_req = desc_req.header("Authorization", format!("Bearer {tok}"));
-    }
-    let desc_resp = desc_req.send().await?;
+    let desc_resp = GitHost::GitLab(host).send(desc_req).await?;
     if !desc_resp.status().is_success() {
         return Err(map_gitlab_error(
             desc_resp.status(),
@@ -279,9 +248,8 @@ pub async fn resolve_gitlab_package_with_remote_entries_and_install_dependencies
         crate::registry::github::parse_description_install_dependency_names(&desc_fields);
     let remotes = parse_gitlab_remote_entries(&desc_fields);
 
-    let url = format!(
-        "https://{host}/api/v4/projects/{project_id}/repository/archive.tar.gz?sha={commit_sha}"
-    );
+    let url =
+        format!("{origin}/api/v4/projects/{project_id}/repository/archive.tar.gz?sha={commit_sha}");
 
     debug!("GitLab {host}/{project_path}@{commit_sha} → {pkg_name} {version}");
 
@@ -363,16 +331,15 @@ async fn fetch_commit_sha_by_id(
     // revs, `Remotes:` fields), so encode defensively (mirrors forgejo's
     // #152 handling).
     let encoded_ref = urlencoding::encode(git_ref);
-    let url =
-        format!("https://{host}/api/v4/projects/{project_id}/repository/commits/{encoded_ref}");
-    let mut req = client
+    let url = format!(
+        "{}/api/v4/projects/{project_id}/repository/commits/{encoded_ref}",
+        git_origin(host)
+    );
+    let req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/json");
-    if let Some(tok) = gitlab_token(host) {
-        req = req.header("Authorization", format!("Bearer {tok}"));
-    }
-    let resp = req.send().await?;
+    let resp = GitHost::GitLab(host).send(req).await?;
 
     if !resp.status().is_success() {
         return Err(map_gitlab_error(resp.status(), host, project_path, git_ref));
@@ -400,8 +367,8 @@ fn map_gitlab_error(
 ) -> UvrError {
     match status.as_u16() {
         401 | 403 => UvrError::Other(format!(
-            "GitLab returned {status} for {host}/{project_path}; \
-             set UVR_GITLAB_TOKEN_<HOST> if the project is private."
+            "GitLab returned {status} for {host}/{project_path}; {}",
+            GitHost::GitLab(host).denied_advice()
         )),
         404 => UvrError::Other(format!(
             "GitLab project not found: {host}/{project_path}@{ref_or_sha}. \
@@ -624,32 +591,70 @@ mod tests {
         assert!(parse_gitlab_parts("gitlab::gitlab.com/a.b-c/sub_d/my_pkg.v2").is_some());
     }
 
-    // All token lookup tests are combined into a single test to avoid races
-    // from env-mutation across parallel test threads (std::env is global).
+    // #187: a private project in a nested group resolves and downloads with
+    // the host's token from the shared resolver, sent as `Bearer`, on
+    // GitLab's API v4 paths.
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn token_lookup() {
-        // Serialize with all other env-mutating tests (process-global env).
-        let _env = crate::env_vars::env_lock();
-        // --- sub-test: per-host var takes precedence over global ---
-        let host = "lookup-test-host.example";
-        let per_host_var = "UVR_GITLAB_TOKEN_LOOKUP_TEST_HOST_EXAMPLE";
-        std::env::set_var(per_host_var, "host-specific");
-        std::env::set_var("UVR_GITLAB_TOKEN", "global");
-        assert_eq!(gitlab_token(host).as_deref(), Some("host-specific"));
-        std::env::remove_var(per_host_var);
-        assert_eq!(gitlab_token(host).as_deref(), Some("global"));
-        std::env::remove_var("UVR_GITLAB_TOKEN");
-        assert_eq!(gitlab_token(host), None);
+    fn private_project_resolves_and_downloads() {
+        use crate::auth::{
+            test_authorization, test_git_origin, test_private_git_host, test_response, GitEnv,
+        };
 
-        // --- sub-test: port is stripped before normalization ---
-        std::env::set_var("UVR_GITLAB_TOKEN_GIT_LOCAL", "t");
-        assert_eq!(gitlab_token("git.local:3000").as_deref(), Some("t"));
-        std::env::remove_var("UVR_GITLAB_TOKEN_GIT_LOCAL");
+        const SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
+        let _env = GitEnv::new(&["UVR_GITLAB_TOKEN", "UVR_GITLAB_TOKEN_GITLAB_TEST"]);
+        std::env::set_var("UVR_GITLAB_TOKEN_GITLAB_TEST", "gl-tok");
+        let (origin, seen) = test_private_git_host("Bearer gl-tok", |path| {
+            let ok = |body: &[u8]| test_response("200 OK", "", body);
+            match path.strip_prefix("/api/v4/projects/group%2Fsub%2Fprivpkg/repository/") {
+                Some("commits/main") => ok(format!(r#"{{"id":"{SHA}"}}"#).as_bytes()),
+                Some(p) if p == format!("files/DESCRIPTION/raw?ref={SHA}") => {
+                    ok(b"Package: privpkg\nVersion: 2.0.0\n")
+                }
+                Some(p) if p == format!("archive.tar.gz?sha={SHA}") => ok(b"private tarball"),
+                _ => test_response("404 Not Found", "", b""),
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        test_git_origin("gitlab.test:8443", &origin);
+        let client = reqwest::Client::new();
+        let resolve = || {
+            rt.block_on(resolve_gitlab_package(
+                &client,
+                "gitlab.test:8443",
+                "group/sub/privpkg",
+                "main",
+            ))
+        };
 
-        // --- sub-test: whitespace-only values are treated as unset ---
-        std::env::set_var("UVR_GITLAB_TOKEN", "   ");
-        assert_eq!(gitlab_token("any.host").as_deref(), None);
-        std::env::remove_var("UVR_GITLAB_TOKEN");
+        let info = resolve().expect("the token opens the private project");
+        assert_eq!(
+            (info.name.as_str(), info.version.to_string()),
+            ("privpkg", "2.0.0".into())
+        );
+        let tarball = crate::installer::download::test_download(&rt, &info)
+            .expect("the tarball downloads with the token");
+        assert_eq!(tarball, b"private tarball");
+        let heads = seen.lock().unwrap().clone();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        for head in &heads {
+            assert_eq!(test_authorization(head), Some("Bearer gl-tok"), "{head}");
+        }
+
+        // Without a token the project is hidden; a wrong one is refused.
+        std::env::remove_var("UVR_GITLAB_TOKEN_GITLAB_TEST");
+        let err = resolve().unwrap_err().to_string();
+        assert!(err.contains("project not found"), "{err}");
+        std::env::set_var("UVR_GITLAB_TOKEN_GITLAB_TEST", "wrong-tok");
+        let err = resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("refused the token in UVR_GITLAB_TOKEN_GITLAB_TEST."),
+            "{err}"
+        );
+        assert!(!err.contains("wrong-tok"), "{err}");
     }
 
     #[test]

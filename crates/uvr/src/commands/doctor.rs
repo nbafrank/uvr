@@ -188,12 +188,57 @@ fn check_build_tools(issues: &mut Vec<String>) {
         }
     }
 
+    check_git(issues);
+
     if cfg!(target_os = "macos") {
         check_macos_tools(issues);
     } else if cfg!(target_os = "windows") {
         check_windows_tools(issues);
     } else if cfg!(target_os = "linux") {
         check_linux_tools(issues);
+    }
+}
+
+/// `git::` dependencies (#190) are fetched with git. A missing git is an
+/// issue only for a project that has one.
+fn check_git(issues: &mut Vec<String>) {
+    let version = uvr_core::registry::git_generic::find_git(std::env::var_os("PATH"))
+        .ok()
+        .and_then(|git| {
+            std::process::Command::new(git)
+                .arg("--version")
+                .output()
+                .ok()
+        })
+        .filter(|out| out.status.success())
+        .map(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.trim().trim_start_matches("git version ").to_string()
+        });
+    if let Some(version) = version {
+        ui::check(
+            true,
+            "git",
+            format!("{} {}", palette::success("found"), palette::dim(version)),
+            LABEL_W,
+        );
+        return;
+    }
+    simple_check("git", false, Some("needed for git:: dependencies"));
+    let needs_git = Project::find_cwd().is_ok_and(|project| {
+        let manifest = &project.manifest;
+        manifest
+            .dependencies
+            .values()
+            .chain(manifest.dev_dependencies.values())
+            .any(|dep| dep.git().is_some_and(|git| git.starts_with("git::")))
+    });
+    if needs_git {
+        issues.push(
+            "git is not on PATH, and this project has git:: dependencies. Install git: \
+             https://git-scm.com/downloads"
+                .into(),
+        );
     }
 }
 

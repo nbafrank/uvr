@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, UvrError};
 
@@ -54,6 +55,13 @@ pub struct ProjectMeta {
 
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Created with `uvr init --bare`: the project ships only `uvr.toml`,
+    /// `.uvr/library/`, and a protective `.gitignore`. `.Rprofile`,
+    /// activation shims, IDE config, and the companion package are all
+    /// skipped, and the library is reachable through `uvr run`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bare: bool,
 }
 
 /// Either a bare version string (`">=3.0.0"`, `"*"`) or a detailed table.
@@ -92,6 +100,13 @@ impl DependencySpec {
             _ => None,
         }
     }
+
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            DependencySpec::Detailed(d) => d.url.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 impl Default for DependencySpec {
@@ -109,7 +124,8 @@ pub struct DetailedDep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bioc: Option<bool>,
 
-    /// `"user/repo"` — GitHub source
+    /// `"user/repo"` (GitHub), `"forgejo::…"`, `"gitlab::…"`, or
+    /// `"git::<clone URL>"` (any git host, #190)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
 
@@ -125,6 +141,10 @@ pub struct DetailedDep {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subdirectory: Option<String>,
+
+    /// Direct source tarball URL (#189), pinned by sha256 in the lockfile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +157,66 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn copy_document_key(
+    doc: &mut toml_edit::DocumentMut,
+    desired: &toml_edit::DocumentMut,
+    section: &str,
+    key: &str,
+) {
+    if let Some(item) = desired.get(section).and_then(|table| table.get(key)) {
+        let item = doc
+            .get(section)
+            .and_then(|table| table.get(key))
+            .map(|old| edited_item_preserving_comments(old, item))
+            .unwrap_or_else(|| item.clone());
+        doc[section][key] = item;
+    } else if let Some(table) = doc
+        .get_mut(section)
+        .and_then(|item| item.as_table_like_mut())
+    {
+        table.remove(key);
+    }
+}
+
+fn edited_item_preserving_comments(
+    old: &toml_edit::Item,
+    desired: &toml_edit::Item,
+) -> toml_edit::Item {
+    if let (Some(previous), Some(next)) = (old.as_table_like(), desired.as_table_like()) {
+        let mut item = old.clone();
+        let table = item.as_table_like_mut().expect("cloned table");
+        for (key, _) in previous.iter() {
+            if !next.contains_key(key) {
+                table.remove(key);
+            }
+        }
+        for (key, new) in next.iter() {
+            if let Some(current) = table.get_mut(key) {
+                *current = edited_item_preserving_comments(current, new);
+            } else {
+                table.insert(key, new.clone());
+            }
+        }
+        return item;
+    }
+    let mut item = desired.clone();
+    // Keep an existing dependency on one line when changing a bare version
+    // into a detailed source declaration, including its note.
+    if old.is_value() {
+        if let Some(table) = item.as_table() {
+            let mut inline = table.clone().into_inline_table();
+            inline.fmt();
+            item = toml_edit::Item::Value(toml_edit::Value::InlineTable(inline));
+        }
+    }
+    if let (Some(old), Some(new)) = (old.as_value(), item.as_value_mut()) {
+        *new.decor_mut() = old.decor().clone();
+    } else if let (Some(old), Some(new)) = (old.as_table(), item.as_table_mut()) {
+        *new.decor_mut() = old.decor().clone();
+    }
+    item
+}
+
 impl std::str::FromStr for Manifest {
     type Err = crate::error::UvrError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -147,7 +227,7 @@ impl std::str::FromStr for Manifest {
 
         // Validate [dependencies] and [dev-dependencies]: every value must be
         // a string (bare version) or a table whose keys are known DetailedDep
-        // fields {version, bioc, git, exact, rev, subdirectory}. A TOML table-header entry like
+        // fields {version, bioc, git, exact, rev, subdirectory, url}. A TOML table-header entry like
         // `[dependencies.data.table]` creates a nested table under key `data`
         // with a sub-key `table` — not a valid DetailedDep field. This check
         // catches that case before serde silently resolves the wrong package.
@@ -155,7 +235,15 @@ impl std::str::FromStr for Manifest {
         // NOTE: `VALID_DEP_KEYS` must list every field of `DetailedDep`. A
         // field added to that struct without updating this slice will cause
         // valid manifests to be rejected — keep them in sync.
-        const VALID_DEP_KEYS: &[&str] = &["version", "bioc", "git", "exact", "rev", "subdirectory"];
+        const VALID_DEP_KEYS: &[&str] = &[
+            "version",
+            "bioc",
+            "git",
+            "exact",
+            "rev",
+            "subdirectory",
+            "url",
+        ];
 
         for section in &["dependencies", "dev-dependencies"] {
             if let Some(toml::Value::Table(deps)) = raw.get(*section) {
@@ -232,6 +320,21 @@ impl std::str::FromStr for Manifest {
 }
 
 impl Manifest {
+    /// Hash only fields that affect resolution, so comments and project
+    /// metadata can change without making a frozen lock stale.
+    pub fn lock_fingerprint(&self) -> Result<String> {
+        let mut inputs = self.clone();
+        inputs.project.name.clear();
+        inputs.project.description = None;
+        inputs.project.bare = false;
+        inputs.activate = None;
+        let canonical = toml::to_string(&inputs).map_err(UvrError::TomlSer)?;
+        Ok(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(canonical.as_bytes()))
+        ))
+    }
+
     pub fn new(name: impl Into<String>, r_version: Option<String>) -> Self {
         Manifest {
             project: ProjectMeta {
@@ -239,6 +342,7 @@ impl Manifest {
                 r_version,
                 bioc_version: None,
                 description: None,
+                bare: false,
             },
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
@@ -369,6 +473,7 @@ impl Manifest {
                 r_version,
                 bioc_version: None,
                 description: fields.get("Title").cloned(),
+                bare: false,
             },
             dependencies,
             dev_dependencies,
@@ -388,8 +493,71 @@ impl Manifest {
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        let s = self.to_toml_string()?;
+        let s = if path.exists() {
+            self.write_preserving_existing(path)?
+        } else {
+            self.to_toml_string()?
+        };
         atomic_write(path, s.as_bytes())
+    }
+
+    /// Change only modeled fields that actually changed. Rebuilding the whole
+    /// document loses comments and metadata owned by other tools (#306).
+    fn write_preserving_existing(&self, path: &Path) -> Result<String> {
+        self.validate_detailed_dependencies()?;
+        let original = std::fs::read_to_string(path)?;
+        let previous: Manifest = original.parse()?;
+        let mut doc: toml_edit::DocumentMut = original
+            .parse()
+            .map_err(|e: toml_edit::TomlError| UvrError::ManifestParse(e.to_string()))?;
+        let desired = toml_edit::ser::to_document(self)
+            .map_err(|e| UvrError::Other(format!("Failed to serialize manifest: {e}")))?;
+
+        for (key, changed) in [
+            ("name", previous.project.name != self.project.name),
+            ("bare", previous.project.bare != self.project.bare),
+            (
+                "r_version",
+                previous.project.r_version != self.project.r_version,
+            ),
+            (
+                "bioc_version",
+                previous.project.bioc_version != self.project.bioc_version,
+            ),
+            (
+                "description",
+                previous.project.description != self.project.description,
+            ),
+        ] {
+            if changed {
+                copy_document_key(&mut doc, &desired, "project", key);
+            }
+        }
+        for (section, old, new) in [
+            ("dependencies", &previous.dependencies, &self.dependencies),
+            (
+                "dev-dependencies",
+                &previous.dev_dependencies,
+                &self.dev_dependencies,
+            ),
+        ] {
+            for key in old.keys().chain(new.keys()) {
+                if old.get(key) != new.get(key) {
+                    copy_document_key(&mut doc, &desired, section, key);
+                }
+            }
+        }
+        if previous.sources != self.sources {
+            if let Some(item) = desired.get("sources") {
+                doc["sources"] = item.clone();
+            } else {
+                doc.remove("sources");
+            }
+        }
+        if previous.activate != self.activate {
+            copy_document_key(&mut doc, &desired, "activate", "prompt");
+        }
+        Ok(doc.to_string())
     }
 
     /// Add or update a dependency. Returns `true` if a new dep was added.
@@ -427,6 +595,21 @@ impl Manifest {
 }
 
 fn validate_detailed_dependency(name: &str, section: &str, dep: &DetailedDep) -> Result<()> {
+    if let Some(url) = dep.url.as_deref() {
+        if dep.git.is_some() || dep.rev.is_some() || dep.bioc.unwrap_or(false) {
+            return Err(UvrError::ManifestParse(format!(
+                "dependency `{name}` in [{section}]: `url` cannot be combined with `git`, \
+                 `rev`, or `bioc`."
+            )));
+        }
+        if !crate::registry::url::is_source_tarball_url(url) {
+            return Err(UvrError::ManifestParse(format!(
+                "dependency `{name}` in [{section}]: `url` must be an http(s) URL of a source \
+                 tarball ending in .tar.gz or .tgz, got `{url}`."
+            )));
+        }
+    }
+
     if dep.exact {
         let git = dep
             .git
@@ -442,7 +625,9 @@ fn validate_detailed_dependency(name: &str, section: &str, dep: &DetailedDep) ->
             Some(rev) => format!("{git}@{rev}"),
             None => git.to_string(),
         };
-        let valid = if git.starts_with("forgejo::") {
+        let valid = if git.starts_with("git::") {
+            crate::registry::git_generic::manifest_spec(git, dep.rev.as_deref()).is_ok()
+        } else if git.starts_with("forgejo::") {
             crate::registry::forgejo::parse_forgejo_parts(&spec).is_some()
         } else if git.starts_with("gitlab::") {
             crate::registry::gitlab::parse_gitlab_parts(&spec).is_some()
@@ -465,7 +650,10 @@ fn validate_detailed_dependency(name: &str, section: &str, dep: &DetailedDep) ->
             "dependency `{name}` in [{section}]: `subdirectory` requires a `git` source."
         ))
     })?;
-    if git.starts_with("forgejo::") || git.starts_with("gitlab::") {
+    if ["forgejo::", "gitlab::", "git::"]
+        .iter()
+        .any(|prefix| git.starts_with(prefix))
+    {
         return Err(UvrError::ManifestParse(format!(
             "dependency `{name}` in [{section}]: `subdirectory` is only supported for \
              GitHub sources (`git = \"owner/repo\"`), not `{git}`."
@@ -1413,6 +1601,78 @@ bioc = true
     }
 
     #[test]
+    fn add_remove_preserves_comments_and_unmodeled_metadata() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("uvr.toml");
+        let original = "# project note\n[project]\nname = \"example\"\nversion = \"1.2.3\" # release marker\n\n[dependencies]\n# keep this note\nrlang = \"*\"\n\n[tool.release]\nchannel = \"stable\"\n";
+        std::fs::write(&path, original).unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        manifest.add_dep("ggplot2".into(), DependencySpec::Version("*".into()), false);
+        manifest.write(&path).unwrap();
+        let added = std::fs::read_to_string(&path).unwrap();
+        assert!(added.contains("# project note"));
+        assert!(added.contains("version = \"1.2.3\" # release marker"));
+        assert!(added.contains("# keep this note"));
+        assert!(added.contains("[tool.release]\nchannel = \"stable\""));
+        assert!(added.contains("ggplot2"));
+
+        manifest.remove_dep("ggplot2");
+        manifest.write(&path).unwrap();
+        let removed = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(removed, original);
+    }
+
+    #[test]
+    fn updating_a_dependency_preserves_its_inline_comment() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("uvr.toml");
+        std::fs::write(&path, "[project]\nname = \"test\"\n\n[dependencies]\n# needed by analysis\nrlang = \"*\" # keep this explanation\n").unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        manifest.add_dep(
+            "rlang".into(),
+            DependencySpec::Version(">=1.0".into()),
+            false,
+        );
+        manifest.write(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# needed by analysis"));
+        assert!(text.contains("rlang = \">=1.0\" # keep this explanation"));
+
+        manifest.add_dep(
+            "rlang".into(),
+            DependencySpec::Detailed(DetailedDep {
+                git: Some("r-lib/rlang".into()),
+                ..Default::default()
+            }),
+            false,
+        );
+        manifest.write(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# needed by analysis"));
+        assert!(text.contains("} # keep this explanation"));
+        assert_eq!(
+            Manifest::from_file(&path).unwrap().dependencies,
+            manifest.dependencies
+        );
+    }
+
+    #[test]
+    fn updating_a_detailed_dependency_preserves_field_comments() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("uvr.toml");
+        std::fs::write(&path, "[project]\nname = \"test\"\n\n[dependencies.rlang]\ngit = \"r-lib/rlang\" # upstream\nrev = \"main\" # required for analysis\n").unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        let DependencySpec::Detailed(spec) = manifest.dependencies.get_mut("rlang").unwrap() else {
+            panic!("detailed dependency");
+        };
+        spec.rev = Some("v1.1.6".into());
+        manifest.write(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("git = \"r-lib/rlang\" # upstream"));
+        assert!(text.contains("rev = \"v1.1.6\" # required for analysis"));
+    }
+
+    #[test]
     fn parse_remotes_field_keeps_forgejo_and_gitlab() {
         let field = "forgejo::codefloe.com/pat-s/mypkg@v0.1.0, github::user/a, \
                      gitlab::other/x, gitlab::gitlab.com/my-group/my-sub/thing@v2.0";
@@ -1880,6 +2140,9 @@ nested = { git = "owner/repo", subdirectory = "pkgs/nested" }
             "git = \"owner/repo\"\nrev = \"\"\nexact = true\n",
             "git = \"owner/repo/extra\"\nexact = true\n",
             "git = \"gitlab::host/group/repo/-/subdir\"\nexact = true\n",
+            "git = \"git::https://tok@host/repo.git\"\nexact = true\n",
+            "git = \"git::https://host/repo.git@v1\"\nrev = \"v2\"\nexact = true\n",
+            "git = \"git::git@host:repo.git\"\nrev = \"-x\"\nexact = true\n",
         ];
         for dependency in cases {
             let toml = format!("[project]\nname = \"t\"\n\n[dependencies.repo]\n{dependency}");
@@ -1887,6 +2150,28 @@ nested = { git = "owner/repo", subdirectory = "pkgs/nested" }
             assert!(error.contains("exact = true"), "{error}");
             assert!(error.contains("requires a"), "{error}");
         }
+    }
+
+    // #190: a `git::` dependency parses and is written back unchanged. Its
+    // `rev` is kept apart from the URL, which may hold `@` and `:`.
+    #[test]
+    fn generic_git_dependency_round_trips() {
+        let toml = "[project]\nname = \"t\"\n\n\
+                    [dependencies.anypkg]\ngit = \"git::https://git.corp.example/team/repo.git\"\n\
+                    rev = \"abc123\"\n\n\
+                    [dependencies.sshpkg]\ngit = \"git::git@host:repo.git\"\nexact = true\n\
+                    rev = \"v1\"\n";
+        let m: Manifest = toml.parse().unwrap();
+        assert_eq!(
+            m.dependencies.get("anypkg").unwrap().git(),
+            Some("git::https://git.corp.example/team/repo.git")
+        );
+        let written = m.to_toml_string().unwrap();
+        assert!(
+            written.contains(toml.split_once("\n\n").unwrap().1),
+            "{written}"
+        );
+        assert_eq!(written.parse::<Manifest>().unwrap(), m);
     }
 
     #[test]
@@ -1902,7 +2187,11 @@ subdirectory = "pkgs/nested"
         let err = no_git.parse::<Manifest>().unwrap_err().to_string();
         assert!(err.contains("requires a `git` source"), "got: {err}");
 
-        for host in ["gitlab::gitlab.com/g/p", "forgejo::codefloe.com/o/r"] {
+        for host in [
+            "gitlab::gitlab.com/g/p",
+            "forgejo::codefloe.com/o/r",
+            "git::https://git.corp.example/team/repo.git",
+        ] {
             let toml = format!(
                 "[project]\nname = \"t\"\n\n[dependencies.nested]\ngit = \"{host}\"\n\
                  subdirectory = \"pkgs/nested\"\n"
@@ -1996,5 +2285,74 @@ rev = "main"
             m.dependencies.get("myPkg").unwrap().git(),
             Some("user/repo")
         );
+    }
+
+    #[test]
+    fn url_dependency_round_trips_and_old_manifests_are_unchanged() {
+        let toml = r#"[project]
+name = "t"
+
+[dependencies]
+tpkg = { url = "https://example.org/tpkg_1.2.0.tar.gz" }
+"#;
+        let m: Manifest = toml.parse().expect("url dependency must parse");
+        let tpkg = m.dependencies.get("tpkg").unwrap();
+        assert_eq!(tpkg.url(), Some("https://example.org/tpkg_1.2.0.tar.gz"));
+        assert_eq!(tpkg.git(), None);
+        let reparsed: Manifest = m.to_toml_string().unwrap().parse().unwrap();
+        assert_eq!(m, reparsed);
+        assert!(m
+            .to_toml_string()
+            .unwrap()
+            .contains(r#"url = "https://example.org/tpkg_1.2.0.tar.gz""#));
+
+        // A manifest without the new field serializes exactly as before.
+        let old: Manifest = SAMPLE.parse().unwrap();
+        assert!(!old.to_toml_string().unwrap().contains("url"));
+    }
+
+    #[test]
+    fn url_dependency_rejects_other_sources_and_non_tarball_urls() {
+        for (spec, needle) in [
+            (
+                r#"{ url = "https://example.org/t_1.0.tar.gz", git = "u/r" }"#,
+                "cannot be combined",
+            ),
+            (
+                r#"{ url = "https://example.org/t_1.0.tar.gz", rev = "main" }"#,
+                "cannot be combined",
+            ),
+            (
+                r#"{ url = "https://example.org/t_1.0.tar.gz", bioc = true }"#,
+                "cannot be combined",
+            ),
+            (r#"{ url = "https://example.org/t.zip" }"#, "source tarball"),
+            (
+                r#"{ url = "ftp://example.org/t_1.0.tar.gz" }"#,
+                "source tarball",
+            ),
+            (r#"{ url = "../t_1.0.tar.gz" }"#, "source tarball"),
+        ] {
+            let toml = format!("[project]\nname = \"t\"\n\n[dependencies]\nt = {spec}\n");
+            let err = toml.parse::<Manifest>().unwrap_err().to_string();
+            assert!(err.contains(needle), "{spec}: {err}");
+        }
+    }
+    #[test]
+    fn bare_mode_preserves_lock_inputs_and_manifest_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("uvr.toml");
+        let original = "# project note\n[project]\nname = \"test\"\nbare = false # setup mode\n[tool.example]\nkeep = true\n";
+        std::fs::write(&path, original).unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        let fingerprint = manifest.lock_fingerprint().unwrap();
+        manifest.project.bare = true;
+        assert_eq!(manifest.lock_fingerprint().unwrap(), fingerprint);
+        manifest.write(&path).unwrap();
+        assert!(Manifest::from_file(&path).unwrap().project.bare);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("bare = true # setup mode"));
+        assert!(written.contains("# project note"));
+        assert!(written.contains("[tool.example]\nkeep = true"));
     }
 }

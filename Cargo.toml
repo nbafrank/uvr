@@ -28,6 +28,7 @@ which = "6"
 sha2 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }

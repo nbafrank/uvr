@@ -4,7 +4,16 @@ use std::fs;
 use tempfile::TempDir;
 
 fn uvr_cmd() -> Command {
-    Command::cargo_bin("uvr").unwrap()
+    let mut cmd = Command::cargo_bin("uvr").unwrap();
+    // The binary inherits the parent environment, so running the suite from a
+    // Positron/RStudio terminal — or with UVR_UNATTENDED/UVR_NO_COMPANION
+    // exported — would change these tests' results. Strip the vars that drive
+    // IDE detection and headless mode. Tests that need them set them
+    // explicitly afterwards; a later `.env()` overrides this.
+    for var in ["POSITRON", "RSTUDIO", "UVR_UNATTENDED", "UVR_NO_COMPANION"] {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 fn init_project(name: &str) -> TempDir {
@@ -766,10 +775,19 @@ impl Drop for StubGuard {
 }
 
 #[cfg(not(target_os = "windows"))]
-/// Spin up a tiny HTTP server in a thread that serves files from
-/// `tests/fixtures/rpkgs-stub/`. Returns the bound URL (`http://127.0.0.1:PORT`)
-/// and a [`StubGuard`]; the server runs until the guard is dropped.
+/// [`spawn_stub`] over `tests/fixtures/rpkgs-stub/`.
 fn spawn_rpkgs_stub() -> (String, StubGuard) {
+    spawn_stub(fixture("rpkgs-stub"), None)
+}
+
+#[cfg(not(target_os = "windows"))]
+/// [`spawn_rpkgs_stub`] for any `fixtures_root`. With `required_auth`, a
+/// request whose `Authorization` header is not exactly that value gets a
+/// 401, as a private repository would answer (#185).
+fn spawn_stub(
+    fixtures_root: std::path::PathBuf,
+    required_auth: Option<String>,
+) -> (String, StubGuard) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -778,13 +796,6 @@ fn spawn_rpkgs_stub() -> (String, StubGuard) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local_addr");
     let url = format!("http://{}", addr);
-
-    let fixtures_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rpkgs-stub");
 
     listener.set_nonblocking(true).expect("set_nonblocking");
 
@@ -826,7 +837,18 @@ fn spawn_rpkgs_stub() -> (String, StubGuard) {
                         .collect::<Vec<_>>()
                         .join("/");
                     let file_path = fixtures_root.join(&safe_path);
-                    if let Ok(body) = std::fs::read(&file_path) {
+                    let authorized = required_auth.as_deref().is_none_or(|want| {
+                        req.lines().any(|line| {
+                            line.split_once(':').is_some_and(|(k, v)| {
+                                k.eq_ignore_ascii_case("authorization") && v.trim() == want
+                            })
+                        })
+                    });
+                    if !authorized {
+                        let _ = socket.write_all(
+                            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    } else if let Ok(body) = std::fs::read(&file_path) {
                         // `Connection: close` tells reqwest not to keep-alive
                         // against our one-shot per-connection handler.
                         let header = format!(
@@ -895,6 +917,850 @@ fn lock_with_binary_capable_source_records_source_urls() {
         lock.contains(&format!("{}/src/contrib/jsonlite", server_url)),
         "lockfile should record the source URL from rpkgs-stub: {lock}"
     );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn frozen_sync_that_bails_writes_no_scaffolding() {
+    // Regression for the ordering of the `--frozen` staleness check in
+    // `sync::run_inner`: the project-plumbing writes (`.Rprofile`, ...) used
+    // to run *before* the check, so a frozen sync that bailed on a stale
+    // lockfile still dirtied the working tree. The write block now runs after
+    // the check, so a bail must not write any scaffolding.
+    let (server_url, _server) = spawn_rpkgs_stub();
+
+    let dir = init_project("frozen-nowrite");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str(&format!(
+        "\n[[sources]]\nname = \"rpkgs-stub\"\nurl = \"{}\"\n",
+        server_url
+    ));
+    fs::write(&toml_path, toml).unwrap();
+
+    // Lock the empty dependency set, then make the manifest stale by adding a
+    // dependency the lockfile doesn't know about.
+    uvr_cmd()
+        .args(["lock"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let mut manifest = uvr_core::manifest::Manifest::from_file(&toml_path).unwrap();
+    manifest.add_dep(
+        "jsonlite".into(),
+        uvr_core::manifest::DependencySpec::Version("*".into()),
+        false,
+    );
+    manifest.write(&toml_path).unwrap();
+
+    // `init` wrote `.Rprofile`; remove it so the test can tell whether a
+    // failing `--frozen` sync recreates it.
+    fs::remove_file(dir.path().join(".Rprofile")).unwrap();
+
+    uvr_cmd()
+        .args(["sync", "--frozen"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("out of date"));
+
+    assert!(
+        !dir.path().join(".Rprofile").exists(),
+        "a --frozen sync that bailed wrote .Rprofile; the plumbing writes must run after the staleness check"
+    );
+}
+
+// ─── authenticated repositories (#185) ─────────────────────
+
+#[cfg(not(target_os = "windows"))]
+/// A project whose `[[sources]]` entry `private-repo` is a private CRAN-like
+/// repository holding one pure-R package, `uvrauthpkg`, served only to
+/// requests with `Authorization: <required_auth>`. `url_userinfo` (e.g.
+/// `"user:pass@"`) is written into the source URL. Returns the project, a
+/// store for the repository and an isolated cache (with an empty CRAN index,
+/// so resolution needs no network), the repository URL, and its server.
+fn private_repo_project(
+    required_auth: &str,
+    url_userinfo: &str,
+) -> (TempDir, TempDir, String, StubGuard) {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let store = TempDir::new().unwrap();
+    let contrib = store.path().join("repo").join("src").join("contrib");
+    fs::create_dir_all(&contrib).unwrap();
+    let packages = "Package: uvrauthpkg\nVersion: 0.1.0\nNeedsCompilation: no\n";
+    fs::write(contrib.join("PACKAGES"), packages).unwrap();
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(packages.as_bytes()).unwrap();
+    fs::write(contrib.join("PACKAGES.gz"), gz.finish().unwrap()).unwrap();
+
+    let tarball = fs::File::create(contrib.join("uvrauthpkg_0.1.0.tar.gz")).unwrap();
+    let mut tar = tar::Builder::new(GzEncoder::new(tarball, Compression::default()));
+    for (path, body) in [
+        (
+            "uvrauthpkg/DESCRIPTION",
+            "Package: uvrauthpkg\nVersion: 0.1.0\nTitle: Test\nDescription: Test package.\n\
+             License: MIT\nAuthor: uvr\nMaintainer: uvr <uvr@example.com>\nNeedsCompilation: no\n",
+        ),
+        ("uvrauthpkg/NAMESPACE", "export(hello)\n"),
+        ("uvrauthpkg/R/hello.R", "hello <- function() \"hi\"\n"),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        // R's own untar rejects the legacy NUL entry type.
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, path, body.as_bytes()).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap();
+
+    let cache = store.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("cran-packages.txt"), "").unwrap();
+
+    let (url, guard) = spawn_stub(store.path().join("repo"), Some(required_auth.to_string()));
+    let dir = init_project("authproj");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    let source_url = url.replacen("http://", &format!("http://{url_userinfo}"), 1);
+    toml.push_str(&format!(
+        "\n[[sources]]\nname = \"private-repo\"\nurl = \"{source_url}\"\n"
+    ));
+    fs::write(&toml_path, toml).unwrap();
+    (dir, store, url, guard)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn private_repo_cmd(dir: &TempDir, store: &TempDir, env: &[(&str, &str)]) -> Command {
+    let mut cmd = uvr_cmd();
+    cmd.current_dir(dir.path())
+        .env("UVR_CACHE_DIR", store.path().join("cache"))
+        .env("UVR_PACKAGES_DIR", store.path().join("packages"))
+        .env("UVR_NO_BINARY", "1")
+        // Not the user's ~/.netrc; a test may write this file.
+        .env("NETRC", store.path().join("netrc"))
+        .env_remove("UVR_REPOS");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+#[cfg(not(target_os = "windows"))]
+fn output_text(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+/// Lock `uvrauthpkg` from the private repository and, when R is available,
+/// install it. `secret` must never appear in uvr's output (`-v` included)
+/// nor, unless it was written into the URL, in uvr.toml or uvr.lock.
+fn assert_private_repo_installs(
+    required_auth: &str,
+    url_userinfo: &str,
+    env: &[(&str, &str)],
+    secret: &str,
+) {
+    let (dir, store, url, _server) = private_repo_project(required_auth, url_userinfo);
+
+    let out = private_repo_cmd(&dir, &store, env)
+        .args(["add", "--no-install", "uvrauthpkg"])
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    let lock = fs::read_to_string(dir.path().join("uvr.lock")).unwrap();
+    assert!(lock.contains("private-repo"), "{lock}");
+    assert!(
+        lock.contains("/src/contrib/uvrauthpkg_0.1.0.tar.gz"),
+        "{lock}"
+    );
+    if url_userinfo.is_empty() {
+        assert!(lock.contains(&url), "{lock}");
+        assert!(!lock.contains(secret), "{lock}");
+        let toml = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+        assert!(!toml.contains(secret), "{toml}");
+    }
+
+    if !have_r() {
+        eprintln!("skipping the install half: no R on PATH");
+        return;
+    }
+    let out = private_repo_cmd(&dir, &store, env)
+        .args(["sync", "-v"])
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    // `-v` prints each package's download URL: it must be redacted.
+    assert!(text.contains("uvrauthpkg 0.1.0"), "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(
+        dir.path()
+            .join(".uvr/library/uvrauthpkg/DESCRIPTION")
+            .exists(),
+        "uvrauthpkg must be installed: {text}"
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn private_repository_with_bearer_token_resolves_and_installs() {
+    assert_private_repo_installs(
+        "Bearer tok-185-secret",
+        "",
+        &[("UVR_REPO_TOKEN_PRIVATE_REPO", "tok-185-secret")],
+        "tok-185-secret",
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn private_repository_with_basic_auth_resolves_and_installs() {
+    assert_private_repo_installs(
+        // base64("alice:s3cret-185")
+        "Basic YWxpY2U6czNjcmV0LTE4NQ==",
+        "",
+        &[
+            ("UVR_REPO_USER_PRIVATE_REPO", "alice"),
+            ("UVR_REPO_PASSWORD_PRIVATE_REPO", "s3cret-185"),
+        ],
+        "s3cret-185",
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn private_repository_url_credentials_are_redacted() {
+    assert_private_repo_installs(
+        "Basic YWxpY2U6czNjcmV0LTE4NQ==",
+        "alice:s3cret-185@",
+        &[],
+        "s3cret-185",
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn private_repository_with_netrc_resolves_and_installs() {
+    let netrc_dir = TempDir::new().unwrap();
+    let netrc = netrc_dir.path().join("netrc");
+    fs::write(
+        &netrc,
+        "# uvr test\nmachine 127.0.0.1\n  login alice\n  password n3trc-186\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&netrc, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_private_repo_installs(
+        // base64("alice:n3trc-186")
+        "Basic YWxpY2U6bjN0cmMtMTg2",
+        "",
+        &[("NETRC", netrc.to_str().unwrap())],
+        "n3trc-186",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_repository_netrc_permissions_and_precedence() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, store, _url, _server) = private_repo_project("Basic YWxpY2U6bjN0cmMtMTg2", "");
+    // `private_repo_cmd` points NETRC here.
+    let netrc = store.path().join("netrc");
+    fs::write(&netrc, "machine 127.0.0.1 login alice password n3trc-186\n").unwrap();
+    let add = |env: &[(&str, &str)]| {
+        let out = private_repo_cmd(&dir, &store, env)
+            .args(["add", "--no-install", "uvrauthpkg"])
+            .output()
+            .unwrap();
+        (out.status.success(), output_text(&out))
+    };
+
+    // Other users can read it: uvr warns, skips it, and carries on
+    // without credentials.
+    fs::set_permissions(&netrc, fs::Permissions::from_mode(0o644)).unwrap();
+    let (ok, text) = add(&[]);
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("users other than you can access it"),
+        "{text}"
+    );
+    assert!(text.contains("it needs credentials"), "{text}");
+    assert!(
+        text.contains("add a `machine 127.0.0.1` entry to"),
+        "{text}"
+    );
+    assert!(!text.contains("n3trc-186"), "{text}");
+
+    fs::set_permissions(&netrc, fs::Permissions::from_mode(0o600)).unwrap();
+    // An env credential takes precedence over netrc.
+    let (ok, text) = add(&[("UVR_REPO_TOKEN_PRIVATE_REPO", "wrong-186")]);
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("refused the token in UVR_REPO_TOKEN_PRIVATE_REPO"),
+        "{text}"
+    );
+    // Without it, the netrc entry authenticates.
+    let (ok, text) = add(&[]);
+    assert!(ok, "{text}");
+    assert!(!text.contains("users other than you"), "{text}");
+    assert!(!text.contains("n3trc-186"), "{text}");
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn private_repository_refusal_says_how_to_authenticate() {
+    let (dir, store, _url, _server) = private_repo_project("Bearer tok-185-secret", "");
+    let cases: [(&[(&str, &str)], &str); 2] = [
+        (&[], "it needs credentials. Set UVR_REPO_TOKEN_PRIVATE_REPO"),
+        (
+            // A wrong token is refused, and never echoed back.
+            &[("UVR_REPO_TOKEN_PRIVATE_REPO", "wrong-185")],
+            "refused the token in UVR_REPO_TOKEN_PRIVATE_REPO",
+        ),
+    ];
+    for (env, expected) in cases {
+        let out = private_repo_cmd(&dir, &store, env)
+            .args(["add", "--no-install", "uvrauthpkg"])
+            .output()
+            .unwrap();
+        let text = output_text(&out);
+        assert!(!out.status.success(), "{text}");
+        assert!(text.contains("repository 'private-repo'"), "{text}");
+        assert!(text.contains("401 Unauthorized"), "{text}");
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("wrong-185"), "{text}");
+    }
+}
+
+#[test]
+fn test_add_source_refuses_credentials_in_the_url() {
+    let dir = init_project("credsrc");
+    let before = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let out = uvr_cmd()
+        .args([
+            "add",
+            "--no-install",
+            "--source",
+            "https://alice:s3cret-185@ppm.corp.example:8443/cran/latest",
+            "jsonlite",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(
+        stderr.contains("UVR_REPO_TOKEN_PPM_CORP_EXAMPLE"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("https://***@ppm.corp.example:8443"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("s3cret-185"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("uvr.toml")).unwrap(),
+        before
+    );
+}
+
+// ─── any git host (#190) ───────────────────────────────────
+//
+// Gated to non-Windows like the other networked-style CLI tests; the
+// unit tests in git_generic.rs run the same git calls on every platform.
+
+#[cfg(not(target_os = "windows"))]
+fn have_git() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=uvr", "-c", "user.email=uvr@example.com"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+        .args(["-c", "core.hooksPath=/dev/null", "-C"])
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[cfg(not(target_os = "windows"))]
+/// A git repository holding the pure-R package `uvrgitpkg`: tag `v0.1.0`
+/// at version 0.1.0, then 0.2.0 on `main`. Returns the store, the
+/// `file://` URL, and the tagged commit. The store also holds an isolated
+/// cache with an empty CRAN index, so resolution needs no network.
+fn git_repo_store() -> (TempDir, String, String) {
+    let store = TempDir::new().unwrap();
+    let repo = store.path().join("repo");
+    fs::create_dir_all(repo.join("R")).unwrap();
+    let description = |version: &str| {
+        format!(
+            "Package: uvrgitpkg\nVersion: {version}\nTitle: Test\nDescription: Test package.\n\
+             License: MIT\nAuthor: uvr\nMaintainer: uvr <uvr@example.com>\nNeedsCompilation: no\n"
+        )
+    };
+    fs::write(repo.join("DESCRIPTION"), description("0.1.0")).unwrap();
+    fs::write(repo.join("NAMESPACE"), "export(hello)\n").unwrap();
+    fs::write(repo.join("R/hello.R"), "hello <- function() \"hi\"\n").unwrap();
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "first"]);
+    git_in(&repo, &["tag", "-a", "v0.1.0", "-m", "v0.1.0"]);
+    let tagged = git_in(&repo, &["rev-parse", "HEAD"]);
+    fs::write(repo.join("DESCRIPTION"), description("0.2.0")).unwrap();
+    git_in(&repo, &["commit", "-q", "-am", "second"]);
+
+    let cache = store.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("cran-packages.txt"), "").unwrap();
+    let url = format!("file://{}", repo.display());
+    (store, url, tagged)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn git_project_cmd(dir: &TempDir, store: &TempDir) -> Command {
+    let mut cmd = uvr_cmd();
+    cmd.current_dir(dir.path())
+        .env("UVR_CACHE_DIR", store.path().join("cache"))
+        .env("UVR_PACKAGES_DIR", store.path().join("packages"))
+        .env("UVR_NO_BINARY", "1")
+        .env("NETRC", store.path().join("netrc"))
+        .env_remove("UVR_REPOS");
+    cmd
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn git_dependency_locks_installs_and_resyncs() {
+    if !have_git() {
+        eprintln!("skipping: no git on PATH");
+        return;
+    }
+    let (store, url, tagged) = git_repo_store();
+    let dir = init_project("gitproj");
+    let spec = format!("git::{url}@v0.1.0");
+
+    let out = git_project_cmd(&dir, &store)
+        .args(["add", "--no-install", &spec])
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    // The repository is named `repo`; DESCRIPTION names the package.
+    assert!(text.contains("repo → uvrgitpkg"), "{text}");
+    let toml = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let manifest: uvr_core::manifest::Manifest = toml.parse().unwrap();
+    let dep = manifest
+        .dependencies
+        .get("uvrgitpkg")
+        .unwrap_or_else(|| panic!("{toml}"));
+    assert_eq!(dep.git(), Some(format!("git::{url}").as_str()));
+    assert!(toml.contains("rev = \"v0.1.0\""), "{toml}");
+
+    // The lock pins the tagged commit (not the tag object), has no `url`,
+    // and a second lock writes the same file.
+    let lock_path = dir.path().join("uvr.lock");
+    let lock = fs::read_to_string(&lock_path).unwrap();
+    let lockfile: uvr_core::lockfile::Lockfile = lock.parse().unwrap();
+    let pkg = lockfile
+        .get_package("uvrgitpkg")
+        .unwrap_or_else(|| panic!("{lock}"));
+    assert_eq!(pkg.version, "0.1.0");
+    assert_eq!(
+        pkg.source,
+        uvr_core::lockfile::PackageSource::Git { url: url.clone() }
+    );
+    assert_eq!(
+        pkg.checksum.as_deref(),
+        Some(format!("git:{tagged}").as_str())
+    );
+    assert_eq!(pkg.url, None);
+    let out = git_project_cmd(&dir, &store).arg("lock").output().unwrap();
+    assert!(out.status.success(), "{}", output_text(&out));
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), lock);
+
+    if !have_r() {
+        eprintln!("skipping the install half: no R on PATH");
+        return;
+    }
+    let installed = dir.path().join(".uvr/library/uvrgitpkg/DESCRIPTION");
+    let out = git_project_cmd(&dir, &store)
+        .args(["sync", "-v"])
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        fs::read_to_string(&installed)
+            .unwrap()
+            .contains("Version: 0.1.0"),
+        "{text}"
+    );
+
+    // Re-sync without the repository: the library, then the package cache,
+    // are gone, and the archive of the locked commit is still in the cache.
+    fs::remove_dir_all(store.path().join("repo")).unwrap();
+    fs::remove_dir_all(dir.path().join(".uvr/library/uvrgitpkg")).unwrap();
+    fs::remove_dir_all(store.path().join("packages")).unwrap();
+    let out = git_project_cmd(&dir, &store).arg("sync").output().unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(installed.exists(), "{text}");
+    let out = git_project_cmd(&dir, &store).arg("sync").output().unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("Everything is up to date"), "{text}");
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn git_dependency_without_git_fails_clearly() {
+    if !have_git() {
+        eprintln!("skipping: no git on PATH to build the fixture");
+        return;
+    }
+    let (store, url, _) = git_repo_store();
+    let dir = init_project("nogitproj");
+    let before = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let empty_path = TempDir::new().unwrap();
+    let out = git_project_cmd(&dir, &store)
+        .env("PATH", empty_path.path())
+        .args(["add", "--no-install", &format!("git::{url}")])
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("`git` is not on PATH"), "{text}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("uvr.toml")).unwrap(),
+        before
+    );
+
+    // `uvr doctor` says so too, and calls it an issue for this project.
+    let out = git_project_cmd(&dir, &store)
+        .env("PATH", empty_path.path())
+        .args(["add", "--no-lock", &format!("git::{url}")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", output_text(&out));
+    let out = git_project_cmd(&dir, &store)
+        .env("PATH", empty_path.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let text = output_text(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("needed for git:: dependencies"), "{text}");
+    assert!(
+        text.contains("git is not on PATH, and this project has git:: dependencies"),
+        "{text}"
+    );
+}
+
+#[test]
+fn test_doctor_reports_git() {
+    let out = uvr_cmd().arg("doctor").output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    let git_found = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(" git "))
+        .unwrap_or_else(|| panic!("no git row: {stdout}"));
+    assert_eq!(
+        row.contains("found") && !row.contains("not found"),
+        git_found,
+        "{row}"
+    );
+}
+
+// Existing Git provider specs retain their meaning after manifest edits (#190).
+#[test]
+fn test_add_no_lock_keeps_every_git_spec_shape() {
+    let dir = init_project("specshapes");
+    uvr_cmd()
+        .args([
+            "add",
+            "--no-lock",
+            "owner/ghpkg@v1",
+            "forgejo::codefloe.com/team/fjpkg@main",
+            "gitlab::gitlab.com/group/sub/glpkg",
+            "git::git@bitbucket.org:team/bbpkg.git@v2",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let manifest = uvr_core::manifest::Manifest::from_file(&dir.path().join("uvr.toml")).unwrap();
+    for (name, git, rev) in [
+        ("ghpkg", "owner/ghpkg", Some("v1")),
+        ("fjpkg", "forgejo::codefloe.com/team/fjpkg", Some("main")),
+        ("glpkg", "gitlab::gitlab.com/group/sub/glpkg", None),
+        ("bbpkg", "git::git@bitbucket.org:team/bbpkg.git", Some("v2")),
+    ] {
+        let spec = &manifest.dependencies[name];
+        assert_eq!(spec.git(), Some(git), "{name}");
+        let uvr_core::manifest::DependencySpec::Detailed(dep) = spec else {
+            panic!("expected detailed dependency for {name}");
+        };
+        assert_eq!(dep.rev.as_deref(), rev, "{name}");
+    }
+}
+
+// ─── url dependencies (#189) ───────────────────────────────
+
+/// A gzip tar with `files` (path, contents).
+#[cfg(not(target_os = "windows"))]
+fn gzip_tar(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    {
+        let mut builder = tar::Builder::new(&mut enc);
+        for (path, contents) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(path).unwrap();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            // R's internal untar rejects the default NUL type flag.
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, contents.as_bytes()).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+    enc.finish().unwrap()
+}
+
+/// A minimal installable pure-R source package called `urlpkg`.
+#[cfg(not(target_os = "windows"))]
+fn urlpkg_tarball(version: &str) -> Vec<u8> {
+    let description = format!(
+        "Package: urlpkg\nVersion: {version}\nTitle: Test\nDescription: Test package.\n\
+         License: MIT\nAuthor: uvr\nMaintainer: uvr <uvr@example.org>\nNeedsCompilation: no\n"
+    );
+    gzip_tar(&[
+        ("urlpkg/DESCRIPTION", &description),
+        ("urlpkg/NAMESPACE", "export(hello)\n"),
+        (
+            "urlpkg/R/hello.R",
+            "hello <- function() \"hello from urlpkg\"\n",
+        ),
+    ])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
+}
+
+#[test]
+fn test_add_no_lock_records_url_dependency() {
+    let dir = init_project("url-no-lock");
+    let url = "https://example.org/dl/urlpkg_0.1.0.tar.gz";
+    uvr_cmd()
+        .args(["add", "--no-lock", url])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let m: uvr_core::manifest::Manifest = content.parse().unwrap();
+    assert_eq!(m.dependencies.get("urlpkg").unwrap().url(), Some(url));
+    assert!(!dir.path().join("uvr.lock").exists());
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_add_rejects_urls_that_are_not_source_tarballs() {
+    let root = TempDir::new().unwrap();
+    fs::write(
+        root.path().join("page.tar.gz"),
+        "<!DOCTYPE html><html><body>Not found</body></html>",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("urlpkg_0.1.0.tgz"),
+        gzip_tar(&[(
+            "urlpkg/DESCRIPTION",
+            "Package: urlpkg\nVersion: 0.1.0\nBuilt: R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix\n",
+        )]),
+    )
+    .unwrap();
+    let (base, _server) = spawn_stub(root.path().to_path_buf(), None);
+
+    let dir = init_project("url-reject");
+    let before = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    for (file, reason) in [
+        ("page.tar.gz", "not gzip-compressed"),
+        ("urlpkg_0.1.0.tgz", "pre-built binary"),
+        ("missing_0.1.0.tar.gz", "404"),
+    ] {
+        uvr_cmd()
+            .args(["add", "--no-install", &format!("{base}/{file}")])
+            .current_dir(dir.path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(reason));
+    }
+    assert_eq!(
+        fs::read_to_string(dir.path().join("uvr.toml")).unwrap(),
+        before,
+        "a rejected URL must not reach uvr.toml"
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_add_url_locks_url_and_checksum() {
+    // Resolution also fetches the CRAN index, like
+    // `lock_with_binary_capable_source_records_source_urls` above.
+    let root = TempDir::new().unwrap();
+    let bytes = urlpkg_tarball("0.1.0");
+    // The file name is not the package name: DESCRIPTION decides.
+    fs::write(root.path().join("build-artifact.tar.gz"), &bytes).unwrap();
+    let (base, _server) = spawn_stub(root.path().to_path_buf(), None);
+    let url = format!("{base}/build-artifact.tar.gz");
+
+    let dir = init_project("url-lock");
+    uvr_cmd()
+        .args(["add", "--no-install", &url])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let manifest: uvr_core::manifest::Manifest = fs::read_to_string(dir.path().join("uvr.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        manifest.dependencies.get("urlpkg").unwrap().url(),
+        Some(url.as_str())
+    );
+    let lock: uvr_core::lockfile::Lockfile = fs::read_to_string(dir.path().join("uvr.lock"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pkg = lock.get_package("urlpkg").expect("urlpkg locked");
+    assert_eq!(pkg.source, uvr_core::lockfile::PackageSource::Url);
+    assert_eq!(pkg.url.as_deref(), Some(url.as_str()));
+    assert_eq!(pkg.checksum, Some(sha256(&bytes)));
+
+    // An unchanged manifest keeps its pinned archive until explicitly upgraded.
+    let changed = gzip_tar(&[
+        ("urlpkg/DESCRIPTION", "Package: urlpkg\nVersion: 0.1.0\nTitle: Changed archive\nDescription: Test package.\nLicense: MIT\nAuthor: uvr\nMaintainer: uvr <uvr@example.org>\nNeedsCompilation: no\n"),
+        ("urlpkg/NAMESPACE", "export(hello)\n"),
+        ("urlpkg/R/hello.R", "hello <- function() \"updated source\"\n"),
+    ]);
+    fs::write(root.path().join("build-artifact.tar.gz"), &changed).unwrap();
+    uvr_cmd()
+        .arg("lock")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let preserved = uvr_core::lockfile::Lockfile::from_file(&dir.path().join("uvr.lock")).unwrap();
+    assert_eq!(
+        preserved.get_package("urlpkg").unwrap().checksum,
+        Some(sha256(&bytes))
+    );
+    uvr_cmd()
+        .args(["lock", "--upgrade"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let refreshed = uvr_core::lockfile::Lockfile::from_file(&dir.path().join("uvr.lock")).unwrap();
+    assert_eq!(
+        refreshed.get_package("urlpkg").unwrap().checksum,
+        Some(sha256(&changed))
+    );
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_sync_url_dependency_verifies_checksum_then_installs() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let root = TempDir::new().unwrap();
+    let bytes = urlpkg_tarball("0.1.0");
+    fs::write(root.path().join("urlpkg_0.1.0.tar.gz"), &bytes).unwrap();
+    let (base, _server) = spawn_stub(root.path().to_path_buf(), None);
+    let url = format!("{base}/urlpkg_0.1.0.tar.gz");
+
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("uvr.toml"),
+        format!(
+            "[project]\nname = \"urlsync\"\n\n[dependencies]\nurlpkg = {{ url = \"{url}\" }}\n"
+        ),
+    )
+    .unwrap();
+    // `version = "*"` keeps sync from re-resolving for the active R.
+    let write_lock = |checksum: &str| {
+        fs::write(
+            dir.path().join("uvr.lock"),
+            format!(
+                "[r]\nversion = \"*\"\n\n[[package]]\nname = \"urlpkg\"\nversion = \"0.1.0\"\n\
+                 source = \"url\"\nurl = \"{url}\"\nchecksum = \"{checksum}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    let sync = || {
+        let mut cmd = uvr_cmd();
+        cmd.arg("sync")
+            .current_dir(dir.path())
+            .env("HOME", home.path())
+            .env("UVR_CACHE_DIR", home.path().join("cache"))
+            .env("UVR_PACKAGES_DIR", home.path().join("packages"))
+            .env("UVR_NO_BINARY", "1")
+            .env_remove("UVR_REPOS")
+            .env_remove("UVR_LIBRARY")
+            .env_remove("R_HOME");
+        cmd
+    };
+
+    // The file no longer matches the lockfile: a hard error, nothing installed.
+    let stale = format!("sha256:{}", "0".repeat(64));
+    write_lock(&stale);
+    sync()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(&url))
+        .stderr(predicate::str::contains(&stale))
+        .stderr(predicate::str::contains(sha256(&bytes)))
+        .stderr(predicate::str::contains("run `uvr lock`"));
+    let installed = dir.path().join(".uvr/library/urlpkg/DESCRIPTION");
+    assert!(!installed.exists());
+
+    write_lock(&sha256(&bytes));
+    sync().assert().success();
+    assert!(installed.exists(), "urlpkg was not installed");
 }
 
 #[test]
@@ -1518,4 +2384,178 @@ fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
         .success()
         .stdout(predicate::str::contains("RAN"))
         .stderr(predicate::str::contains("does not honour yet"));
+}
+
+// ─── IDE-mode scaffolding ─────────────────────────────────────────
+
+#[test]
+fn test_init_default_writes_rprofile_but_no_ide_config() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "plainproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_ide_positron_writes_vscode_settings() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "posproj", "--ide=positron"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".vscode").join("settings.json").exists());
+    let settings = fs::read_to_string(dir.path().join(".vscode").join("settings.json")).unwrap();
+    assert!(settings.contains("positron.r.interpreters.default"));
+}
+
+#[test]
+fn test_init_ide_rejects_unsupported_rstudio() {
+    // `--ide` only accepts `positron` today. RStudio has no config in uvr, so
+    // rejecting the value is better than accepting a silent no-op. Adding
+    // RStudio later means adding it to `Ide` and the config writer.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "rstudioproj", "--ide=rstudio"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn test_init_positron_env_writes_vscode_settings() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "envposproj"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".vscode").join("settings.json").exists());
+}
+
+#[test]
+fn test_init_rstudio_env_still_wires_library_but_writes_no_ide_config() {
+    // RStudio is not a supported `--ide` value, but its users are still served:
+    // `.Rprofile` wires the library and no IDE config is written. Pin that so
+    // removing the RStudio variant does not silently break RStudio terminals.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "envrstudioproj"])
+        .env("RSTUDIO", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_unattended_writes_only_manifest_and_library() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "unattendedproj", "--unattended"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join("uvr.toml").exists());
+    assert!(dir.path().join(".uvr").join("library").exists());
+    assert!(!dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".gitignore").exists());
+    assert!(!dir.path().join(".uvr").join("activate").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_unattended_before_subcommand_still_beats_explicit_ide() {
+    // The removed `conflicts_with = "unattended"` only fired when the global
+    // flag followed the subcommand, so `uvr --unattended init --ide positron`
+    // was accepted anyway. It is accepted for every spelling now; the runtime
+    // gate must still make `--unattended` win and write no IDE config.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args([
+            "--unattended",
+            "init",
+            "--here",
+            "unattendedide",
+            "--ide=positron",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join("uvr.toml").exists());
+    assert!(!dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_bare_conflicts_with_ide() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "bareide", "--bare", "--ide=positron"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_init_no_ide_overrides_positron_env() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "noideproj", "--no-ide"])
+        .env("POSITRON", "1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join(".Rprofile").exists());
+    assert!(!dir.path().join(".vscode").exists());
+}
+
+#[test]
+fn test_init_bare_skips_scaffolding_but_ignores_library() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "bareproj", "--bare"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(dir.path().join("uvr.toml").exists());
+    assert!(dir.path().join(".uvr").join("library").exists());
+    assert!(!dir.path().join(".Rprofile").exists());
+    assert!(dir.path().join(".gitignore").exists());
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains("/.uvr/library/"));
+    assert!(!dir.path().join(".uvr").join("activate").exists());
+    assert!(!dir.path().join(".vscode").exists());
+    let manifest = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    assert!(manifest.contains("bare = true"));
+}
+
+#[test]
+fn test_ide_flag_is_scoped_to_init_sync_import() {
+    // `--ide` is only meaningful where IDE config is written. On `add` it
+    // must be rejected at parse time, not silently accepted and ignored.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["add", "--ide=positron", "ggplot2"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument"));
 }

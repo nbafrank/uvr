@@ -1,6 +1,7 @@
 use semver::Version;
 use tracing::debug;
 
+use crate::auth::{git_origin, GitHost};
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
 use crate::registry::PackageInfo;
@@ -99,36 +100,6 @@ pub fn parse_forgejo_spec(spec: &str) -> Option<(String, String, String, String)
     ))
 }
 
-/// Look up a Forgejo API token from the environment.
-///
-/// Lookup order:
-/// 1. `UVR_FORGEJO_TOKEN_<NORMALIZED_HOST>` — per-host.
-/// 2. `UVR_FORGEJO_TOKEN` — single token for users with one instance.
-///
-/// Host normalization: strip `:port`, uppercase, replace `.` and `-`
-/// with `_`. E.g. `codefloe.com` → `CODEFLOE_COM`, `git.local:3000` →
-/// `GIT_LOCAL`. Whitespace-only env values are treated as unset so a
-/// shell that exports `UVR_FORGEJO_TOKEN=` doesn't fail authenticated
-/// requests with a literal empty bearer.
-pub fn forgejo_token(host: &str) -> Option<String> {
-    let host_no_port = host.split_once(':').map_or(host, |(h, _port)| h);
-    let normalized: String = host_no_port
-        .to_ascii_uppercase()
-        .chars()
-        .map(|c| if c == '.' || c == '-' { '_' } else { c })
-        .collect();
-    let per_host = format!("UVR_FORGEJO_TOKEN_{normalized}");
-    for var in [per_host.as_str(), "UVR_FORGEJO_TOKEN"] {
-        if let Ok(v) = std::env::var(var) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Resolve a Forgejo-hosted R package while deliberately discarding rich
 /// `Remotes:` entries before the fallible legacy-tuple adapter.
 pub async fn resolve_forgejo_package(
@@ -225,15 +196,12 @@ pub async fn resolve_forgejo_package_with_remote_entries_and_install_dependencie
     Vec<crate::manifest::RemoteEntry>,
     std::collections::BTreeSet<String>,
 )> {
-    let desc_url =
-        format!("https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}");
-    let mut desc_req = client
+    let origin = git_origin(host);
+    let desc_url = format!("{origin}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}");
+    let desc_req = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
-    if let Some(tok) = forgejo_token(host) {
-        desc_req = desc_req.header("Authorization", format!("token {tok}"));
-    }
-    let desc_resp = desc_req.send().await?;
+    let desc_resp = GitHost::Forgejo(host).send(desc_req).await?;
     if !desc_resp.status().is_success() {
         return Err(map_forgejo_error(
             desc_resp.status(),
@@ -266,7 +234,7 @@ pub async fn resolve_forgejo_package_with_remote_entries_and_install_dependencie
         crate::registry::github::parse_description_install_dependency_names(&desc_fields);
     let remotes = parse_forgejo_remote_entries(&desc_fields);
 
-    let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz");
+    let url = format!("{origin}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz");
 
     debug!("Forgejo {host}/{owner}/{repo}@{commit_sha} → {pkg_name} {version}");
 
@@ -339,16 +307,15 @@ pub async fn fetch_commit_sha(
     // going through `parse_forgejo_parts` (lockfile revs, `Remotes:`
     // fields), so encode defensively (#152).
     let encoded_ref = urlencoding::encode(git_ref);
-    let url =
-        format!("https://{host}/api/v1/repos/{owner}/{repo}/commits?sha={encoded_ref}&limit=1");
-    let mut req = client
+    let url = format!(
+        "{}/api/v1/repos/{owner}/{repo}/commits?sha={encoded_ref}&limit=1",
+        git_origin(host)
+    );
+    let req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/json");
-    if let Some(tok) = forgejo_token(host) {
-        req = req.header("Authorization", format!("token {tok}"));
-    }
-    let resp = req.send().await?;
+    let resp = GitHost::Forgejo(host).send(req).await?;
 
     if !resp.status().is_success() {
         return Err(map_forgejo_error(resp.status(), host, owner, repo, git_ref));
@@ -381,8 +348,8 @@ fn map_forgejo_error(
 ) -> UvrError {
     match status.as_u16() {
         401 | 403 => UvrError::Other(format!(
-            "Forgejo returned {status} for {host}/{owner}/{repo}; \
-             set UVR_FORGEJO_TOKEN_<HOST> if the repo is private."
+            "Forgejo returned {status} for {host}/{owner}/{repo}; {}",
+            GitHost::Forgejo(host).denied_advice()
         )),
         404 => UvrError::Other(format!(
             "Forgejo repository not found: {host}/{owner}/{repo}@{ref_or_sha}. \
@@ -586,34 +553,77 @@ mod tests {
         assert!(parse_forgejo_parts("forgejo::codefloe.com/pat-s/my_pkg.v2").is_some());
     }
 
-    // All token lookup tests are combined into a single test to avoid races
-    // from env-mutation across parallel test threads (std::env is global).
+    // #187: a private repository resolves and downloads with the host's
+    // token from the shared resolver, sent as Forgejo's `token` header, on
+    // Forgejo's API paths.
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn token_lookup() {
-        // Serialize with all other env-mutating tests (process-global env).
-        let _env = crate::env_vars::env_lock();
-        // --- sub-test: per-host var takes precedence over global ---
-        let host = "lookup-test-host.example";
-        let per_host_var = "UVR_FORGEJO_TOKEN_LOOKUP_TEST_HOST_EXAMPLE";
-        std::env::set_var(per_host_var, "host-specific");
-        std::env::set_var("UVR_FORGEJO_TOKEN", "global");
-        assert_eq!(forgejo_token(host).as_deref(), Some("host-specific"));
-        std::env::remove_var(per_host_var);
-        assert_eq!(forgejo_token(host).as_deref(), Some("global"));
-        std::env::remove_var("UVR_FORGEJO_TOKEN");
-        assert_eq!(forgejo_token(host), None);
+    fn private_repository_resolves_and_downloads() {
+        use crate::auth::{
+            test_authorization, test_git_origin, test_private_git_host, test_response, GitEnv,
+        };
 
-        // --- sub-test: port is stripped before normalization ---
-        // Port is stripped before normalization so the env var name is
-        // stable across `host` vs `host:port`.
-        std::env::set_var("UVR_FORGEJO_TOKEN_GIT_LOCAL", "t");
-        assert_eq!(forgejo_token("git.local:3000").as_deref(), Some("t"));
-        std::env::remove_var("UVR_FORGEJO_TOKEN_GIT_LOCAL");
+        const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+        let _env = GitEnv::new(&["UVR_FORGEJO_TOKEN", "UVR_FORGEJO_TOKEN_FORGEJO_TEST"]);
+        std::env::set_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST", "fj-tok");
+        let (origin, seen) = test_private_git_host("token fj-tok", |path| {
+            let ok = |body: &[u8]| test_response("200 OK", "", body);
+            match path.strip_prefix("/api/v1/repos/team/privpkg/") {
+                Some("commits?sha=main&limit=1") => {
+                    ok(format!(r#"[{{"sha":"{SHA}"}}]"#).as_bytes())
+                }
+                Some(p) if p == format!("raw/DESCRIPTION?ref={SHA}") => {
+                    ok(b"Package: privpkg\nVersion: 1.2.3\n")
+                }
+                Some(p) if p == format!("archive/{SHA}.tar.gz") => ok(b"private tarball"),
+                _ => test_response("404 Not Found", "", b""),
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        test_git_origin("forgejo.test:3000", &origin);
+        let client = reqwest::Client::new();
+        let resolve = || {
+            rt.block_on(resolve_forgejo_package(
+                &client,
+                "forgejo.test:3000",
+                "team",
+                "privpkg",
+                "main",
+            ))
+        };
 
-        // --- sub-test: whitespace-only values are treated as unset ---
-        std::env::set_var("UVR_FORGEJO_TOKEN", "   ");
-        assert_eq!(forgejo_token("any.host").as_deref(), None);
-        std::env::remove_var("UVR_FORGEJO_TOKEN");
+        let info = resolve().expect("the token opens the private repository");
+        assert_eq!(
+            (info.name.as_str(), info.version.to_string()),
+            ("privpkg", "1.2.3".into())
+        );
+        assert_eq!(
+            info.url,
+            format!("{origin}/api/v1/repos/team/privpkg/archive/{SHA}.tar.gz")
+        );
+        let tarball = crate::installer::download::test_download(&rt, &info)
+            .expect("the tarball downloads with the token");
+        assert_eq!(tarball, b"private tarball");
+        let heads = seen.lock().unwrap().clone();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        for head in &heads {
+            assert_eq!(test_authorization(head), Some("token fj-tok"), "{head}");
+        }
+
+        // Without a token the repository is hidden; a wrong one is refused.
+        std::env::remove_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST");
+        let err = resolve().unwrap_err().to_string();
+        assert!(err.contains("repository not found"), "{err}");
+        std::env::set_var("UVR_FORGEJO_TOKEN", "wrong-tok");
+        let err = resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("refused the token in UVR_FORGEJO_TOKEN."),
+            "{err}"
+        );
+        assert!(!err.contains("wrong-tok"), "{err}");
     }
 
     #[test]

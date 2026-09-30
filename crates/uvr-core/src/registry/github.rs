@@ -1,6 +1,7 @@
 use semver::Version;
 use tracing::debug;
 
+use crate::auth::{git_origin, GitHost};
 use crate::error::{Result, UvrError};
 use crate::lockfile::{LockedPackage, PackageSource};
 use crate::registry::{Dep, PackageInfo};
@@ -160,13 +161,10 @@ pub async fn resolve_github_package_with_remote_entries_at_commit_bound(
     }
 
     let desc_url = description_url(user, repo, commit_sha, subdirectory);
-    let mut desc_req = client
+    let desc_req = client
         .get(&desc_url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")));
-    if let Some(tok) = github_token() {
-        desc_req = desc_req.bearer_auth(tok);
-    }
-    let desc_resp = desc_req.send().await?;
+    let desc_resp = GitHost::GitHub.send(desc_req).await?;
     if !desc_resp.status().is_success() {
         return Err(UvrError::Other(match subdirectory {
             Some(sub) => format!(
@@ -268,12 +266,13 @@ fn description_package_name_bound(
 }
 
 fn description_url(user: &str, repo: &str, git_ref: &str, subdirectory: Option<&str>) -> String {
+    let raw = git_origin("raw.githubusercontent.com");
     match subdirectory {
         Some(sub) => format!(
-            "https://raw.githubusercontent.com/{user}/{repo}/{git_ref}/{}/DESCRIPTION",
+            "{raw}/{user}/{repo}/{git_ref}/{}/DESCRIPTION",
             crate::subdirectory::encode_segments(sub)
         ),
-        None => format!("https://raw.githubusercontent.com/{user}/{repo}/{git_ref}/DESCRIPTION"),
+        None => format!("{raw}/{user}/{repo}/{git_ref}/DESCRIPTION"),
     }
 }
 
@@ -301,13 +300,14 @@ fn is_repo_segment(segment: &str) -> bool {
 }
 
 pub fn tarball_url(user: &str, repo: &str, commit_sha: &str) -> String {
-    format!("https://api.github.com/repos/{user}/{repo}/tarball/{commit_sha}")
+    let api = git_origin("api.github.com");
+    format!("{api}/repos/{user}/{repo}/tarball/{commit_sha}")
 }
 
 pub fn validate_nested_lock_entry(p: &LockedPackage) -> Result<()> {
-    let Some(sub) = p.subdirectory.as_deref() else {
+    if p.source != PackageSource::GitHub && p.subdirectory.is_none() {
         return Ok(());
-    };
+    }
     let bad = |msg: String| UvrError::Other(format!("Locked package '{}': {msg}", p.name));
     if p.source != PackageSource::GitHub {
         return Err(bad(format!(
@@ -321,7 +321,9 @@ pub fn validate_nested_lock_entry(p: &LockedPackage) -> Result<()> {
             p.name
         )));
     }
-    crate::subdirectory::validate(sub)?;
+    if let Some(sub) = p.subdirectory.as_deref() {
+        crate::subdirectory::validate(sub)?;
+    }
     let commit = p
         .checksum
         .as_deref()
@@ -383,43 +385,27 @@ pub async fn fetch_commit_sha(
     // `Remotes:` fields), so encode defensively (#152). GitHub's API
     // accepts `%2F` for the `/` in refs like `feature/x`.
     let encoded_ref = urlencoding::encode(git_ref);
-    let url = format!("https://api.github.com/repos/{user}/{repo}/commits/{encoded_ref}");
-    let mut req = client
+    let api = git_origin("api.github.com");
+    let url = format!("{api}/repos/{user}/{repo}/commits/{encoded_ref}");
+    let req = client
         .get(&url)
         .header("User-Agent", concat!("uvr/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github.sha");
-    if let Some(tok) = github_token() {
-        req = req.bearer_auth(tok);
-    }
-    let resp = req.send().await?;
+    let resp = GitHost::GitHub.send(req).await?;
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
+        let advice = match status.as_u16() {
+            401 | 403 => format!("; {}", GitHost::GitHub.denied_advice()),
+            _ => String::new(),
+        };
         return Err(UvrError::Other(format!(
-            "GitHub API error for {user}/{repo}@{git_ref}: {}",
-            resp.status()
+            "GitHub API error for {user}/{repo}@{git_ref}: {status}{advice}"
         )));
     }
 
     let sha = resp.text().await?;
     Ok(sha.trim().trim_matches('"').to_string())
-}
-
-/// Look up a GitHub API token to attach to requests. Reads `GITHUB_PAT`
-/// first (renv/devtools convention) and falls back to `GITHUB_TOKEN`
-/// (Actions / generic CI convention). Without a token GitHub's
-/// unauthenticated rate limit is 60 req/hr shared by everyone behind
-/// the same egress IP — easy to exhaust on a CI runner walking an
-/// `renv.lock` with several github deps (#95).
-fn github_token() -> Option<String> {
-    for var in ["GITHUB_PAT", "GITHUB_TOKEN"] {
-        if let Ok(v) = std::env::var(var) {
-            let t = v.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Parse install-time dependencies from DESCRIPTION, keeping every distinct constraint.
@@ -980,5 +966,239 @@ Remotes: github::user/a@v1.0.0,
         let desc = "Package: x\nVersion: 0.0.1\nImports: foo\n";
         let fields = crate::dcf::parse_dcf_fields(desc);
         assert!(parse_github_remotes(&fields).unwrap().is_empty());
+    }
+
+    /// GitHub's routes for repository `owner/privpkg` at [`SHA`]: the
+    /// commit API, raw.githubusercontent.com, and a tarball API call that
+    /// redirects to `codeload` with a token in the URL, as GitHub does.
+    #[cfg(not(target_os = "windows"))]
+    fn github_route(path: &str, codeload: &str) -> Vec<u8> {
+        use crate::auth::test_response;
+        let ok = |body: &[u8]| test_response("200 OK", "", body);
+        if path == "/repos/owner/privpkg/commits/main" {
+            ok(SHA.as_bytes())
+        } else if path == format!("/owner/privpkg/{SHA}/DESCRIPTION") {
+            ok(b"Package: privpkg\nVersion: 0.3.0\n")
+        } else if path == format!("/repos/owner/privpkg/tarball/{SHA}") {
+            let location =
+                format!("Location: {codeload}/owner/privpkg/tar.gz/{SHA}?token=signed\r\n");
+            test_response("302 Found", &location, b"")
+        } else {
+            test_response("404 Not Found", "", b"")
+        }
+    }
+
+    /// `(api/raw origin, its request log, codeload's request log)`: the
+    /// GitHub hosts on this thread, with `github` as their request handler.
+    #[cfg(not(target_os = "windows"))]
+    #[allow(clippy::type_complexity)]
+    fn fake_github(
+        github: impl Fn(&str, &str) -> Vec<u8> + Send + 'static,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use crate::auth::{
+            test_authorization, test_git_origin, test_path, test_response, test_server,
+        };
+        // codeload serves the tarball only with its URL token, and must
+        // never see the GitHub credential.
+        let (codeload, codeload_seen) = test_server(|head| {
+            match (
+                test_path(head).ends_with("?token=signed"),
+                test_authorization(head),
+            ) {
+                (true, None) => test_response("200 OK", "", b"private tarball"),
+                _ => test_response("403 Forbidden", "", b""),
+            }
+        });
+        let (api, api_seen) = test_server(move |head| github(head, &codeload));
+        test_git_origin("api.github.com", &api);
+        test_git_origin("raw.githubusercontent.com", &api);
+        (api, api_seen, codeload_seen)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn current_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    // #187: a private repository resolves and installs with GITHUB_PAT from
+    // the shared resolver. The tarball request now carries it too (before
+    // #187 it did not, so a private repository locked but never synced);
+    // the redirect to codeload does not.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn private_repository_resolves_and_downloads() {
+        use crate::auth::{test_authorization, test_path, test_response, GitEnv};
+
+        let _env = GitEnv::new(&[]);
+        std::env::set_var("GITHUB_PAT", "gh-tok");
+        let rt = current_thread();
+        // A private repository: hidden without a token.
+        let (_, api_seen, codeload_seen) =
+            fake_github(|head, codeload| match test_authorization(head) {
+                Some("Bearer gh-tok") => github_route(test_path(head), codeload),
+                Some(_) => refused(test_path(head)),
+                None => test_response("404 Not Found", "", b""),
+            });
+        let client = reqwest::Client::new();
+        let resolve = || rt.block_on(resolve_github_package(&client, "owner", "privpkg", "main"));
+
+        let info = resolve().expect("GITHUB_PAT opens the private repository");
+        assert_eq!(
+            (info.name.as_str(), info.version.to_string()),
+            ("privpkg", "0.3.0".into())
+        );
+        let tarball = crate::installer::download::test_download(&rt, &info)
+            .expect("the tarball downloads with GITHUB_PAT");
+        assert_eq!(tarball, b"private tarball");
+        let heads = api_seen.lock().unwrap().clone();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        for head in &heads {
+            assert_eq!(test_authorization(head), Some("Bearer gh-tok"), "{head}");
+        }
+        let codeload = codeload_seen.lock().unwrap().clone();
+        assert_eq!(codeload.len(), 1);
+        assert_eq!(test_authorization(&codeload[0]), None, "{codeload:?}");
+
+        // A wrong token is refused, and the error says which variable.
+        std::env::set_var("GITHUB_PAT", "wrong-tok");
+        let err = resolve().unwrap_err().to_string();
+        assert!(
+            err.contains("401 Unauthorized; it refused the token in GITHUB_PAT."),
+            "{err}"
+        );
+        assert!(!err.contains("wrong-tok"), "{err}");
+    }
+
+    /// GitHub's answer to a token that it refuses, as github.com gives it:
+    /// 401 from the API, but 404 from raw.githubusercontent.com.
+    #[cfg(not(target_os = "windows"))]
+    fn refused(path: &str) -> Vec<u8> {
+        use crate::auth::test_response;
+        if path.starts_with("/repos/") {
+            test_response("401 Unauthorized", "", b"")
+        } else {
+            test_response("404 Not Found", "", b"")
+        }
+    }
+
+    /// A netrc file `name` in `dir` whose GitHub entry GitHub refuses, named
+    /// by `NETRC`. Each new file is an entry that uvr has not refused yet.
+    #[cfg(not(target_os = "windows"))]
+    fn stale_netrc(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "machine github.com login me password stale-tok\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        std::env::set_var("NETRC", &path);
+        path
+    }
+
+    // #187: a netrc entry that GitHub refuses (an expired token, say) does
+    // not break a public repository: uvr drops the entry for the run and
+    // fetches without credentials, as before #186. A variable's token is
+    // never dropped.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refused_netrc_token_falls_back_to_anonymous() {
+        use crate::auth::{test_authorization, test_path, GitEnv};
+
+        let _env = GitEnv::new(&[]);
+        let rt = current_thread();
+        // A public repository.
+        let (_, api_seen, _) = fake_github(|head, codeload| match test_authorization(head) {
+            Some(_) => refused(test_path(head)),
+            None => github_route(test_path(head), codeload),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let resolve = || rt.block_on(resolve_github_package(&client, "owner", "privpkg", "main"));
+        let description = |repo: &str| {
+            rt.block_on(resolve_github_package_with_remote_entries_at_commit(
+                &client, "owner", repo, SHA, None,
+            ))
+        };
+        // The `Authorization` of each request since the last call.
+        let sent = || -> Vec<Option<String>> {
+            std::mem::take(&mut *api_seen.lock().unwrap())
+                .iter()
+                .map(|head| test_authorization(head).map(str::to_string))
+                .collect()
+        };
+        let stale = || Some("Bearer stale-tok".to_string());
+
+        // The commit API refuses the entry with 401: retried without it,
+        // and not sent again in this run.
+        stale_netrc(dir.path(), "a");
+        let info = resolve().expect("the public repository resolves without the entry");
+        assert_eq!(sent(), [stale(), None, None]);
+
+        // raw.githubusercontent.com refuses it with 404: the same.
+        stale_netrc(dir.path(), "b");
+        description("privpkg").expect("DESCRIPTION without the entry");
+        assert_eq!(sent(), [stale(), None]);
+        description("privpkg").unwrap();
+        assert_eq!(sent(), [None]);
+
+        // A 404 that is a missing file does not drop the entry.
+        stale_netrc(dir.path(), "c");
+        let err = description("missing").unwrap_err().to_string();
+        assert!(err.contains("HTTP 404"), "{err}");
+        assert_eq!(sent(), [stale(), None]);
+        description("privpkg").unwrap();
+        assert_eq!(sent(), [stale(), None]);
+
+        // The tarball download falls back the same way.
+        stale_netrc(dir.path(), "d");
+        let tarball = crate::installer::download::test_download(&rt, &info)
+            .expect("the public tarball downloads without the entry");
+        assert_eq!(tarball, b"private tarball");
+        assert_eq!(sent(), [stale(), None]);
+
+        // A token from a variable is not dropped: the 401 is the result.
+        std::env::set_var("GITHUB_PAT", "stale-env");
+        let err = resolve().unwrap_err().to_string();
+        assert!(err.contains("refused the token in GITHUB_PAT"), "{err}");
+        assert_eq!(sent(), [Some("Bearer stale-env".to_string())]);
+    }
+
+    // A private repository with a refused netrc entry: the anonymous retry
+    // gets 404, so the error is the 401, and it names the entry.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refused_netrc_token_on_a_private_repository_names_the_entry() {
+        use crate::auth::{test_authorization, test_path, test_response, GitEnv};
+
+        let _env = GitEnv::new(&[]);
+        let rt = current_thread();
+        let (_, api_seen, _) = fake_github(|head, _| match test_authorization(head) {
+            Some(_) => refused(test_path(head)),
+            None => test_response("404 Not Found", "", b""),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = stale_netrc(dir.path(), "netrc");
+
+        let client = reqwest::Client::new();
+        let err = rt
+            .block_on(resolve_github_package(&client, "owner", "privpkg", "main"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("401 Unauthorized"), "{err}");
+        assert!(
+            err.contains("refused the password of the `machine github.com` entry in")
+                && err.contains(&path.display().to_string()),
+            "{err}"
+        );
+        assert!(!err.contains("stale-tok"), "{err}");
+        assert_eq!(api_seen.lock().unwrap().len(), 2, "one retry");
     }
 }

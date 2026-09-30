@@ -536,7 +536,7 @@
       "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Passed as of #208 — before it, libxml2-dev was never installed and no warning was printed (#207).",
       "os_release": {
         "id": "alpine",
-        "version_id": "3.21.7"
+        "version_id": "3.21.8"
       },
       "p3m": {
         "slug": "alpine-3.21",
@@ -544,7 +544,7 @@
       },
       "sysreqs": {
         "distribution": "alpine",
-        "release": "3.21.7",
+        "release": "3.21.8",
         "api": false,
         "local": true
       }
@@ -555,7 +555,7 @@
       "lane": "nightly",
       "os_release": {
         "id": "alpine",
-        "version_id": "3.22.5"
+        "version_id": "3.22.6"
       },
       "p3m": {
         "slug": "alpine-3.22",
@@ -563,7 +563,7 @@
       },
       "sysreqs": {
         "distribution": "alpine",
-        "release": "3.22.5",
+        "release": "3.22.6",
         "api": false,
         "local": true
       },

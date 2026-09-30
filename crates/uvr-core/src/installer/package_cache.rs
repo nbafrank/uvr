@@ -649,6 +649,15 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_differs_by_checksum() {
+        // #189: two URL tarballs with the same name and version but different
+        // bytes must not share a built package.
+        let k1 = cache_key("pkg", "1.0", Some("sha256:aa"), "4.4", false, None, None);
+        let k2 = cache_key("pkg", "1.0", Some("sha256:bb"), "4.4", false, None, None);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
     fn cache_key_differs_by_method() {
         let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, None);
         let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", false, None, None);
@@ -988,6 +997,7 @@ mod tests {
         )
         .unwrap();
         let expected = NestedProvenance {
+            source: "github".into(),
             url:
                 "https://api.github.com/repos/o/r/tarball/0123456789abcdef0123456789abcdef01234567"
                     .into(),

@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod checksum;
 pub mod dcf;
 pub mod env_vars;

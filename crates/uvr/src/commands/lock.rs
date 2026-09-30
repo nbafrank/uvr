@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use anyhow::{Context, Result};
 
-use uvr_core::lockfile::Lockfile;
+use uvr_core::lockfile::{Lockfile, PackageSource};
 use uvr_core::manifest::DependencySpec;
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
@@ -12,6 +12,7 @@ use uvr_core::registry::forgejo::{
     fetch_commit_sha as fetch_forgejo_commit_sha, parse_forgejo_spec,
     resolve_forgejo_package_with_remote_entries_and_install_dependencies_at_commit_bound,
 };
+use uvr_core::registry::git_generic;
 use uvr_core::registry::github::{
     fetch_commit_sha, parse_github_spec, resolve_github_package_with_remote_entries_at_commit_bound,
 };
@@ -19,6 +20,7 @@ use uvr_core::registry::gitlab::{
     fetch_commit_sha as fetch_gitlab_commit_sha, parse_gitlab_spec,
     resolve_gitlab_package_with_remote_entries_and_install_dependencies_at_commit_bound,
 };
+use uvr_core::registry::url::resolve_url_package;
 use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
 
@@ -43,22 +45,29 @@ pub async fn run(upgrade: bool) -> Result<()> {
 /// Re-resolve all dependencies and write `uvr.lock`.
 /// Called by `uvr lock`, `uvr add`, and `uvr remove`.
 pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfile> {
-    let client = build_client()?;
     let existing = load_existing_lockfile(project);
+    if !upgrade {
+        if let Some(mut locked) = existing.clone() {
+            // Reuse the whole resolution only when its inputs still match.
+            // Individual pins lose dependency constraints in legacy locks and
+            // can belong to a different R/Bioconductor release.
+            if super::sync::validate_frozen_lock(project, &locked).is_ok() {
+                locked.manifest_fingerprint = Some(project.manifest.lock_fingerprint()?);
+                project
+                    .save_lockfile(&locked)
+                    .context("Failed to write uvr.lock")?;
+                return Ok(locked);
+            }
+        }
+    }
+    let client = build_client()?;
     let lockfile =
         resolve_lockfile(project, &client, upgrade, existing.as_ref(), HashMap::new()).await?;
+    warn_changed_url_tarballs(existing.as_ref(), &lockfile);
     project
         .save_lockfile(&lockfile)
         .context("Failed to write uvr.lock")?;
     Ok(lockfile)
-}
-
-/// Resolve dependencies and return the lockfile WITHOUT writing it to disk.
-/// Used by `uvr sync --frozen` to verify the existing lockfile is current.
-pub async fn resolve_only(project: &Project) -> Result<Lockfile> {
-    let client = build_client()?;
-    let existing = load_existing_lockfile(project);
-    resolve_lockfile(project, &client, false, existing.as_ref(), HashMap::new()).await
 }
 
 /// Resolve with upgrade=true WITHOUT writing the lockfile.
@@ -183,6 +192,15 @@ async fn resolve_lockfile(
         // reasoning).
         let mut regs = Vec::new();
         for source in &project.manifest.sources {
+            if uvr_core::auth::has_userinfo(&source.url) {
+                let key = uvr_core::auth::env_key(&source.name);
+                tracing::warn!(
+                    "Repository '{}' has credentials in its uvr.toml URL, so they are also \
+                     written into uvr.lock. Set UVR_REPO_TOKEN_{key}, or UVR_REPO_USER_{key} \
+                     and UVR_REPO_PASSWORD_{key}, instead.",
+                    source.name
+                );
+            }
             let reg = CranRegistry::fetch_custom(client, &source.name, &source.url, upgrade, None)
                 .await
                 .with_context(|| {
@@ -192,7 +210,10 @@ async fn resolve_lockfile(
         }
         Ok::<_, anyhow::Error>(regs)
     };
-    let git_fut = resolve_git_deps(client, &project.manifest);
+    let git_fut = async {
+        let url_seeds = resolve_url_deps(client, &project.manifest).await?;
+        resolve_git_deps(client, &project.manifest, url_seeds).await
+    };
 
     let (cran_result, bioc_result, git_result, custom_result) =
         tokio::join!(cran_fut, bioc_fut, git_fut, custom_fut,);
@@ -215,7 +236,7 @@ async fn resolve_lockfile(
     // The resolver records the Bioconductor release in the lockfile so it's
     // fully self-describing (#153).
     let resolved_bioc = bioc_opt.as_ref().map(|b| b.release());
-    let lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
+    let chain = if !custom_registries.is_empty() || bioc_opt.is_some() {
         let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
         for reg in &custom_registries {
             chain.push(reg);
@@ -224,25 +245,22 @@ async fn resolve_lockfile(
             chain.push(bioc);
         }
         chain.push(&cran);
-        let registry = RegistryChain::new(chain);
-        Resolver::new(&registry)
-            .resolve(
-                &project.manifest,
-                actual_r_version.as_deref(),
-                resolved_bioc,
-                pre_resolved,
-            )
-            .context("Dependency resolution failed")?
+        Some(RegistryChain::new(chain))
     } else {
-        Resolver::new(&cran)
-            .resolve(
-                &project.manifest,
-                actual_r_version.as_deref(),
-                resolved_bioc,
-                pre_resolved,
-            )
-            .context("Dependency resolution failed")?
+        None
     };
+    let registry: &dyn PackageRegistry = chain
+        .as_ref()
+        .map(|chain| chain as &dyn PackageRegistry)
+        .unwrap_or(&cran);
+    let lockfile = Resolver::new(registry)
+        .resolve(
+            &project.manifest,
+            actual_r_version.as_deref(),
+            resolved_bioc,
+            pre_resolved,
+        )
+        .context("Dependency resolution failed")?;
 
     spinner.finish_and_clear();
     Ok(lockfile)
@@ -267,10 +285,14 @@ enum GitKind {
     GitHub,
     Forgejo,
     Gitlab,
+    /// `git::<clone URL>`, any host (#190). `repository` is the URL.
+    Git,
 }
 
 fn classify_git(git: &str) -> GitKind {
-    if git.starts_with("forgejo::") {
+    if git.starts_with("git::") {
+        GitKind::Git
+    } else if git.starts_with("forgejo::") {
         GitKind::Forgejo
     } else if git.starts_with("gitlab::") {
         GitKind::Gitlab
@@ -341,7 +363,7 @@ impl GitRequest {
             provider: self.provider,
             repository: match self.provider {
                 GitKind::GitHub => self.repository.to_ascii_lowercase(),
-                GitKind::Forgejo | GitKind::Gitlab => self.repository.clone(),
+                GitKind::Forgejo | GitKind::Gitlab | GitKind::Git => self.repository.clone(),
             },
             requested_ref: self.requested_ref.clone(),
             subdirectory: self.subdirectory.clone(),
@@ -361,24 +383,30 @@ impl GitRequest {
         rev: Option<&str>,
         subdirectory: Option<&str>,
     ) -> Result<Self> {
-        let spec = match rev {
-            Some(rev) => format!("{git}@{rev}"),
-            None => git.to_string(),
-        };
-        let provider = classify_git(&spec);
-        let Some((repository, requested_ref)) = parse_request_spec(provider, &spec) else {
-            anyhow::bail!(
-                "manifest git dependency '{name}' declares an unparseable git source '{git}'{rev}; \
-                 refusing registry fallback",
-                rev = match rev {
-                    Some(rev) => format!(" with rev '{rev}'"),
-                    None => String::new(),
-                }
-            );
-        };
+        let provider = classify_git(git);
+        let (repository, requested_ref) =
+            parse_request_spec(provider, git, rev).map_err(|reason| {
+                anyhow::anyhow!(
+                    "manifest git dependency '{name}' declares an unparseable git source \
+                     '{git}'{rev}{reason}; refusing registry fallback",
+                    git = uvr_core::auth::redact_url(git),
+                    rev = match rev {
+                        Some(rev) => format!(" with rev '{rev}'"),
+                        None => String::new(),
+                    },
+                    reason = if reason.is_empty() {
+                        reason
+                    } else {
+                        format!(": {reason}")
+                    },
+                )
+            })?;
         // `rsplit` always yields at least one segment; the whole repository
         // string is the right fallback for a source without a `/`.
-        let canonical_name = repository.rsplit('/').next().unwrap_or(repository.as_str());
+        let canonical_name = match provider {
+            GitKind::Git => git_generic::repo_name(&repository),
+            _ => repository.rsplit('/').next().unwrap_or(repository.as_str()),
+        };
         let binding = if exact || subdirectory.is_some() || name != canonical_name {
             NameBinding::Exact(name.to_string())
         } else {
@@ -432,6 +460,7 @@ impl std::fmt::Display for GitRequest {
             GitKind::GitHub => write!(f, "{}@{}", self.repository, self.requested_ref)?,
             GitKind::Forgejo => write!(f, "forgejo::{}@{}", self.repository, self.requested_ref)?,
             GitKind::Gitlab => write!(f, "gitlab::{}@{}", self.repository, self.requested_ref)?,
+            GitKind::Git => write!(f, "git::{}@{}", self.repository, self.requested_ref)?,
         }
         if let Some(subdirectory) = &self.subdirectory {
             write!(f, "#subdirectory={subdirectory}")?;
@@ -440,8 +469,19 @@ impl std::fmt::Display for GitRequest {
     }
 }
 
-fn parse_request_spec(provider: GitKind, spec: &str) -> Option<(String, String)> {
-    match provider {
+/// `(repository, ref)` of a manifest `git` value and its `rev`, or why it
+/// does not parse (an empty reason if the parser gives none).
+fn parse_request_spec(
+    provider: GitKind,
+    git: &str,
+    rev: Option<&str>,
+) -> std::result::Result<(String, String), String> {
+    let spec = match rev {
+        Some(rev) => format!("{git}@{rev}"),
+        None => git.to_string(),
+    };
+    let spec = spec.as_str();
+    let parsed = match provider {
         GitKind::GitHub => parse_github_spec(spec)
             .map(|(owner, repo, git_ref)| (format!("{owner}/{repo}"), git_ref)),
         GitKind::Forgejo => {
@@ -454,7 +494,15 @@ fn parse_request_spec(provider: GitKind, spec: &str) -> Option<(String, String)>
             parse_gitlab_spec(body)
                 .map(|(host, project, git_ref)| (format!("{host}/{project}"), git_ref))
         }
-    }
+        // The URL can hold `@` and `:`, so `rev` is not joined to it.
+        GitKind::Git => {
+            return git_generic::manifest_spec(git, rev).map(|spec| {
+                let git_ref = spec.git_ref.unwrap_or_else(|| "HEAD".to_string());
+                (spec.url, git_ref)
+            })
+        }
+    };
+    parsed.ok_or_else(String::new)
 }
 
 /// Seed the remote walk from manifest `git = "..."` dependencies. Propagates
@@ -547,7 +595,7 @@ fn commit_identity(request: &GitRequest) -> CommitIdentity {
         provider: request.provider,
         repository: match request.provider {
             GitKind::GitHub => request.repository.to_ascii_lowercase(),
-            GitKind::Forgejo | GitKind::Gitlab => request.repository.clone(),
+            GitKind::Forgejo | GitKind::Gitlab | GitKind::Git => request.repository.clone(),
         },
         requested_ref: request.requested_ref.clone(),
     }
@@ -570,16 +618,92 @@ where
     fetched.map_err(anyhow::Error::msg)
 }
 
+/// A manifest `url` dependency, downloaded: the package, its `Remotes:`, and
+/// its install-time dependency names.
+type UrlSeed = (
+    PackageInfo,
+    Vec<uvr_core::manifest::RemoteEntry>,
+    std::collections::BTreeSet<String>,
+);
+
+/// Download and check each manifest `url` dependency (#189). The tarball's
+/// DESCRIPTION must name the manifest key; otherwise the key would quietly
+/// resolve from a registry instead.
+async fn resolve_url_deps(
+    client: &reqwest::Client,
+    manifest: &uvr_core::manifest::Manifest,
+) -> Result<Vec<UrlSeed>> {
+    let mut seeds = Vec::new();
+    for (name, spec) in manifest
+        .dependencies
+        .iter()
+        .chain(manifest.dev_dependencies.iter())
+    {
+        let Some(url) = spec.url() else {
+            continue;
+        };
+        let seed = resolve_url_package(client, url).await?;
+        check_url_package_name(name, url, &seed.0.name)?;
+        seeds.push(seed);
+    }
+    Ok(seeds)
+}
+
+fn check_url_package_name(key: &str, url: &str, actual: &str) -> Result<()> {
+    if key != actual {
+        anyhow::bail!(
+            "manifest url dependency '{key}' is package '{actual}' ({url}); rename the \
+             uvr.toml entry to '{actual}'; refusing registry fallback"
+        );
+    }
+    Ok(())
+}
+
+/// Re-locking accepts a URL tarball whose bytes changed, which `uvr sync`
+/// refuses as a checksum mismatch. Say so, so the change is never silent.
+/// Only for resolutions that are written to disk.
+fn warn_changed_url_tarballs(existing: Option<&Lockfile>, fresh: &Lockfile) {
+    let Some(existing) = existing else {
+        return;
+    };
+    for pkg in fresh
+        .packages
+        .iter()
+        .filter(|p| p.source == PackageSource::Url)
+    {
+        let Some(old) = existing.get_package(&pkg.name) else {
+            continue;
+        };
+        if old.url == pkg.url && old.checksum != pkg.checksum {
+            tracing::warn!(
+                "The file at {} changed since uvr.lock was written ({} -> {}); uvr.lock now \
+                 records the new checksum.",
+                pkg.url.as_deref().unwrap_or_default(),
+                old.checksum.as_deref().unwrap_or("no checksum"),
+                pkg.checksum.as_deref().unwrap_or("no checksum"),
+            );
+        }
+    }
+}
+
 /// Resolve source-chained git dependencies. Bound requests are required and
 /// enforce DESCRIPTION identity; unbound root hints may fall back to registries.
 /// Commit identity is memoized separately from bound resolution identity.
 async fn resolve_git_deps(
     client: &reqwest::Client,
     manifest: &uvr_core::manifest::Manifest,
+    url_seeds: Vec<UrlSeed>,
 ) -> Result<HashMap<String, PackageInfo>> {
     let mut queue = collect_git_requests(manifest)?;
     let mut pre_resolved: HashMap<String, PackageInfo> = HashMap::new();
     let mut resolved_from: HashMap<String, String> = HashMap::new();
+    // A manifest URL tarball is a manifest source like a git one, so its
+    // `Remotes:` join the walk (#244 source-chain rule).
+    for (info, remotes, parent_dependencies) in url_seeds {
+        enqueue_remote_entries(&mut queue, remotes, &parent_dependencies)?;
+        resolved_from.insert(info.name.clone(), info.url.clone());
+        pre_resolved.insert(info.name.clone(), info);
+    }
     let mut outcomes: HashMap<RequestIdentity, std::result::Result<String, String>> =
         HashMap::new();
     let mut commit_memo: HashMap<CommitIdentity, std::result::Result<String, String>> =
@@ -680,6 +804,25 @@ async fn resolve_git_deps(
                     Err(error) => Err(error),
                 }
             }
+            GitKind::Git => {
+                let url = request.repository.as_str();
+                let commit_key = commit_identity(&request);
+                match memoized_commit(&mut commit_memo, commit_key, || {
+                    git_generic::fetch_commit_sha(url, &request.requested_ref)
+                })
+                .await
+                {
+                    Ok(commit) => git_generic::resolve_git_package_at_commit_bound(
+                        &uvr_core::env_vars::cache_dir_or_temp(),
+                        url,
+                        &commit,
+                        request.binding.is_bound(),
+                    )
+                    .await
+                    .map_err(Into::into),
+                    Err(error) => Err(error),
+                }
+            }
         };
 
         let (info, remotes, parent_dependencies) = match resolved {
@@ -745,6 +888,25 @@ fn is_same_resolution(a: &PackageInfo, b: &PackageInfo) -> bool {
 mod tests {
     use super::*;
     use uvr_core::manifest::{RemoteEntry, RemoteProvider, RemoteSource};
+
+    #[tokio::test]
+    async fn plain_lock_reuses_an_unchanged_resolution_without_network() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut manifest = uvr_core::manifest::Manifest::new("test", None);
+        manifest.add_dep(
+            "jsonlite".into(),
+            DependencySpec::Version("*".into()),
+            false,
+        );
+        manifest.write(&temp.path().join("uvr.toml")).unwrap();
+        let project = Project::find(temp.path()).unwrap();
+        let mut locked: Lockfile = "[r]\nversion = \"*\"\n\n[[package]]\nname = \"jsonlite\"\nversion = \"1.8.8\"\nsource = \"cran\"\nurl = \"https://cran.example/jsonlite_1.8.8.tar.gz\"\n".parse().unwrap();
+        locked.manifest_fingerprint = Some(manifest.lock_fingerprint().unwrap());
+        project.save_lockfile(&locked).unwrap();
+        let result = resolve_and_lock(&project, false).await.unwrap();
+        assert_eq!(result, locked);
+        assert_eq!(project.load_lockfile().unwrap().unwrap(), locked);
+    }
 
     fn git_dep(git: &str, rev: Option<&str>, subdirectory: Option<&str>) -> DependencySpec {
         DependencySpec::Detailed(uvr_core::manifest::DetailedDep {
@@ -1134,9 +1296,60 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    // #190: a `git::` dependency keeps its URL as the repository, its `rev`
+    // apart from the URL, and binds its name only when the manifest key is
+    // not the repository name.
+    #[test]
+    fn generic_git_manifest_requests_parse_without_joining_rev() {
+        let request = |name: &str, git: &str, rev: Option<&str>| {
+            let mut manifest = uvr_core::manifest::Manifest::new("t", None);
+            manifest.add_dep(name.into(), git_dep(git, rev, None), false);
+            collect_git_requests(&manifest).map(|mut queue| queue.pop_front().unwrap())
+        };
+
+        let plain = request("repo", "git::git@host:team/repo.git", Some("v1")).unwrap();
+        assert_eq!(plain.provider, GitKind::Git);
+        assert_eq!(plain.repository, "git@host:team/repo.git");
+        assert_eq!(plain.requested_ref, "v1");
+        assert_eq!(plain.binding, NameBinding::None);
+        assert_eq!(plain.to_string(), "git::git@host:team/repo.git@v1");
+
+        let head = request("repo", "git::https://Host.example/Team/repo.git", None).unwrap();
+        assert_eq!(head.requested_ref, "HEAD");
+        // A URL is not case-folded like a GitHub owner/repo.
+        assert_eq!(
+            head.identity().repository,
+            "https://Host.example/Team/repo.git"
+        );
+
+        let aliased = request("anypkg", "git::git@host:repo.git", Some("main")).unwrap();
+        assert_eq!(aliased.repository, "git@host:repo.git");
+        assert_eq!(aliased.binding, NameBinding::Exact("anypkg".into()));
+
+        let error = request("repo", "git::https://tok@host/repo.git", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("refusing registry fallback")
+                && error.contains("credentials")
+                && error.contains("https://***@host/repo.git"),
+            "{error}"
+        );
+        assert!(!error.contains("tok@"), "{error}");
+        let error = request("repo", "git::https://host/repo.git@v1", Some("v2"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("given twice"), "{error}");
+    }
+
     #[test]
     fn commit_identity_is_shared_by_bound_and_unbound_requests_for_every_provider() {
-        for provider in [GitKind::GitHub, GitKind::Forgejo, GitKind::Gitlab] {
+        for provider in [
+            GitKind::GitHub,
+            GitKind::Forgejo,
+            GitKind::Gitlab,
+            GitKind::Git,
+        ] {
             let unbound = GitRequest {
                 provider,
                 repository: "host/owner/repo".into(),
@@ -1175,6 +1388,103 @@ mod tests {
         ));
     }
 
+    fn url_seed(remotes: Vec<RemoteEntry>) -> UrlSeed {
+        let info = PackageInfo {
+            name: "tpkg".to_string(),
+            version: semver::Version::new(1, 2, 0),
+            source: PackageSource::Url,
+            checksum: Some(format!("sha256:{}", "ab".repeat(32))),
+            requires: Vec::new(),
+            url: "https://example.org/tpkg_1.2.0.tar.gz".to_string(),
+            raw_version: Some("1.2.0".to_string()),
+            system_requirements: None,
+            subdirectory: None,
+        };
+        (info, remotes, Default::default())
+    }
+
+    fn url_manifest() -> uvr_core::manifest::Manifest {
+        let mut manifest = uvr_core::manifest::Manifest::new("t", None);
+        manifest.add_dep(
+            "tpkg".into(),
+            DependencySpec::Detailed(uvr_core::manifest::DetailedDep {
+                url: Some("https://example.org/tpkg_1.2.0.tar.gz".into()),
+                ..Default::default()
+            }),
+            false,
+        );
+        manifest
+    }
+
+    struct NoRegistry;
+
+    impl uvr_core::resolver::PackageRegistry for NoRegistry {
+        fn resolve_package(
+            &self,
+            name: &str,
+            _constraint: Option<&str>,
+        ) -> uvr_core::error::Result<PackageInfo> {
+            Err(uvr_core::error::UvrError::PackageNotFound(name.to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn url_dependency_is_locked_with_its_url_and_checksum() {
+        let manifest = url_manifest();
+        let pre_resolved = resolve_git_deps(
+            &reqwest::Client::new(),
+            &manifest,
+            vec![url_seed(Vec::new())],
+        )
+        .await
+        .unwrap();
+        let lockfile = Resolver::new(&NoRegistry)
+            .resolve(&manifest, Some("4.4.2"), None, pre_resolved)
+            .unwrap();
+
+        let text = lockfile.to_toml_string().unwrap();
+        assert!(text.contains(r#"source = "url""#), "{text}");
+        assert!(
+            text.contains(r#"url = "https://example.org/tpkg_1.2.0.tar.gz""#),
+            "{text}"
+        );
+        assert!(text.contains(r#"checksum = "sha256:abab"#), "{text}");
+        let reparsed: Lockfile = text.parse().unwrap();
+        assert_eq!(reparsed, lockfile);
+    }
+
+    #[tokio::test]
+    async fn url_dependency_remotes_join_the_walk() {
+        // A bound Remotes entry the walk cannot follow fails closed, which
+        // proves the URL package's DESCRIPTION reached the walk at all.
+        let error = resolve_git_deps(
+            &reqwest::Client::new(),
+            &url_manifest(),
+            vec![url_seed(vec![RemoteEntry::Unsupported {
+                entry: "Alias=url::https://example.org/other.tar.gz".into(),
+                reason: "unsupported provider".into(),
+                bound: true,
+            }])],
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("refusing registry fallback"), "{error}");
+    }
+
+    #[test]
+    fn url_package_must_match_its_manifest_key() {
+        check_url_package_name("tpkg", "https://example.org/t.tar.gz", "tpkg").unwrap();
+        let error = check_url_package_name("tpkg", "https://example.org/t.tar.gz", "other")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("'tpkg'") && error.contains("'other'"),
+            "{error}"
+        );
+        assert!(error.contains("refusing registry fallback"), "{error}");
+    }
+
     #[test]
     fn existing_provider_classification_is_unchanged() {
         assert_eq!(classify_git("tidyverse/ggplot2"), GitKind::GitHub);
@@ -1186,5 +1496,11 @@ mod tests {
             classify_git("gitlab::gitlab.com/my-group/mypkg"),
             GitKind::Gitlab
         );
+        assert_eq!(
+            classify_git("git::https://git.corp.example/team/repo.git"),
+            GitKind::Git
+        );
+        // A GitHub repository named like a prefix is still GitHub.
+        assert_eq!(classify_git("git/git"), GitKind::GitHub);
     }
 }
