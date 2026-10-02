@@ -97,6 +97,19 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **A source tarball served from a binary URL is now built from source
+  instead of failing the install** (#225). P3M's Linux repos serve source
+  and binary from the same URL, and fall back to source for any package
+  version not yet built for that repo, even though the index lists it. uvr
+  trusted the index and sent the source tarball down the binary path, so
+  `uvr add xml2` failed with "not a built binary package" on repos that had
+  not built xml2 1.6.0 yet (openSUSE 15.6 and Debian 12 when reported)
+  until a manual `uvr sync --no-binary`. uvr now reads the tarball's
+  `DESCRIPTION` first: no `Built:` field means source, so the package goes
+  through `R CMD INSTALL`, with the usual system-dependency check.
+  Binary-URL archives that do carry a `Built:` field still take the binary
+  path.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

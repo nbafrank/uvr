@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use uvr_core::installer::binary_install::{
-    inspect_tarball, install_binary_package, patch_installed_so_files,
+    inspect_tarball, install_binary_package, patch_installed_so_files, TarballMeta,
 };
 use uvr_core::installer::download::{DownloadSpec, Downloader};
 use uvr_core::installer::nested_source::{self, NestedProvenance};
@@ -23,10 +23,11 @@ use crate::ui::palette;
 
 /// Per-package install plan resolved at sync time.
 ///
-/// `is_binary` determines whether `install_binary_package` is used (vs.
-/// `R CMD INSTALL`). `fallback_url` is consulted by the downloader when
-/// the primary URL fails — typically the binary URL falls back to the
-/// source URL recorded in the lockfile.
+/// `is_binary` marks a binary URL; `classify_download` makes the final
+/// `install_binary_package` vs. `R CMD INSTALL` call once the bytes are on
+/// disk, since a binary URL can serve source (#225). `fallback_url` is
+/// consulted by the downloader when the primary URL fails — typically the
+/// binary URL falls back to the source URL recorded in the lockfile.
 struct PkgPlan<'a> {
     pkg: &'a LockedPackage,
     url: String,
@@ -85,20 +86,43 @@ fn install_kind_from_metadata(
     if is_repository_archive(pkg) {
         return InstallKind::Source;
     }
-    if used_binary {
-        return InstallKind::Binary;
-    }
+    classify_download(used_binary, meta.as_ref(), host, r_minor)
+}
+
+/// Pure function: decide how to install one downloaded archive from its
+/// inspected DESCRIPTION (`None` when none could be read) and whether it came
+/// from a binary URL.
+///
+/// A binary URL is trusted unless DESCRIPTION has no `Built:` field at all.
+/// That is proof of a source tarball: P3M's Linux repos serve source at the
+/// binary URL for any package version not built for that repo yet (#225).
+/// Every other binary-URL case stays `Binary` on purpose — Windows zips
+/// (`None`), a `Built:` for another host, an unreadable DESCRIPTION — and
+/// `verify_built_package` still guards a truncated archive.
+fn classify_download(
+    used_binary: bool,
+    meta: Option<&TarballMeta>,
+    host: &uvr_core::r_version::downloader::HostTriple,
+    r_minor: &str,
+) -> InstallKind {
     match meta {
-        Some(meta)
-            if meta
+        Some(m) if m.has_built_field || m.built.is_some() => {
+            let host_matches = m
                 .built
                 .as_ref()
-                .is_some_and(|built| built.matches_host(host, r_minor)) =>
-        {
-            InstallKind::Binary
+                .is_some_and(|b| b.matches_host(host, r_minor));
+            if used_binary || host_matches {
+                InstallKind::Binary
+            } else if m.pure_r {
+                InstallKind::PureR
+            } else {
+                InstallKind::Source
+            }
         }
-        Some(meta) if meta.pure_r => InstallKind::PureR,
-        _ => InstallKind::Source,
+        Some(m) if m.pure_r => InstallKind::PureR,
+        Some(_) => InstallKind::Source,
+        None if used_binary => InstallKind::Binary,
+        None => InstallKind::Source,
     }
 }
 
@@ -919,18 +943,29 @@ async fn install_from_lockfile_with_r(
             .iter()
             .zip(results.iter())
             .map(|(plan, result)| {
-                let meta = if !is_repository_archive(plan.pkg) && !result.used_binary {
-                    inspect_tarball(&result.path, &plan.pkg.name)
-                } else {
+                // Inspect a binary-URL download too: P3M can serve a source
+                // tarball there (#225).
+                let meta = if is_repository_archive(plan.pkg) {
                     None
+                } else {
+                    inspect_tarball(&result.path, &plan.pkg.name)
                 };
-                install_kind_from_metadata(
+                let kind = install_kind_from_metadata(
                     plan.pkg,
                     result.used_binary,
                     meta,
                     &host_info.triple,
                     &r_minor_str,
-                )
+                );
+                if result.used_binary && kind != InstallKind::Binary {
+                    // Same shape as the downloader's 404-fallback line.
+                    tracing::info!(
+                        "{} {}: binary URL served a source tarball, installing from source",
+                        plan.pkg.name,
+                        plan.pkg.version
+                    );
+                }
+                kind
             })
             .collect();
 
@@ -1004,7 +1039,8 @@ async fn install_from_lockfile_with_r(
         // "No binary repo" hint — only fires when no packages were binary and at
         // least one real source build (compilation) is needed. Pure-R alone doesn't
         // indicate "no binaries available" — those packages simply have no binary form.
-        if runtime_binary == 0 && runtime_source > 0 && !plans.is_empty() {
+        // A binary plan means a repo exists; it just served source (#225).
+        if runtime_binary == 0 && runtime_source > 0 && !plans.iter().any(|p| p.is_binary) {
             println!(
                 "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
                 host_info.distro_label, r_minor_str, runtime_source
@@ -2956,7 +2992,153 @@ mod tests {
     }
 
     use uvr_core::r_version::downloader::HostTriple;
-    use uvr_core::registry::cran::{parse_packages_gz, CranRegistry};
+    use uvr_core::registry::cran::{parse_built, parse_packages_gz, CranRegistry};
+
+    /// DESCRIPTION metadata as `inspect_tarball` reports it; `built` is the
+    /// raw `Built:` value, `None` for a line that is absent.
+    fn meta(built: Option<&str>, pure_r: bool) -> TarballMeta {
+        TarballMeta {
+            built: built.and_then(parse_built),
+            has_built_field: built.is_some(),
+            pure_r,
+            ..Default::default()
+        }
+    }
+
+    const MUSL_BUILT: &str = "R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix";
+    const GNU_BUILT: &str = "R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix";
+
+    #[test]
+    fn classify_binary_url_source_tarball_builds_from_source() {
+        // #225: P3M served xml2's source tarball at the binary URL.
+        let host = musl_host();
+        let src = meta(None, false);
+        assert_eq!(
+            classify_download(true, Some(&src), &host, "4.5"),
+            InstallKind::Source
+        );
+        let pure = meta(None, true);
+        assert_eq!(
+            classify_download(true, Some(&pure), &host, "4.5"),
+            InstallKind::PureR
+        );
+    }
+
+    #[test]
+    fn classify_binary_url_keeps_binary_unless_built_is_absent() {
+        let host = musl_host();
+        // Built: for this host, for another host, and one uvr can't parse:
+        // none of them proves source, so a binary URL stays binary.
+        for built in [MUSL_BUILT, GNU_BUILT, "garbage"] {
+            let m = meta(Some(built), true);
+            assert_eq!(
+                classify_download(true, Some(&m), &host, "4.5"),
+                InstallKind::Binary,
+                "{built}"
+            );
+        }
+        // No DESCRIPTION found (a Windows zip, an odd layout).
+        assert_eq!(
+            classify_download(true, None, &host, "4.5"),
+            InstallKind::Binary
+        );
+    }
+
+    #[test]
+    fn classify_source_url_sniffs_for_a_host_binary() {
+        let host = musl_host();
+        let own = meta(Some(MUSL_BUILT), false);
+        assert_eq!(
+            classify_download(false, Some(&own), &host, "4.5"),
+            InstallKind::Binary
+        );
+        let other = meta(Some(GNU_BUILT), true);
+        assert_eq!(
+            classify_download(false, Some(&other), &host, "4.5"),
+            InstallKind::PureR
+        );
+        assert_eq!(
+            classify_download(false, None, &host, "4.5"),
+            InstallKind::Source
+        );
+    }
+
+    /// A real `<pkg>.tar.gz` laid out the way `R CMD build` does, with
+    /// DESCRIPTION not the first entry.
+    fn write_pkg_tarball(dir: &std::path::Path, pkg: &str, description: &[u8]) -> PathBuf {
+        let path = dir.join(format!("{pkg}.tar.gz"));
+        let mut enc = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::default(),
+        );
+        {
+            let mut builder = tar::Builder::new(&mut enc);
+            for (name, body) in [
+                (format!("{pkg}/src/init.c"), &b"int x;\n"[..]),
+                (format!("{pkg}/DESCRIPTION"), description),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_path(name).unwrap();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                builder.append(&h, body).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        enc.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn classify_real_source_tarball_from_binary_url() {
+        // End to end through `inspect_tarball`, no `Built:` line.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = write_pkg_tarball(
+            dir.path(),
+            "xml2",
+            b"Package: xml2\nVersion: 1.6.0\nNeedsCompilation: yes\n\
+              SystemRequirements: libxml2: libxml2-dev (deb)\n",
+        );
+        let m = inspect_tarball(&path, "xml2").unwrap();
+        assert_eq!(
+            classify_download(true, Some(&m), &musl_host(), "4.5"),
+            InstallKind::Source
+        );
+        // The sysreqs pre-check reads the same tarball, so the re-routed
+        // build is still checked for libxml2.
+        assert!(m.system_requirements.unwrap().contains("libxml2"));
+    }
+
+    #[test]
+    fn classify_real_latin1_tarballs() {
+        // A latin1 byte in DESCRIPTION must not hide `Built:` and send a
+        // real binary to a source build, nor turn source into binary.
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = musl_host();
+        let bin = write_pkg_tarball(
+            dir.path(),
+            "bin",
+            b"Package: bin\nAuthor: Fran\xe7ois\nNeedsCompilation: yes\n\
+              Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix\n",
+        );
+        let m = inspect_tarball(&bin, "bin").unwrap();
+        assert!(m.has_built_field);
+        assert_eq!(
+            classify_download(true, Some(&m), &host, "4.5"),
+            InstallKind::Binary
+        );
+        let src = write_pkg_tarball(
+            dir.path(),
+            "src",
+            b"Package: src\nAuthor: Fran\xe7ois\nNeedsCompilation: yes\n",
+        );
+        let m = inspect_tarball(&src, "src").unwrap();
+        assert_eq!(
+            classify_download(true, Some(&m), &host, "4.5"),
+            InstallKind::Source
+        );
+    }
 
     fn musl_host() -> HostTriple {
         HostTriple {

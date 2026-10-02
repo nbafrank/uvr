@@ -543,9 +543,9 @@ fn verify_built_package(staged_pkg: &Path, package_name: &str) -> Result<()> {
     }
     Err(UvrError::Other(format!(
         "Archive for '{package_name}' is not a built binary package (no \
-         Meta/package.rds — a source tarball served as binary, or a truncated \
-         download). Retry with `uvr sync --ignore-cache`, or force a source \
-         build with `uvr sync --no-binary`."
+         Meta/package.rds — likely a truncated or corrupt download). Retry \
+         with `uvr sync --ignore-cache`, or force a source build with \
+         `uvr sync --no-binary`."
     )))
 }
 
@@ -661,6 +661,9 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
 pub struct TarballMeta {
     /// Parsed `Built:` field. Present iff the tarball was pre-built for some platform.
     pub built: Option<crate::registry::cran::BuiltInfo>,
+    /// True iff DESCRIPTION has a `Built:` line at all, parseable or not.
+    /// A source tarball never has one, so `false` is proof of source (#225).
+    pub has_built_field: bool,
     /// True iff DESCRIPTION explicitly states `NeedsCompilation: no`.
     /// Absent means uvr can't prove the package is pure-R — treat conservatively as source.
     pub pure_r: bool,
@@ -676,9 +679,9 @@ pub struct TarballMeta {
 /// its DESCRIPTION. Used to classify each package as binary / pure-R / source
 /// for accurate install-time accounting.
 ///
-/// Returns `None` only if the tarball can't be opened or its DESCRIPTION can't
-/// be located (the latter is an unexpected case — a well-formed R package
-/// tarball always has `<pkg>/DESCRIPTION` early in the archive).
+/// Returns `None` only if the tarball can't be opened, or its DESCRIPTION
+/// can't be located or read (unexpected cases — a well-formed R
+/// package tarball always has `<pkg>/DESCRIPTION` early in the archive).
 pub fn inspect_tarball(tarball_path: &Path, package_name: &str) -> Option<TarballMeta> {
     use std::io::Read;
     let file = std::fs::File::open(tarball_path).ok()?;
@@ -701,13 +704,25 @@ pub fn inspect_tarball(tarball_path: &Path, package_name: &str) -> Option<Tarbal
         if path_owned.to_string_lossy() != want {
             continue;
         }
-        let mut buf = String::new();
-        let mut limited = entry.take(32 * 1024);
-        let _ = limited.read_to_string(&mut buf);
+        // Bytes, then lossy: `read_to_string` leaves the buffer empty on
+        // invalid UTF-8 (a latin1 DESCRIPTION, or a character split at the
+        // 32 KB cap), and an empty DESCRIPTION reads as "no `Built:`", which
+        // sync treats as proof of source (#225). The keys parsed below are
+        // ASCII, so replacement characters elsewhere are harmless.
+        let mut raw = Vec::new();
+        if let Err(e) = entry.take(32 * 1024).read_to_end(&mut raw) {
+            tracing::warn!(
+                "Could not read DESCRIPTION from {}: {e}",
+                tarball_path.display()
+            );
+            return None;
+        }
+        let buf = String::from_utf8_lossy(&raw);
 
         let mut meta = TarballMeta::default();
         for line in buf.lines() {
             if let Some(value) = line.strip_prefix("Built:") {
+                meta.has_built_field = true;
                 meta.built = crate::registry::cran::parse_built(value.trim());
             } else if let Some(value) = line.strip_prefix("NeedsCompilation:") {
                 let v = value.trim().to_lowercase();
@@ -995,6 +1010,10 @@ mod tests {
         pkg_name: &str,
         content: &str,
     ) -> tempfile::NamedTempFile {
+        write_tarball_bytes_for(pkg_name, content.as_bytes())
+    }
+
+    fn write_tarball_bytes_for(pkg_name: &str, bytes: &[u8]) -> tempfile::NamedTempFile {
         use flate2::write::GzEncoder;
         use flate2::Compression;
 
@@ -1005,7 +1024,6 @@ mod tests {
         );
         {
             let mut builder = tar::Builder::new(&mut enc);
-            let bytes = content.as_bytes();
             let mut header = tar::Header::new_gnu();
             header.set_path(format!("{pkg_name}/DESCRIPTION")).unwrap();
             header.set_size(bytes.len() as u64);
@@ -1051,6 +1069,60 @@ mod tests {
         let m = inspect_tarball(tarball.path(), "pureR").unwrap();
         assert!(m.pure_r);
         assert!(m.built.is_none());
+        assert!(!m.has_built_field);
+    }
+
+    #[test]
+    fn inspect_tarball_flags_an_unparseable_built_field() {
+        // #225: `built` alone can't tell "no Built: line" (a source tarball)
+        // from "a Built: line uvr can't parse" (still a binary).
+        let tarball = write_tarball_with_description_for(
+            "odd",
+            "Package: odd\nVersion: 1.0\nBuilt: R 4.5.0; x86_64-pc-linux-gnu\n",
+        );
+        let m = inspect_tarball(tarball.path(), "odd").unwrap();
+        assert!(m.built.is_none());
+        assert!(m.has_built_field);
+    }
+
+    #[test]
+    fn inspect_tarball_reads_a_latin1_description() {
+        // A byte that is not UTF-8 must not blank the whole DESCRIPTION:
+        // that would hide `Built:` and send a real binary to a source build.
+        let tarball = write_tarball_bytes_for(
+            "latin",
+            b"Package: latin\nAuthor: Fran\xe7ois\nNeedsCompilation: no\n\
+              Built: R 4.5.0; x86_64-pc-linux-gnu; 2025-01-15; unix\n",
+        );
+        let m = inspect_tarball(tarball.path(), "latin").unwrap();
+        assert!(m.has_built_field);
+        assert!(m.built.is_some());
+        assert!(m.pure_r);
+    }
+
+    #[test]
+    fn inspect_tarball_on_a_corrupt_gzip_is_none() {
+        // DESCRIPTION's header decodes, its body does not. Parsing the
+        // partial text would stop before `Built:` and report source.
+        let body: String = (0..4000)
+            .map(|i| format!("{:x}", i * 7919 % 65521))
+            .collect();
+        let tarball = write_tarball_with_description_for(
+            "cut",
+            &format!("Package: cut\nDescription: {body}\nBuilt: R 4.5.0; x; y; unix\n"),
+        );
+        let bytes = std::fs::read(tarball.path()).unwrap();
+        std::fs::write(tarball.path(), &bytes[..bytes.len() / 2]).unwrap();
+        assert!(inspect_tarball(tarball.path(), "cut").is_none());
+    }
+
+    #[test]
+    fn inspect_tarball_on_a_zip_is_none() {
+        // Windows binaries are zips; sync keeps them on the binary path
+        // only because this is `None`, not "a DESCRIPTION without Built:".
+        let dir = TempDir::new().unwrap();
+        let zip_path = create_test_zip(dir.path(), "winpkg");
+        assert!(inspect_tarball(&zip_path, "winpkg").is_none());
     }
 
     #[test]
