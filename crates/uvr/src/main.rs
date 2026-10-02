@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use cli::{CacheCommands, Cli, Commands, RCommands};
+use cli::{AddArgs, CacheCommands, Cli, Commands, RCommands, RemoveArgs};
 
 #[tokio::main]
 async fn main() {
@@ -74,11 +74,12 @@ async fn run() -> Result<()> {
 
     // #63/#64 phase 1: warn loudly if the project pin doesn't match the active R.
     // Only for library-affecting commands — `init`, `r ...`, `cache`, etc. don't
-    // touch the library and the warning would be noise there.
+    // touch the library and the warning would be noise there. Neither does
+    // editing a script's header.
     if matches!(
         command,
-        Commands::Add(_)
-            | Commands::Remove(_)
+        Commands::Add(AddArgs { script: None, .. })
+            | Commands::Remove(RemoveArgs { script: None, .. })
             | Commands::Sync(_)
             | Commands::Run(_)
             | Commands::Update(_)
@@ -95,6 +96,14 @@ async fn run() -> Result<()> {
         Commands::Init(args) => {
             let ide = ide::Ide::resolve(args.ide, args.no_ide);
             commands::init::run(args.name, args.here, args.r_version, ide, args.bare)?;
+        }
+        Commands::Add(AddArgs {
+            packages,
+            bioc,
+            script: Some(path),
+            ..
+        }) => {
+            commands::add::run_script(&path, &packages, bioc)?;
         }
         Commands::Add(args) => {
             let timeout = parse_cli_timeout(args.timeout.as_deref())?;
@@ -119,6 +128,13 @@ async fn run() -> Result<()> {
                 args.no_install,
             )
             .await?;
+        }
+        Commands::Remove(RemoveArgs {
+            packages,
+            script: Some(path),
+            ..
+        }) => {
+            commands::remove::run_script(&path, &packages)?;
         }
         Commands::Remove(args) => {
             commands::remove::run(args.packages).await?;

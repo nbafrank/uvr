@@ -269,6 +269,8 @@ or to the repository root.
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |
 | `uvr run --with pkg` | Run with extra packages available (not added to manifest) |
 | `uvr run script.R` | Run a standalone script from its inline `# /// script` dependency header — outside any project |
+| `uvr add <pkg...> --script script.R` | Add packages to a script's inline header, creating it if needed (installs nothing) |
+| `uvr remove <pkg...> --script script.R` | Remove packages from a script's inline header, dropping it once empty |
 | `uvr activate` | Print how to activate the project in your shell (`source .uvr/activate`) |
 | `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` (override the location with `--install-dir`) |
 | `uvr r install devel` | Install a rolling channel — `devel` or `next`, rebuilt continuously and marked `[unstable]` (not reproducible; don't pin one) |
@@ -332,16 +334,52 @@ v Installed 2 package(s) in 1.75s
 You are epic!
 ```
 
-The dependencies install into a cached environment keyed by the dependency
-set, so the second run of that script — or any other script wanting the same
-packages — starts immediately. Nothing is written next to the script.
+Each entry takes the same specs as `uvr add`, so a shared script can pin
+what it needs:
+
+```r
+# /// script
+# dependencies = [
+#   "ggplot2>=3.4",                        # version constraint (or ggplot2@>=3.4)
+#   "DESeq2 (bioc)",                       # Bioconductor — the header's --bioc
+#   "rladies/praise@v1.0.0",               # GitHub, optional @ref
+#   "forgejo::codeberg.org/owner/pkg",     # Forgejo
+#   "gitlab::gitlab.com/group/pkg@main",   # GitLab
+# ]
+# ///
+```
+
+You can keep the header up to date from the command line, as with
+`uv add --script`:
+
+```console
+$ uvr add jsonlite 'ggplot2>=3.4' --script analysis.R
+$ uvr add DESeq2 --bioc --script analysis.R
+$ uvr remove ggplot2 --script analysis.R
+```
+
+`uvr add --script` creates the header if the file has none (after the shebang
+line, if there is one). It replaces the spec of a package that is already
+listed, adds new entries in the spellings shown above, and keeps a sorted list
+sorted. Only the `dependencies` lines change: other keys, comments, line
+endings and the rest of the file stay as they are. `uvr remove --script`
+deletes the header when nothing is left in it. Neither command reads or writes
+`uvr.toml` or `uvr.lock`, and neither installs anything: the next `uvr run`
+builds the environment. `--bioc` applies as usual; the project-only flags
+(`--dev`, `--source`, `--no-lock`, `--no-install` and the install options)
+are refused.
+
+The dependencies install into a cached environment keyed by the R version
+and the full specs, so the second run of that script — or any other script
+wanting the same packages — starts immediately, while two headers that differ
+only by a version or ref get separate environments. Nothing is written next
+to the script.
 
 The header is the R analogue of Python's [PEP 723](https://peps.python.org/pep-0723/)
-inline script metadata, which `uv run` uses. It must start at column zero,
-may follow a shebang or banner comment, and takes plain package names today
-(version constraints, Bioconductor and git sources are planned). A malformed
-or duplicated header is an error naming the file and the problem, never
-silently ignored.
+inline script metadata, which `uv run` uses. It must start at column zero and
+may follow a shebang or banner comment. A malformed or duplicated header, or
+an entry `uvr add` would refuse, is an error naming the file and the problem,
+never silently ignored.
 
 Scripts run isolated from any project you happen to be standing in: the
 project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,

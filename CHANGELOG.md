@@ -97,6 +97,30 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **`uvr add --script` and `uvr remove --script` edit a script's inline
+  header** (#184), like `uv add --script`. `uvr add <pkg…> --script s.R`
+  creates the `# /// script` block when there is none (after a shebang line),
+  replaces the spec of a package already listed, and writes new entries in
+  the header's own spellings (`ggplot2>=3.4`, `DESeq2 (bioc)`,
+  `owner/repo@ref`), so `uvr run` reads back exactly what was added. A sorted
+  list stays sorted and a hand-ordered one is appended to, so each edit is a
+  one-line diff. `uvr remove <pkg…> --script s.R` drops entries and deletes
+  the block once nothing is left in it. Only the `dependencies` lines change:
+  other keys, comments, CRLF line endings, the file's mode and the rest of the
+  script stay as they were. Neither command touches `uvr.toml` or `uvr.lock`
+  or installs anything; the next `uvr run` builds the environment.
+
+- **Script headers take the full `uvr add` spec vocabulary** (#182). A
+  `# /// script` entry can now carry a version constraint (`"ggplot2>=3.4"`
+  or `"ggplot2@>=3.4"`), a Bioconductor marker (`"DESeq2 (bioc)"`), or a git
+  source (`"user/repo@ref"`, `forgejo::…`, `gitlab::…`), so a shared script
+  pins what it needs. The ephemeral environment is keyed on the full specs,
+  so headers differing only by version get separate environments, while
+  plain names keep their existing cache keys and no environment is rebuilt.
+  One parser now serves both, so `uvr add` accepts the `pkg>=1.0` and
+  `pkg (bioc)` spellings too and rejects a malformed version constraint
+  before it touches `uvr.toml`.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

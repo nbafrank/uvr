@@ -153,6 +153,19 @@ pub struct AddArgs {
     #[arg(required = true, value_name = "PKG[@VERSION|user/repo@REF]")]
     pub packages: Vec<String>,
 
+    /// Add to this R script's inline `# /// script` header instead of the
+    /// project, creating the header if needed. Installs nothing: the next
+    /// `uvr run <FILE>` builds the environment (#184).
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = [
+            "dev", "source", "no_lock", "no_install", "jobs", "timeout",
+            "install_system_deps", "no_binary",
+        ],
+    )]
+    pub script: Option<PathBuf>,
+
     /// Add as dev dependency
     #[arg(long)]
     pub dev: bool,
@@ -210,6 +223,11 @@ pub struct RemoveArgs {
     /// Package names to remove
     #[arg(required = true)]
     pub packages: Vec<String>,
+
+    /// Remove from this R script's inline `# /// script` header instead of
+    /// the project; the header goes once it is empty (#184).
+    #[arg(long, value_name = "FILE")]
+    pub script: Option<PathBuf>,
 }
 
 // ────────────────────────────────────────────────────────────

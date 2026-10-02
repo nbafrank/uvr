@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use uvr_core::error::UvrError;
@@ -6,221 +8,15 @@ use uvr_core::package_name;
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::{default_release_for_r, BiocRegistry};
-use uvr_core::registry::forgejo::parse_forgejo_parts;
-use uvr_core::registry::git_generic::parse_git_parts;
-use uvr_core::registry::gitlab::parse_gitlab_parts;
 use uvr_core::resolver::is_base_package;
 
 use crate::ui;
 use crate::ui::palette;
 
-fn split_subdirectory_fragment(raw: &str) -> Result<(&str, Option<&str>)> {
-    let Some((base, fragment)) = raw.split_once('#') else {
-        return Ok((raw, None));
-    };
-    let Some(path) = fragment.strip_prefix("subdirectory=") else {
-        anyhow::bail!(
-            "Unsupported fragment '#{fragment}' in '{raw}'. Expected: \
-             owner/repo[@revision]#subdirectory=path"
-        );
-    };
-    if let Err(e) = uvr_core::subdirectory::validate(path) {
-        anyhow::bail!("{e} (in '{raw}')");
-    }
-    Ok((base, Some(path)))
-}
-
-/// Parse `"pkg@>=1.0.0"`, `"user/repo@ref"`, or `"user/repo@ref#subdirectory=path"` into (name, spec).
+/// Parse one `uvr add` argument — the grammar lives in
+/// [`uvr_core::dep_spec`], shared with script headers.
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
-    // Any git host: `git::<clone URL>[@ref]` (#190). The URL can contain `/`,
-    // so this comes before the GitHub heuristic too. The name is the
-    // repository name until the DESCRIPTION lookup replaces it.
-    if raw.starts_with("git::") {
-        if raw.contains("#subdirectory=") {
-            anyhow::bail!(
-                "`#subdirectory=` is not supported for git:: sources yet (in '{}').",
-                uvr_core::auth::redact_url(raw)
-            );
-        }
-        let parsed = parse_git_parts(raw).map_err(|reason| {
-            anyhow::anyhow!(
-                "Invalid git spec '{}': {reason}. Expected: git::<clone URL>[@ref], with an \
-                 https://, ssh:// or user@host:path URL",
-                uvr_core::auth::redact_url(raw)
-            )
-        })?;
-        let name = uvr_core::registry::git_generic::repo_name(&parsed.url).to_string();
-        if !package_name::is_valid(&name) {
-            anyhow::bail!("Invalid package name '{name}' extracted from git spec '{raw}'");
-        }
-        let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(format!("git::{}", parsed.url)),
-            rev: parsed.git_ref,
-            ..Default::default()
-        });
-        return Ok((name, spec));
-    }
-
-    // Direct source tarball (#189). Checked first: a URL contains '/' and
-    // would otherwise be reported as a malformed GitHub spec.
-    if raw.starts_with("https://") || raw.starts_with("http://") {
-        if !uvr_core::registry::url::is_source_tarball_url(raw) {
-            anyhow::bail!(
-                "Unsupported URL '{raw}'. Only direct source tarball URLs ending in .tar.gz or \
-                 .tgz are supported. For a git repository use user/repo[@ref], \
-                 forgejo::host/owner/repo[@ref], or gitlab::host/group/project[@ref]."
-            );
-        }
-        let spec = DependencySpec::Detailed(DetailedDep {
-            url: Some(raw.to_string()),
-            ..Default::default()
-        });
-        return Ok((url_name_hint(raw), spec));
-    }
-
-    // Forgejo: explicit `forgejo::host/owner/repo[@ref]` prefix. Checked
-    // before the bare `user/repo` heuristic below so a forgejo spec
-    // doesn't get misclassified as a malformed GitHub spec.
-    if raw.starts_with("forgejo::") {
-        let Some(parsed) = parse_forgejo_parts(raw) else {
-            anyhow::bail!(
-                "Invalid Forgejo spec '{raw}'. Expected: forgejo::host/owner/repo or forgejo::host/owner/repo@ref"
-            );
-        };
-        let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(format!(
-                "forgejo::{}/{}/{}",
-                parsed.host, parsed.owner, parsed.repo
-            )),
-            rev: parsed.git_ref,
-            ..Default::default()
-        });
-        return Ok((parsed.repo, spec));
-    }
-
-    // GitLab: explicit `gitlab::host/group[/subgroup...]/project[@ref]`
-    // prefix. Checked before the bare `user/repo` heuristic below for the
-    // same reason as Forgejo above. GitLab projects can live under nested
-    // groups, so the parsed spec carries a full namespace path rather than
-    // a single owner segment.
-    if raw.starts_with("gitlab::") {
-        let Some(parsed) = parse_gitlab_parts(raw) else {
-            anyhow::bail!(
-                "Invalid GitLab spec '{raw}'. Expected: gitlab::host/group/project or gitlab::host/group/subgroup/project[@ref]"
-            );
-        };
-        let name = parsed.project_name().to_string();
-        let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(format!("gitlab::{}/{}", parsed.host, parsed.project_path)),
-            rev: parsed.git_ref,
-            ..Default::default()
-        });
-        return Ok((name, spec));
-    }
-
-    // GitHub: contains '/'
-    if raw.contains('/') {
-        let (base, subdirectory) = split_subdirectory_fragment(raw)?;
-        let (repo, git_ref) = if let Some(at) = base.rfind('@') {
-            (base[..at].to_string(), Some(base[at + 1..].to_string()))
-        } else {
-            (base.to_string(), None)
-        };
-
-        // Validate user/repo format
-        let parts: Vec<&str> = repo.split('/').collect();
-        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-            // A first segment containing a dot looks like a hostname
-            // (e.g. `gitlab.com/user/repo`, `git.local:3000/u/r`): the real
-            // problem is a missing explicit prefix, not a malformed GitHub
-            // spec — say so instead of the misleading "Invalid GitHub spec"
-            // (#145). Forgejo and GitLab hosts can't be auto-detected from
-            // a bare `host/owner/repo` shape, so both require their `::`
-            // prefix.
-            if parts[0].contains('.') {
-                anyhow::bail!(
-                    "Unsupported git host '{host}' in '{raw}'. Supported specs: \
-                     GitHub via user/repo[@ref], Forgejo via forgejo::host/owner/repo[@ref], \
-                     GitLab via gitlab::host/group/project[@ref], any git host via \
-                     git::https://host/path/repo.git[@ref].",
-                    host = parts[0],
-                );
-            }
-            anyhow::bail!(
-                "Invalid GitHub spec '{raw}'. Expected format: user/repo or user/repo@ref"
-            );
-        }
-
-        let name = match subdirectory {
-            Some(sub) => sub.rsplit('/').next().unwrap_or(sub).to_string(),
-            None => parts[1].to_string(),
-        };
-
-        // Validate package name characters
-        if subdirectory.is_none() && !package_name::is_valid(&name) {
-            anyhow::bail!("Invalid package name '{name}' extracted from GitHub spec '{raw}'");
-        }
-
-        if subdirectory.is_some() {
-            let full = match &git_ref {
-                Some(r) => format!("{repo}@{r}"),
-                None => repo.clone(),
-            };
-            if !uvr_core::registry::github::is_valid_github_repo_spec(&full) {
-                anyhow::bail!(
-                    "Invalid GitHub spec '{raw}'. Expected format: \
-                     owner/repo[@revision]#subdirectory=path"
-                );
-            }
-        }
-
-        let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(repo),
-            rev: git_ref,
-            subdirectory: subdirectory.map(str::to_string),
-            ..Default::default()
-        });
-        return Ok((name, spec));
-    }
-
-    // CRAN/Bioc with optional version: "pkg@>=1.0.0"
-    let (name, version) = if let Some(at) = raw.find('@') {
-        (raw[..at].to_string(), Some(raw[at + 1..].to_string()))
-    } else {
-        (raw.to_string(), None)
-    };
-
-    // Validate CRAN/Bioc package name
-    if !package_name::is_valid(&name) {
-        anyhow::bail!("Invalid package name '{name}'");
-    }
-
-    let spec = if bioc {
-        DependencySpec::Detailed(DetailedDep {
-            bioc: Some(true),
-            version,
-            ..Default::default()
-        })
-    } else {
-        match version {
-            Some(v) => DependencySpec::Version(v),
-            None => DependencySpec::Version("*".to_string()),
-        }
-    };
-
-    Ok((name, spec))
-}
-
-/// `pkg` from `…/pkg_1.2.0.tar.gz`. A placeholder only: the tarball's
-/// DESCRIPTION names the package, unless `--no-lock` skips the download.
-fn url_name_hint(url: &str) -> String {
-    let path = url.split(['?', '#']).next().unwrap_or(url);
-    let file = path.rsplit('/').next().unwrap_or(path);
-    let stem = file
-        .strip_suffix(".tar.gz")
-        .or_else(|| file.strip_suffix(".tgz"))
-        .unwrap_or(file);
-    stem.split('_').next().unwrap_or(stem).to_string()
+    Ok(uvr_core::dep_spec::parse(raw, bioc)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -323,15 +119,7 @@ pub async fn run(
         );
     }
 
-    // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
-    for (name, _) in &parsed {
-        if is_base_package(name) {
-            anyhow::bail!(
-                "'{}' is a base R package (ships with R itself) and cannot be installed separately.",
-                name
-            );
-        }
-    }
+    reject_base_packages(&parsed)?;
 
     for (name, spec) in &parsed {
         let is_new = project.manifest.add_dep(name.clone(), spec.clone(), dev);
@@ -432,6 +220,68 @@ pub async fn run(
         .await
         .context("Failed to install packages after add")?;
 
+    Ok(())
+}
+
+/// `uvr add --script`: add `packages` to the script's inline header (#184).
+///
+/// Nothing is resolved or installed, as with `uv add --script`: the next
+/// `uvr run` builds the environment from the header. A git package keeps
+/// the name its URL gives, with no DESCRIPTION lookup, because the header
+/// stores only the spec and `uvr run` names it the same way.
+pub fn run_script(path: &Path, packages: &[String], bioc: bool) -> Result<()> {
+    let parsed: Vec<(String, DependencySpec)> = packages
+        .iter()
+        .map(|p| parse_add_spec(p, bioc))
+        .collect::<Result<Vec<_>>>()?;
+    reject_base_packages(&parsed)?;
+
+    let (before, changed) = crate::commands::util::edit_script_header(path, |source| {
+        uvr_core::script_header::upsert(source, &parsed)
+    })?;
+    for (name, spec) in &parsed {
+        if before.contains(name) {
+            println!(
+                "{} {} {} {}",
+                palette::upgraded(ui::glyph::change()),
+                palette::pkg(name),
+                palette::version(format_spec(spec)),
+                palette::dim("(updated)"),
+            );
+        } else {
+            println!(
+                "{} {} {}",
+                palette::added(ui::glyph::add()),
+                palette::pkg(name),
+                palette::version(format_spec(spec))
+            );
+        }
+    }
+    let verb = if changed.is_some() {
+        "Updated"
+    } else {
+        "No change to"
+    };
+    ui::summary(
+        format!("{verb} the script header in {}", path.display()),
+        format!(
+            "Nothing installed yet: `uvr run {}` builds its environment.",
+            path.display()
+        ),
+    );
+    Ok(())
+}
+
+/// Refuse packages that ship with R: no repository serves them.
+fn reject_base_packages(parsed: &[(String, DependencySpec)]) -> Result<()> {
+    for (name, _) in parsed {
+        if is_base_package(name) {
+            anyhow::bail!(
+                "'{}' is a base R package (ships with R itself) and cannot be installed separately.",
+                name
+            );
+        }
+    }
     Ok(())
 }
 
@@ -564,7 +414,7 @@ async fn probe_bioc(project: &Project, name: &str) -> Option<bool> {
 /// in the batch fails, surface a single user-facing warn so an offline
 /// user knows manifest names may need a manual touch-up. A `subdirectory`
 /// spec is the exception: a failed lookup errors instead.
-async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Result<()> {
+pub(crate) async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Result<()> {
     use uvr_core::auth::GitHost;
     use uvr_core::registry::github::parse_github_spec;
 
