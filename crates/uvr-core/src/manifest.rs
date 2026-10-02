@@ -27,6 +27,66 @@ pub struct Manifest {
     /// Optional `[activate]` block — shell-activation preferences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activate: Option<ActivateMeta>,
+
+    /// Optional `[resolution]` block — resolver knobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ResolutionConfig>,
+
+    /// `[override-dependencies]` — name → exact version. The version replaces
+    /// every requirement on that package, the manifest's own included (#195).
+    #[serde(
+        rename = "override-dependencies",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub override_dependencies: BTreeMap<String, String>,
+
+    /// `[constraint-dependencies]` — name → version range that the package
+    /// must also satisfy if something pulls it in. Adds no dependency (#195).
+    #[serde(
+        rename = "constraint-dependencies",
+        default,
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub constraint_dependencies: BTreeMap<String, String>,
+}
+
+/// `[resolution]` — how dependencies are resolved. Later resolver knobs
+/// (`exclude-newer`, …) are further fields here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ResolutionConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<ResolutionStrategy>,
+}
+
+/// Which end of each allowed version range the resolver picks (#193).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolutionStrategy {
+    /// The newest allowed version of every package.
+    #[default]
+    Highest,
+    /// The oldest allowed version of every package, transitive ones included
+    /// (uv's `lowest`). A package nobody constrains resolves to its first
+    /// CRAN release.
+    Lowest,
+    /// The oldest allowed version of the manifest's own dependencies, and the
+    /// newest of everything they pull in (uv's `lowest-direct`).
+    LowestDirect,
+}
+
+impl std::str::FromStr for ResolutionStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "highest" => Ok(Self::Highest),
+            "lowest" => Ok(Self::Lowest),
+            "lowest-direct" => Ok(Self::LowestDirect),
+            other => Err(format!(
+                "unknown resolution strategy '{other}' (expected highest, lowest, or lowest-direct)"
+            )),
+        }
+    }
 }
 
 /// `[activate]` — how `source .uvr/activate` behaves.
@@ -315,6 +375,7 @@ impl std::str::FromStr for Manifest {
         let manifest: Manifest =
             toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))?;
         manifest.validate_detailed_dependencies()?;
+        manifest.validate_version_tables()?;
         Ok(manifest)
     }
 }
@@ -348,7 +409,18 @@ impl Manifest {
             dev_dependencies: BTreeMap::new(),
             sources: Vec::new(),
             activate: None,
+            resolution: None,
+            override_dependencies: BTreeMap::new(),
+            constraint_dependencies: BTreeMap::new(),
         }
+    }
+
+    /// The `[resolution] strategy` setting, or the default (`highest`).
+    pub fn resolution_strategy(&self) -> ResolutionStrategy {
+        self.resolution
+            .as_ref()
+            .and_then(|r| r.strategy)
+            .unwrap_or_default()
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -479,6 +551,9 @@ impl Manifest {
             dev_dependencies,
             sources: Vec::new(),
             activate: None,
+            resolution: None,
+            override_dependencies: BTreeMap::new(),
+            constraint_dependencies: BTreeMap::new(),
         })
     }
 
@@ -589,6 +664,28 @@ impl Manifest {
                 };
                 validate_detailed_dependency(name, section, dep)?;
             }
+        }
+        Ok(())
+    }
+
+    /// An override is an exact version; a constraint is a version range (#195).
+    fn validate_version_tables(&self) -> Result<()> {
+        for (name, version) in &self.override_dependencies {
+            let exact = version.starts_with(|c: char| c.is_ascii_digit())
+                && semver::Version::parse(&crate::resolver::normalize_version(version)).is_ok();
+            if !exact {
+                return Err(UvrError::ManifestParse(format!(
+                    "[override-dependencies] {name} = \"{version}\": an override is an exact \
+                     version, such as \"1.6-5\". Use [constraint-dependencies] for a range."
+                )));
+            }
+        }
+        for (name, range) in &self.constraint_dependencies {
+            crate::resolver::parse_version_req(range).map_err(|e| {
+                UvrError::ManifestParse(format!(
+                    "[constraint-dependencies] {name} = \"{range}\": {e}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -1576,6 +1673,98 @@ bioc = true
         // And not serialized
         let s = m.to_toml_string().expect("serialize");
         assert!(!s.contains("bioc_version"));
+    }
+
+    #[test]
+    fn manifest_without_resolution_round_trips_byte_for_byte() {
+        // #193 regression: an existing uvr.toml must not gain a
+        // `[resolution]` table when rewritten (e.g. by `uvr add`).
+        let canonical = "[project]\nname = \"sample-project\"\nr_version = \">=4.0.0\"\n\n\
+                         [dependencies]\ndplyr = \"*\"\nggplot2 = \">=3.0.0\"\n";
+        let m: Manifest = canonical.parse().expect("parse");
+        assert_eq!(m.resolution, None);
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::Highest);
+        // #195: nor the override / constraint tables.
+        assert!(m.override_dependencies.is_empty() && m.constraint_dependencies.is_empty());
+        assert_eq!(m.to_toml_string().expect("serialize"), canonical);
+    }
+
+    #[test]
+    fn resolution_strategy_round_trip() {
+        let toml = "[project]\nname = \"floors\"\n\n[dependencies]\nglue = \">=1.6.0\"\n\n\
+                    [resolution]\nstrategy = \"lowest-direct\"\n";
+        let m: Manifest = toml.parse().expect("parse");
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::LowestDirect);
+        let serialized = m.to_toml_string().expect("serialize");
+        assert!(serialized.contains("[resolution]\nstrategy = \"lowest-direct\""));
+        let m2: Manifest = serialized.parse().expect("reparse");
+        assert_eq!(m, m2);
+
+        // An empty table is accepted and means the default.
+        let m: Manifest = "[project]\nname = \"x\"\n\n[resolution]\n"
+            .parse()
+            .expect("parse");
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::Highest);
+    }
+
+    #[test]
+    fn resolution_strategy_rejects_unknown_value() {
+        let err = "[project]\nname = \"x\"\n\n[resolution]\nstrategy = \"newest\"\n"
+            .parse::<Manifest>()
+            .unwrap_err();
+        assert!(err.to_string().contains("newest"), "{err}");
+    }
+
+    #[test]
+    fn resolution_strategy_from_str() {
+        assert_eq!("highest".parse(), Ok(ResolutionStrategy::Highest));
+        assert_eq!("lowest".parse(), Ok(ResolutionStrategy::Lowest));
+        assert_eq!(
+            "lowest-direct".parse(),
+            Ok(ResolutionStrategy::LowestDirect)
+        );
+        assert!("Lowest".parse::<ResolutionStrategy>().is_err());
+    }
+
+    #[test]
+    fn override_and_constraint_tables_round_trip() {
+        // #195: both tables parse and serialize back unchanged.
+        let toml = "[project]\nname = \"pins\"\n\n[dependencies]\nlme4 = \"*\"\n\n\
+                    [override-dependencies]\nMatrix = \"1.6-5\"\n\n\
+                    [constraint-dependencies]\nrlang = \">=1.1.0\"\n";
+        let m: Manifest = toml.parse().expect("parse");
+        assert_eq!(m.override_dependencies["Matrix"], "1.6-5");
+        assert_eq!(m.constraint_dependencies["rlang"], ">=1.1.0");
+        let serialized = m.to_toml_string().expect("serialize");
+        assert_eq!(serialized, toml);
+    }
+
+    #[test]
+    fn override_must_be_an_exact_version() {
+        for bad in [">=1.6", "==1.6-5", "1.6.x", "latest", ""] {
+            let toml =
+                format!("[project]\nname = \"x\"\n\n[override-dependencies]\nMatrix = \"{bad}\"\n");
+            let err = toml.parse::<Manifest>().unwrap_err().to_string();
+            assert!(
+                err.contains("an override is an exact version"),
+                "{bad}: {err}"
+            );
+        }
+        for good in ["1.6-5", "1.0.8.3", "2"] {
+            let toml = format!(
+                "[project]\nname = \"x\"\n\n[override-dependencies]\nMatrix = \"{good}\"\n"
+            );
+            toml.parse::<Manifest>().expect(good);
+        }
+    }
+
+    #[test]
+    fn constraint_must_be_a_version_range() {
+        let err = "[project]\nname = \"x\"\n\n[constraint-dependencies]\nrlang = \"newest\"\n"
+            .parse::<Manifest>()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[constraint-dependencies] rlang"), "{err}");
     }
 
     #[test]

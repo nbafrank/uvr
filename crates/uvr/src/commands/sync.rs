@@ -1831,7 +1831,17 @@ fn validate_locked_manifest(project: &Project, lockfile: &Lockfile) -> Result<()
         let pkg = lockfile.get_package(name).ok_or_else(|| {
             anyhow::anyhow!("uvr.lock does not contain manifest dependency {name}")
         })?;
-        if let Some(req) = spec.version_req().filter(|s| !s.is_empty() && *s != "*") {
+        // An override replaces every requirement on the package, the
+        // manifest's own included (#195), so the lock must hold its version.
+        if let Some(forced) = manifest.override_dependencies.get(name) {
+            if normalize_version(&pkg.version) != normalize_version(forced) {
+                anyhow::bail!(
+                    "Locked {} {} is not the override version {forced}; run `uvr lock`",
+                    name,
+                    pkg.version
+                );
+            }
+        } else if let Some(req) = spec.version_req().filter(|s| !s.is_empty() && *s != "*") {
             let version = semver::Version::parse(&normalize_version(&pkg.version))?;
             if !version_matches_req(&version, &parse_version_req(req)?) {
                 anyhow::bail!("Locked {} {} does not satisfy {req}", name, pkg.version);

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use uvr_core::error::UvrError;
-use uvr_core::manifest::{DependencySpec, DetailedDep};
+use uvr_core::manifest::{DependencySpec, DetailedDep, ResolutionStrategy};
 use uvr_core::package_name;
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
@@ -233,6 +233,7 @@ pub async fn run(
     timeout: Option<std::time::Duration>,
     no_lock: bool,
     no_install: bool,
+    resolution: Option<ResolutionStrategy>,
 ) -> Result<()> {
     let mut project = Project::find_cwd().context("Not inside a uvr project")?;
 
@@ -374,7 +375,8 @@ pub async fn run(
     }
 
     // Re-resolve → update lockfile (and roll back manifest on failure).
-    let mut resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+    let mut resolve_result =
+        crate::commands::lock::resolve_and_lock_with(&project, false, resolution).await;
 
     // A CRAN add that failed only because the package lives on Bioconductor
     // is a question uvr can already answer — so answer it instead of asking
@@ -399,7 +401,9 @@ pub async fn run(
                     project
                         .save_manifest()
                         .context("Failed to write uvr.toml")?;
-                    resolve_result = crate::commands::lock::resolve_and_lock(&project, false).await;
+                    resolve_result =
+                        crate::commands::lock::resolve_and_lock_with(&project, false, resolution)
+                            .await;
                 }
             }
         }

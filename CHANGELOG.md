@@ -97,6 +97,25 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **Override or constrain a dependency's version from `uvr.toml`** (#195).
+  `[override-dependencies]` sets a package to an exact version and ignores
+  what other packages (and `[dependencies]`) require of it; `uvr lock -v`
+  shows each requirement that an override ignores. `[constraint-dependencies]`
+  adds a version range that a package must satisfy if something pulls it in,
+  without adding it to the project. An override can select an archived CRAN
+  release. An exact version requirement (`== 1.0.8`) no longer matches a
+  four-part release such as 1.0.8.3.
+
+- **Resolve to the lowest allowed versions, so declared floors get tested**
+  (#193). `uvr lock`, `uvr add`, and `uvr update` accept
+  `--resolution {highest,lowest,lowest-direct}`, and `uvr.toml` accepts
+  `[resolution] strategy`. `lowest` picks the oldest release that every
+  constraint allows, for all packages, as uv does. `lowest-direct` lowers
+  only the project's own dependencies. CRAN's index lists only current
+  releases, so uvr reads older releases from crandb (METACRAN), caches them,
+  and locks their CRAN Archive URL. A release that needs a package that has
+  left CRAN is skipped. The default (`highest`) is unchanged.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

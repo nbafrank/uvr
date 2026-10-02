@@ -263,6 +263,65 @@ fn test_r_install_rejects_an_empty_install_dir() {
 }
 
 #[test]
+fn test_resolution_flag_is_offered_on_lock_add_update() {
+    // #193: the strategy knob lives on every command that resolves.
+    for command in ["lock", "add", "update"] {
+        uvr_cmd()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--resolution"))
+            .stdout(predicate::str::contains("lowest-direct"));
+    }
+}
+
+#[test]
+fn test_resolution_flag_rejects_an_unknown_strategy() {
+    // clap refuses the value before any resolution (or network) starts.
+    let dir = init_project("badflag");
+    uvr_cmd()
+        .args(["lock", "--resolution", "newest"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'newest'"))
+        .stderr(predicate::str::contains("lowest-direct"));
+}
+
+#[test]
+fn test_manifest_with_an_unknown_strategy_is_rejected() {
+    let dir = init_project("badtable");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str("\n[resolution]\nstrategy = \"newest\"\n");
+    fs::write(&toml_path, toml).unwrap();
+    uvr_cmd()
+        .args(["lock"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("newest"));
+}
+
+#[test]
+fn test_manifest_with_a_range_override_is_rejected() {
+    // #195: an override is an exact version; ranges belong in constraints.
+    let dir = init_project("rangeoverride");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str("\n[override-dependencies]\nrlang = \">=1.0\"\n");
+    fs::write(&toml_path, toml).unwrap();
+    uvr_cmd()
+        .args(["lock"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "[override-dependencies] rlang = \">=1.0\": an override is an exact version",
+        ));
+}
+
+#[test]
 fn test_sync_without_lockfile_fails() {
     let dir = init_project("no-lock-test");
     uvr_cmd()
