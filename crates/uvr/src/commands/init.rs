@@ -162,6 +162,11 @@ local({
   lib <- normalizePath(lib, mustWork = FALSE)
   lock <- file.path(getwd(), "uvr.lock")
   rver_file <- file.path(getwd(), ".r-version")
+  if (Sys.getenv("UVR_USER_PROFILE") %in% c("1", "true", "yes", "TRUE", "YES")) {
+    user <- normalizePath("~/.Rprofile", mustWork = FALSE)
+    if (file.exists(user) && user != normalizePath(".Rprofile", mustWork = FALSE))
+      try(sys.source(user, envir = globalenv()))
+  }
   count_locked <- function(path) {
     if (!file.exists(path)) return(0L)
     length(grep("^\\[\\[package\\]\\]", readLines(path, warn = FALSE)))
@@ -565,6 +570,22 @@ mod rprofile_tests {
         // packages RStudio/Positron sessions never see.
         assert!(RPROFILE_SNIPPET.contains(r#"Sys.getenv("UVR_LIBRARY")"#));
         assert!(RPROFILE_SNIPPET.contains(r#"file.path(getwd(), ".uvr", "library")"#));
+    }
+
+    #[test]
+    fn rprofile_snippet_sources_the_user_profile_on_opt_in() {
+        // #249: R reads `./.Rprofile` *instead of* `~/.Rprofile`, so in a uvr
+        // project the snippet is the only place that can bring the user's
+        // profile back. After the paths are anchored to the project (a
+        // `setwd()` in the profile must not move them), and ahead of
+        // `.libPaths()`, so the project library still ends up first.
+        let opt_in = RPROFILE_SNIPPET
+            .find(r#"Sys.getenv("UVR_USER_PROFILE")"#)
+            .unwrap();
+        let anchored = RPROFILE_SNIPPET.find("rver_file <- ").unwrap();
+        let lib_paths = RPROFILE_SNIPPET.find(".libPaths(").unwrap();
+        assert!(anchored < opt_in && opt_in < lib_paths);
+        assert!(RPROFILE_SNIPPET.contains(r#"normalizePath("~/.Rprofile""#));
     }
 
     #[test]

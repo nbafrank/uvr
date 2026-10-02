@@ -403,6 +403,28 @@ or per-shell, which overrides the manifest either way:
 export UVR_ACTIVATE_PROMPT=1   # or 0 to opt out of a project that opts in
 ```
 
+### The user's `.Rprofile`
+
+R reads only one user profile, and it takes `./.Rprofile` over
+`~/.Rprofile`. Inside a uvr project that is uvr's own `.Rprofile`, so your
+personal profile (prompt, options, helper functions) does not load. A
+headered script and `R CMD INSTALL` (`uvr add`, `uvr sync`) skip both. To
+load `~/.Rprofile` in all of these:
+
+```sh
+export UVR_USER_PROFILE=1
+```
+
+A script or an install then reads `R_PROFILE_USER` if you set it, else
+`~/.Rprofile`, and never the project's `.Rprofile`. A session in the project
+sources `~/.Rprofile` from uvr's block, before the block adds the project
+library. The block comes from `uvr init` and `uvr sync`, so run one of them
+once after you upgrade. For an IDE session that does not start from your
+shell, put `UVR_USER_PROFILE=1` in `~/.Renviron`.
+
+With the switch on, a `~/.Rprofile` that changes `.libPaths()` also changes
+the library a headered script sees. That is the trade the switch makes.
+
 ---
 
 ## Shell completions

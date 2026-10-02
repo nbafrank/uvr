@@ -351,11 +351,12 @@ impl RCmdInstall {
         // install begins. Pointing R_PROFILE_USER at the platform's null
         // device tells R to skip the user/project Rprofile. The library
         // destination is set explicitly via --library, so the suppressed
-        // `.libPaths()` call has no install-side effect.
+        // `.libPaths()` call has no install-side effect. `UVR_USER_PROFILE=1`
+        // points it at the user's global profile instead (#249), still never
+        // the project's.
         // (We deliberately leave R_ENVIRON_USER alone — ~/.Renviron often
         // holds load-bearing TZ / locale settings.)
-        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        cmd.env("R_PROFILE_USER", null_device);
+        cmd.env("R_PROFILE_USER", crate::env_vars::r_profile_user());
 
         // Package build scripts are third-party code; they get no
         // repository credentials (#185).

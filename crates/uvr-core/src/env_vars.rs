@@ -218,6 +218,61 @@ fn derive_name_from_url(url: &str) -> String {
     }
 }
 
+/// UVR_USER_PROFILE
+///
+/// Opt in to the user's global `~/.Rprofile` where uvr would otherwise skip
+/// it: a headered `uvr run` script, `R CMD INSTALL` (`uvr add`, `uvr sync`),
+/// and — through the project `.Rprofile` block — any R session started in a
+/// uvr project, where R reads `./.Rprofile` *instead of* the user's (#249).
+///
+/// Off by default. A personal profile is per-user state, so this is an
+/// environment variable rather than a `uvr.toml` key a collaborator would
+/// inherit.
+pub fn user_profile() -> bool {
+    matches!(
+        read_env_var("UVR_USER_PROFILE").as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
+}
+
+/// The value for `R_PROFILE_USER` in an R that must not read the *project*
+/// `.Rprofile`: headered `uvr run` scripts and `R CMD INSTALL`.
+///
+/// Leaving the variable unset is not an option there — R would then read
+/// `./.Rprofile` ahead of `~/.Rprofile`. So the default is the null device,
+/// and [`user_profile`] swaps in the user's *global* profile by explicit
+/// path: their own `R_PROFILE_USER` if set (R expands `~` in it), else
+/// `.Rprofile` in R's home directory, else still the null device.
+pub fn r_profile_user() -> PathBuf {
+    // R for Windows takes `~` from R_USER, then HOME, then Documents — not
+    // the profile directory `dirs::home_dir()` returns there.
+    let r_home_dir = if cfg!(windows) {
+        read_env_var("R_USER")
+            .or_else(|| read_env_var("HOME"))
+            .map(PathBuf::from)
+            .or_else(dirs::document_dir)
+    } else {
+        dirs::home_dir()
+    };
+    r_profile_user_in(r_home_dir)
+}
+
+/// [`r_profile_user`] with the home directory passed in, so tests need not
+/// move `HOME` under code that reads it without the env lock.
+fn r_profile_user_in(r_home_dir: Option<PathBuf>) -> PathBuf {
+    let null_device = PathBuf::from(if cfg!(windows) { "NUL" } else { "/dev/null" });
+    if !user_profile() {
+        return null_device;
+    }
+    if let Some(own) = read_env_var("R_PROFILE_USER") {
+        return PathBuf::from(own);
+    }
+    r_home_dir
+        .map(|h| h.join(".Rprofile"))
+        .filter(|p| p.is_file())
+        .unwrap_or(null_device)
+}
+
 /// Serializes every test that mutates process-global environment variables.
 /// Env vars are shared across the whole test binary, so tests touching the
 /// same var (e.g. `test_env_vars` and `test_env_repos` both on `UVR_REPOS`, or
@@ -436,6 +491,48 @@ mod tests {
         // whitespace-only → None
         env::set_var("UVR_REPOS", "  ");
         assert!(repos().is_none());
+    }
+
+    // #249: every branch of the R_PROFILE_USER resolution.
+    #[test]
+    fn test_r_profile_user() {
+        let _env = env_lock();
+        let _guard = EnvGuard::new(&["UVR_USER_PROFILE", "R_PROFILE_USER"]);
+        let null_device = PathBuf::from(if cfg!(windows) { "NUL" } else { "/dev/null" });
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join(".Rprofile");
+        std::fs::write(&profile, "options(x = 1)\n").unwrap();
+        let resolve = || r_profile_user_in(Some(home.path().to_path_buf()));
+
+        // Unset: the null device, exactly as before the opt-in existed —
+        // even over the user's own R_PROFILE_USER.
+        assert!(!user_profile());
+        assert_eq!(r_profile_user(), null_device);
+        assert_eq!(resolve(), null_device);
+        env::set_var("R_PROFILE_USER", "/mine/Rprofile");
+        assert_eq!(resolve(), null_device);
+        env::remove_var("R_PROFILE_USER");
+
+        for on in ["1", "true", "yes", "TRUE", "YES"] {
+            env::set_var("UVR_USER_PROFILE", on);
+            assert_eq!(resolve(), profile, "{on:?} should opt in");
+        }
+        for off in ["0", "false", "no", "on", "  "] {
+            env::set_var("UVR_USER_PROFILE", off);
+            assert_eq!(resolve(), null_device, "{off:?} should not");
+        }
+
+        // Opted in: the user's own R_PROFILE_USER wins, verbatim.
+        env::set_var("UVR_USER_PROFILE", "1");
+        env::set_var("R_PROFILE_USER", "~/.config/R/Rprofile");
+        assert_eq!(resolve(), PathBuf::from("~/.config/R/Rprofile"));
+        env::remove_var("R_PROFILE_USER");
+
+        // Opted in, but no profile to load: still the null device, never
+        // unset (R would fall back to the project's `./.Rprofile`).
+        std::fs::remove_file(&profile).unwrap();
+        assert_eq!(resolve(), null_device);
+        assert_eq!(r_profile_user_in(None), null_device);
     }
 
     #[test]
