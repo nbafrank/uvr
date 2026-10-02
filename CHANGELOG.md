@@ -97,6 +97,22 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **The project `.Rprofile` tells a collaborator without uvr how to install
+  it** (#87). Someone who clones a uvr project and opens R without the CLI
+  now sees `uvr: uvr command not found. Install it in a terminal with:`
+  followed by the README's one-line install command for their platform
+  (`curl … install.sh | sh`, or `irm … install.ps1 | iex` on Windows), and
+  `uvr::install_uvr()` as an alternative when the companion package is
+  installed. The block reports state and downloads nothing. It checks only in
+  interactive sessions, so `Rscript`, knitr and child R processes stay
+  silent, and it looks for the binary with a `file.exists()` scan of `PATH`
+  plus the default install directories (`~/.local/bin`, `~/.cargo/bin`,
+  `/usr/local/bin`, `/opt/homebrew/bin`; on Windows `.local\bin` and
+  `.cargo\bin` under `%USERPROFILE%`, and `%LOCALAPPDATA%\Programs\uvr`), so
+  an R started from a GUI with a shorter `PATH` does not raise a false alarm.
+  Because the managed block changed, the next `uvr sync` / `uvr init` rewrites
+  it once in every existing project.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

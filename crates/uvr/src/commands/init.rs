@@ -155,6 +155,22 @@ const RPROFILE_END: &str = "# <<< uvr <<<";
 // project file and a wall of design-rationale comments is noise for
 // them (#90). Design notes live in init.rs's docstrings + this
 // file's git history, not in the user-facing snippet.
+//
+// Missing-CLI hint (#87): a collaborator who clones the project and opens
+// R without uvr gets the one-line install command, and nothing is
+// downloaded. Auto-installing from a startup file is deliberately not done
+// (#162). The check runs only in interactive sessions, so Rscript, knitr
+// and child R processes pay nothing and stay silent. It scans the PATH
+// entries with `file.exists()` instead of calling `Sys.which()`, which on
+// Unix spawns `sh` + `which` (about 5.6 ms against 0.09 ms for the scan,
+// measured with R 4.6 on Linux). The extra directories are the ones the
+// installers write to (`install.sh`: ~/.local/bin; `install.ps1`:
+// %USERPROFILE%\.local\bin) plus those the companion package's
+// `.find_uvr_path()` also searches, so a uvr that the companion package can
+// find does not trigger the hint even when a GUI-launched R has a shorter
+// PATH than the shell. On Windows the home is USERPROFILE, because R sets
+// HOME to Documents there. `system.file()` checks for the companion package
+// without loading it.
 const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- Sys.getenv("UVR_LIBRARY")
@@ -200,6 +216,21 @@ local({
     } else if (file.exists(lock)) {
       n_locked <- count_locked(lock)
       message("uvr: 0 of ", n_locked, " package(s) installed. Run uvr::sync() to install.")
+    }
+  }
+  if (interactive()) {
+    # A file.exists() scan: Sys.which would start a process at every R start.
+    win <- .Platform$OS.type == "windows"
+    dirs <- c(strsplit(Sys.getenv("PATH"), .Platform$path.sep, fixed = TRUE)[[1]],
+              file.path(Sys.getenv(if (win) "USERPROFILE" else "HOME"), c(".local", ".cargo"), "bin"),
+              if (win) file.path(Sys.getenv("LOCALAPPDATA"), "Programs", "uvr")
+              else c("/usr/local/bin", "/opt/homebrew/bin"))
+    if (!any(file.exists(file.path(dirs, if (win) "uvr.exe" else "uvr")))) {
+      message("uvr: uvr command not found. ",
+              if (nzchar(system.file(package = "uvr"))) "Run uvr::install_uvr(), or install it"
+              else "Install it", if (win) " in PowerShell" else " in a terminal", " with:\n  ",
+              if (win) "irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex"
+              else "curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh")
     }
   }
 })
@@ -565,6 +596,131 @@ mod rprofile_tests {
         // packages RStudio/Positron sessions never see.
         assert!(RPROFILE_SNIPPET.contains(r#"Sys.getenv("UVR_LIBRARY")"#));
         assert!(RPROFILE_SNIPPET.contains(r#"file.path(getwd(), ".uvr", "library")"#));
+    }
+
+    #[test]
+    fn rprofile_snippet_hints_at_a_missing_cli_without_downloading() {
+        // #87: the hint must name the install commands exactly as the README
+        // documents them, only inside interactive sessions.
+        let readme = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"));
+        let interactive = RPROFILE_SNIPPET.find("if (interactive())").unwrap();
+        for cmd in [
+            "curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh",
+            "irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex",
+        ] {
+            assert!(readme.contains(cmd), "README no longer documents {cmd}");
+            assert!(RPROFILE_SNIPPET.find(cmd).unwrap() > interactive);
+        }
+        assert!(RPROFILE_SNIPPET.contains("uvr::install_uvr()"));
+        // #162: the hint reports state; it never fetches or runs anything.
+        // Scoped to the hint, so other opt-in steps in the block (#249's
+        // `sys.source()`) do not trip it.
+        let hint = &RPROFILE_SNIPPET[interactive..];
+        for forbidden in [
+            "download.file",
+            "install.packages",
+            "system(",
+            "system2(",
+            "url(",
+            "Sys.which(",
+            "source(",
+        ] {
+            assert!(
+                !hint.contains(forbidden),
+                "the hint must not call {forbidden}"
+            );
+        }
+    }
+
+    /// Start R with `dir/.Rprofile` as the user profile and `path` as PATH,
+    /// and return what it wrote to stderr. `None` when R cannot be spawned.
+    #[cfg(unix)]
+    fn r_startup_stderr(dir: &Path, interactive: bool, path: &std::ffi::OsStr) -> Option<String> {
+        let mut cmd = if interactive {
+            let mut c = std::process::Command::new("R");
+            c.args([
+                "--interactive",
+                "--no-save",
+                "--no-restore",
+                "--no-readline",
+                "--quiet",
+            ]);
+            c
+        } else {
+            let mut c = std::process::Command::new("Rscript");
+            c.args(["-e", "invisible()"]);
+            c
+        };
+        let out = cmd
+            .current_dir(dir)
+            .env("R_PROFILE_USER", dir.join(".Rprofile"))
+            .env("HOME", dir)
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "R failed: {stderr}");
+        Some(stderr)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rprofile_snippet_prints_the_install_hint_only_when_uvr_is_missing() {
+        // #87, end to end in a real R: HOME points at the temp project, so
+        // ~/.local/bin and ~/.cargo/bin hold no uvr, and PATH keeps only
+        // directories without one.
+        if ["/usr/local/bin/uvr", "/opt/homebrew/bin/uvr"]
+            .iter()
+            .any(|p| Path::new(p).exists())
+        {
+            eprintln!("skipping: a system-wide uvr is installed");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join(".Rprofile"), RPROFILE_SNIPPET).unwrap();
+        // A companion package in the project library turns on the
+        // uvr::install_uvr() alternative.
+        let companion = dir.join(".uvr/library/uvr");
+        std::fs::create_dir_all(&companion).unwrap();
+        std::fs::write(
+            companion.join("DESCRIPTION"),
+            "Package: uvr\nVersion: 0.0.0\n",
+        )
+        .unwrap();
+        let original = std::env::var_os("PATH").unwrap_or_default();
+        let without_uvr = std::env::join_paths(
+            std::env::split_paths(&original).filter(|d| !d.join("uvr").exists()),
+        )
+        .unwrap();
+
+        let Some(missing) = r_startup_stderr(dir, true, &without_uvr) else {
+            eprintln!("skipping: no R on PATH");
+            return;
+        };
+        assert!(
+            missing.contains(
+                "uvr: uvr command not found. Run uvr::install_uvr(), or install it in a terminal with:\n  curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh\n"
+            ),
+            "{missing}"
+        );
+        assert!(!missing.contains("Error"), "{missing}");
+
+        // Rscript (non-interactive) stays silent even without uvr.
+        let batch = r_startup_stderr(dir, false, &without_uvr).expect("Rscript runs");
+        assert!(!batch.contains("command not found"), "{batch}");
+
+        // A uvr on PATH silences the hint.
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("uvr"), "").unwrap();
+        let with_uvr =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&without_uvr)))
+                .unwrap();
+        let present = r_startup_stderr(dir, true, &with_uvr).expect("R runs");
+        assert!(!present.contains("command not found"), "{present}");
+        assert!(present.contains("uvr: library active"), "{present}");
     }
 
     #[test]
