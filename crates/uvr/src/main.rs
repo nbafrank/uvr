@@ -117,6 +117,7 @@ async fn run() -> Result<()> {
                 timeout,
                 args.no_lock,
                 args.no_install,
+                args.resolution,
             )
             .await?;
         }
@@ -156,10 +157,10 @@ async fn run() -> Result<()> {
             commands::activate::run(args.emit, args.write_shim)?;
         }
         Commands::Update(args) => {
-            commands::update::run(args.packages, args.dry_run, args.jobs).await?;
+            commands::update::run(args.packages, args.dry_run, args.jobs, args.resolution).await?;
         }
         Commands::Lock(args) => {
-            commands::lock::run(args.upgrade).await?;
+            commands::lock::run(args.upgrade, args.resolution).await?;
         }
         Commands::Tree(args) => {
             commands::tree::run(args.depth)?;

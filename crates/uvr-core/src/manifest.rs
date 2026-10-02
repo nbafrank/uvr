@@ -27,6 +27,48 @@ pub struct Manifest {
     /// Optional `[activate]` block — shell-activation preferences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activate: Option<ActivateMeta>,
+
+    /// Optional `[resolution]` block — resolver knobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ResolutionConfig>,
+}
+
+/// `[resolution]` — how dependencies are resolved. Later resolver knobs
+/// (`exclude-newer`, …) are further fields here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ResolutionConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<ResolutionStrategy>,
+}
+
+/// Which end of each allowed version range the resolver picks (#193).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolutionStrategy {
+    /// The newest allowed version of every package.
+    #[default]
+    Highest,
+    /// The oldest allowed version of every package, transitive ones included
+    /// (uv's `lowest`). A package nobody constrains resolves to its first
+    /// CRAN release.
+    Lowest,
+    /// The oldest allowed version of the manifest's own dependencies, and the
+    /// newest of everything they pull in (uv's `lowest-direct`).
+    LowestDirect,
+}
+
+impl std::str::FromStr for ResolutionStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "highest" => Ok(Self::Highest),
+            "lowest" => Ok(Self::Lowest),
+            "lowest-direct" => Ok(Self::LowestDirect),
+            other => Err(format!(
+                "unknown resolution strategy '{other}' (expected highest, lowest, or lowest-direct)"
+            )),
+        }
+    }
 }
 
 /// `[activate]` — how `source .uvr/activate` behaves.
@@ -348,7 +390,16 @@ impl Manifest {
             dev_dependencies: BTreeMap::new(),
             sources: Vec::new(),
             activate: None,
+            resolution: None,
         }
+    }
+
+    /// The `[resolution] strategy` setting, or the default (`highest`).
+    pub fn resolution_strategy(&self) -> ResolutionStrategy {
+        self.resolution
+            .as_ref()
+            .and_then(|r| r.strategy)
+            .unwrap_or_default()
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -479,6 +530,7 @@ impl Manifest {
             dev_dependencies,
             sources: Vec::new(),
             activate: None,
+            resolution: None,
         })
     }
 
@@ -1576,6 +1628,55 @@ bioc = true
         // And not serialized
         let s = m.to_toml_string().expect("serialize");
         assert!(!s.contains("bioc_version"));
+    }
+
+    #[test]
+    fn manifest_without_resolution_round_trips_byte_for_byte() {
+        // #193 regression: an existing uvr.toml must not gain a
+        // `[resolution]` table when rewritten (e.g. by `uvr add`).
+        let canonical = "[project]\nname = \"sample-project\"\nr_version = \">=4.0.0\"\n\n\
+                         [dependencies]\ndplyr = \"*\"\nggplot2 = \">=3.0.0\"\n";
+        let m: Manifest = canonical.parse().expect("parse");
+        assert_eq!(m.resolution, None);
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::Highest);
+        assert_eq!(m.to_toml_string().expect("serialize"), canonical);
+    }
+
+    #[test]
+    fn resolution_strategy_round_trip() {
+        let toml = "[project]\nname = \"floors\"\n\n[dependencies]\nglue = \">=1.6.0\"\n\n\
+                    [resolution]\nstrategy = \"lowest-direct\"\n";
+        let m: Manifest = toml.parse().expect("parse");
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::LowestDirect);
+        let serialized = m.to_toml_string().expect("serialize");
+        assert!(serialized.contains("[resolution]\nstrategy = \"lowest-direct\""));
+        let m2: Manifest = serialized.parse().expect("reparse");
+        assert_eq!(m, m2);
+
+        // An empty table is accepted and means the default.
+        let m: Manifest = "[project]\nname = \"x\"\n\n[resolution]\n"
+            .parse()
+            .expect("parse");
+        assert_eq!(m.resolution_strategy(), ResolutionStrategy::Highest);
+    }
+
+    #[test]
+    fn resolution_strategy_rejects_unknown_value() {
+        let err = "[project]\nname = \"x\"\n\n[resolution]\nstrategy = \"newest\"\n"
+            .parse::<Manifest>()
+            .unwrap_err();
+        assert!(err.to_string().contains("newest"), "{err}");
+    }
+
+    #[test]
+    fn resolution_strategy_from_str() {
+        assert_eq!("highest".parse(), Ok(ResolutionStrategy::Highest));
+        assert_eq!("lowest".parse(), Ok(ResolutionStrategy::Lowest));
+        assert_eq!(
+            "lowest-direct".parse(),
+            Ok(ResolutionStrategy::LowestDirect)
+        );
+        assert!("Lowest".parse::<ResolutionStrategy>().is_err());
     }
 
     #[test]

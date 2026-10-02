@@ -264,6 +264,7 @@ or to the repository root.
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
 | `uvr lock --upgrade` | Upgrade all packages to their latest allowed versions |
+| `uvr lock --resolution lowest` | Resolve to the oldest versions the constraints allow, to test declared floors (also on `add` and `update`; see [`[resolution]`](#resolution-strategy)) |
 | `uvr tree` | Show the dependency tree |
 | `uvr tree --depth 1` | Show only direct dependencies |
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |
@@ -583,6 +584,40 @@ export UVR_REPO_PASSWORD_INTERNAL_PPM=...
 - If a host refuses a netrc password (`401`, or `404` from `raw.githubusercontent.com`), uvr shows a warning and does not use that entry again in the same run. uvr then continues without credentials, so public repositories still work. uvr never ignores a token from a variable: if the host refuses it, uvr stops with an error.
 - For a `git::` dependency, git servers take HTTP basic auth, so uvr sends the token as the password. The user name is `UVR_GIT_USER_<HOST>`, or `x-token-auth` if that is not set (Bitbucket Cloud access tokens need that name; GitLab accepts any name). From `~/.netrc`, uvr uses the `login` and `password` of the entry. uvr gives the header to git in `GIT_CONFIG_*` environment variables, which need git 2.31 or later, and never on the command line. git sends it only to the `https://` origin of the URL. There is no variable for all `git::` hosts, because it would send one token to every host that a dependency names.
 - If uvr has no token for a `git::` host, git uses its own credential helpers. For `ssh://` and `user@host:path` URLs, git uses your ssh keys and agent, and uvr sends nothing. uvr turns off the terminal prompts of git, so a private repository without credentials fails instead of waiting for input.
+
+#### Resolution strategy
+
+```toml
+[resolution]
+strategy = "lowest-direct"   # "highest" (default), "lowest", or "lowest-direct"
+```
+
+The strategy selects which end of each allowed version range uvr uses:
+
+- `highest` (the default) uses the newest release.
+- `lowest` uses the oldest release that each constraint allows, for all
+  packages. Thus `ggplot2 = ">=3.4.0"` resolves to ggplot2 3.4.0, and you can
+  test that floor. A package that no constraint limits resolves to its first
+  CRAN release, which frequently does not build on a current R.
+- `lowest-direct` uses the oldest release for the dependencies in `uvr.toml`,
+  and the newest release for the packages that they pull in. Use this mode to
+  check your own floors in CI.
+
+`--resolution <strategy>` on `uvr lock`, `uvr add`, and `uvr update` overrides
+the setting for one run. uvr does not store the override. The next resolution
+(after a change to `uvr.toml`, such as `uvr add`, or with `uvr lock --upgrade`)
+uses the `uvr.toml` setting again. Thus, to keep a strategy, write it in
+`uvr.toml`. `uvr sync --frozen` compares the lockfile with `uvr.toml`, so a
+change of the setting there makes the lockfile stale.
+
+CRAN's package index lists only current releases. For the older releases,
+uvr gets the metadata from [crandb](https://crandb.r-pkg.org) (METACRAN),
+keeps it in `~/.uvr/cache/cran-history/`, and downloads the tarballs from the
+CRAN archive. There are no P3M binaries for old releases, thus `uvr sync`
+builds them from source. uvr does not use a release that needs a package that
+is no longer on CRAN. Bioconductor packages and custom repositories resolve
+from their index without change (a Bioconductor release has one version of
+each package). Git dependencies stay at the commit that they name.
 
 ---
 
