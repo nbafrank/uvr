@@ -50,10 +50,13 @@ async fn run() -> Result<()> {
     } else {
         "uvr=info,uvr_core=info"
     };
+    // Log lines are diagnostics, so stderr — `uvr run` would otherwise mix
+    // an R download's progress into the script's own stdout (#183).
     fmt()
         .with_env_filter(EnvFilter::new(filter))
         .with_target(false)
         .without_time()
+        .with_writer(std::io::stderr)
         .init();
 
     let Some(command) = cli.command else {

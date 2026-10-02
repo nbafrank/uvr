@@ -2107,20 +2107,19 @@ fn test_a_second_header_block_is_a_hard_error() {
 fn test_header_text_cannot_smuggle_ansi_into_uvr_output() {
     // A header is text you accept from a stranger. `\u001b` is legal TOML
     // that decodes to a live ESC; printed raw it can repaint or overwrite
-    // uvr's own diagnostics. The r-pin warning is the interpolation site a
-    // successfully-parsed header reaches, so it is the one exercised here
-    // against the real binary.
+    // uvr's own diagnostics. An `r` value carrying one is not a valid
+    // constraint (#183), so the header error that quotes it is the
+    // interpolation site exercised here against the real binary.
     let dir = script_dir(
         "# /// script\n# r = \"\\u001b[31mINJECTED>=4.3\"\n# dependencies = []\n# ///\n",
     );
-    // The warning fires before an interpreter is resolved, so stderr carries
-    // it whether or not this machine has an R to continue with — the exit
-    // status is deliberately not asserted.
+    // Refused before an interpreter is looked for, so no R is needed here.
     let output = uvr_cmd()
         .args(["run", "script.R"])
         .current_dir(dir.path())
         .output()
         .unwrap();
+    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("\\u{1b}[31mINJECTED"),
@@ -2367,23 +2366,126 @@ fn test_headered_script_ignores_a_surrounding_r_version_pin() {
         .failure();
 }
 
-#[test]
-fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
-    // `r` is parsed but not honoured until #183. Running against whichever R
-    // happens to be around without saying so is the trap this guards.
-    if !have_r() {
-        eprintln!("skipping: no R on PATH");
-        return;
+/// A temporary `UVR_R_INSTALL_DIR` holding a stand-in managed R for each of
+/// `versions`.
+///
+/// Each stand-in prints `FAKE-R <version>` and then its version, whatever it
+/// is asked: uvr's version probe reads the last version-shaped line, and a
+/// script run shows which R was chosen. The 3.0.x series keeps them clear of
+/// any real R on the machine, and a script with no dependencies never makes
+/// uvr ask them to install anything.
+#[cfg(unix)]
+fn fake_r_installs(versions: &[&str]) -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    for version in versions {
+        let bin = dir.path().join(version).join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let r = bin.join("R");
+        fs::write(
+            &r,
+            format!("#!/bin/sh\necho FAKE-R {version}\necho {version}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&r, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let dir =
-        script_dir("# /// script\n# r = \">=4.3\"\n# dependencies = []\n# ///\ncat(\"RAN\\n\")\n");
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn test_a_header_r_constraint_selects_a_matching_installed_r() {
+    // #183: the newest installed R that satisfies `r` wins — not whichever R
+    // uvr would otherwise have picked (here, the real one on PATH).
+    let installs = fake_r_installs(&["3.0.1", "3.0.2", "3.1.0"]);
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# r = \"~3.0\"\n# dependencies = []\n# ///\n");
     uvr_cmd()
         .args(["run", "script.R"])
         .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .env("UVR_R_DOWNLOADS", "never")
         .assert()
         .success()
-        .stdout(predicate::str::contains("RAN"))
-        .stderr(predicate::str::contains("does not honour yet"));
+        .stdout(predicate::str::contains("FAKE-R 3.0.2"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_version_flag_overrides_the_header_r_constraint() {
+    // No installed R satisfies the header, so if the header won, this would
+    // fail on the `never` below instead of running.
+    let installs = fake_r_installs(&["3.0.1", "3.0.2"]);
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# r = \">=99\"\n# dependencies = []\n# ///\n");
+    uvr_cmd()
+        .args(["run", "--r-version", "==3.0.1", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .env("UVR_R_DOWNLOADS", "never")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.0.1"));
+
+    // An explicit version that is not installed fails as it always has: only
+    // the header's own constraint may provision an R.
+    let out = uvr_cmd()
+        .args(["run", "--r-version", "==3.0.9", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .env("UVR_R_DOWNLOADS", "never")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    assert!(stderr.contains("R not found"), "{stderr}");
+    assert!(!stderr.contains("No R satisfies"), "{stderr}");
+}
+
+#[test]
+fn test_no_matching_r_with_downloads_disabled_names_the_constraint() {
+    // #183: `UVR_R_DOWNLOADS=never` refuses to fetch an R, and the error says
+    // what the script needs and how to get it.
+    let installs = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# r = \"==3.0.1\"\n# dependencies = []\n# ///\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_R_DOWNLOADS", "never")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "No R satisfies \"==3.0.1\" for script.R",
+        ))
+        .stderr(predicate::str::contains("UVR_R_DOWNLOADS=auto"));
+}
+
+#[test]
+#[ignore = "downloads a portable R build (~100 MB)"]
+fn test_a_header_r_constraint_installs_a_missing_r() {
+    // #183: nothing installed satisfies `r`, so uvr installs the newest
+    // matching build and runs the script with it. Run with
+    // `cargo test -- --ignored`.
+    let installs = TempDir::new().unwrap();
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir(
+        "# /// script\n# r = \"~4.4\"\n# dependencies = []\n# ///\n\
+         cat(\"RUNNING\", R.version$major, R.version$minor, \"\\n\")\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RUNNING 4 4."))
+        // The download's progress stays off the script's stdout.
+        .stdout(predicate::str::contains("Installing").not())
+        .stderr(predicate::str::contains("Installing R 4.4."));
 }
 
 // ─── IDE-mode scaffolding ─────────────────────────────────────────

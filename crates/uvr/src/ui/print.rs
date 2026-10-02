@@ -168,6 +168,13 @@ pub fn summary(headline: impl std::fmt::Display, sub: impl std::fmt::Display) {
     println!("  {}", palette::dim(sub));
 }
 
+/// [`summary`] on **stderr**, for a step that must not mix into a command's
+/// data output — `uvr run` installing R before it runs a script.
+pub fn summary_err(headline: impl std::fmt::Display, sub: impl std::fmt::Display) {
+    eprintln!("{} {headline}", palette::success(glyph::success()));
+    eprintln!("  {}", palette::dim(sub));
+}
+
 /// Single-line padded check for doctor: `{glyph} {label:<width}} {status}`.
 pub fn check(ok: bool, label: &str, status: impl std::fmt::Display, width: usize) {
     let glyph_str = if ok {

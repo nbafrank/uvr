@@ -347,6 +347,28 @@ Scripts run isolated from any project you happen to be standing in: the
 project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,
 so a script behaves the same wherever it is invoked from.
 
+A header can also say which R the script needs:
+
+```r
+# /// script
+# r = "~4.4"
+# dependencies = ["jsonlite"]
+# ///
+```
+
+`r` takes the same constraint grammar as `r_version` in `uvr.toml`. uvr runs
+the script with the newest installed R that satisfies it. If none does, uvr
+installs the newest matching R that is published for your platform (the same
+download as `uvr r install`, with its progress on stderr) and continues. Note
+that a bare version is a caret requirement: `r = "4.4"` means `>=4.4.0, <5.0.0`
+and accepts R 4.6. Write `~4.4` for "any 4.4.x", or `==4.4.3` for one exact
+release. `uvr run --r-version <constraint>` overrides the header, and never
+installs anything.
+
+To stop uvr from downloading R, for example on a locked-down machine, set
+`UVR_R_DOWNLOADS=never` (the default is `auto`). A script whose `r` no
+installed R satisfies then fails with an error that names the constraint.
+
 A script can also carry a shebang and run as a plain executable:
 
 ```r

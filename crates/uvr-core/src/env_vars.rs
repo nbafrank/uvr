@@ -156,6 +156,29 @@ pub fn r_install_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"))
 }
 
+/// UVR_R_DOWNLOADS
+///
+/// Whether `uvr run` may download R when no installed R satisfies a script
+/// header's `r` constraint (#183). Mirrors uv's `UV_PYTHON_DOWNLOADS`:
+///     - `auto` (default): install the newest matching R and continue.
+///     - `never`: fail, naming the constraint, instead of downloading.
+///
+/// Any other value is an error rather than a silent `auto`: this setting is
+/// for locked-down machines, where a typo must not quietly re-enable
+/// downloads.
+pub fn r_downloads_allowed() -> crate::error::Result<bool> {
+    match read_env_var("UVR_R_DOWNLOADS") {
+        None => Ok(true),
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(true),
+            "never" => Ok(false),
+            _ => Err(crate::error::UvrError::Other(format!(
+                "UVR_R_DOWNLOADS={raw:?} is not recognised; use `auto` or `never`"
+            ))),
+        },
+    }
+}
+
 /// UVR_REPOS — comma-separated list of CRAN-like repository URLs to use
 /// in addition to (and at higher priority than) any `[[sources]]` in
 /// `uvr.toml`. Each URL becomes a `[[sources]]` entry whose name is
@@ -436,6 +459,29 @@ mod tests {
         // whitespace-only → None
         env::set_var("UVR_REPOS", "  ");
         assert!(repos().is_none());
+    }
+
+    #[test]
+    fn test_r_downloads_parsing() {
+        let _env = env_lock();
+        let _guard = EnvGuard::new(&["UVR_R_DOWNLOADS"]);
+
+        // Unset, blank and `auto` all allow downloads.
+        assert!(r_downloads_allowed().unwrap());
+        for on in ["", "  ", "auto", "AUTO", " auto "] {
+            env::set_var("UVR_R_DOWNLOADS", on);
+            assert!(r_downloads_allowed().unwrap(), "{on:?} should allow");
+        }
+        for off in ["never", "Never", " never "] {
+            env::set_var("UVR_R_DOWNLOADS", off);
+            assert!(!r_downloads_allowed().unwrap(), "{off:?} should forbid");
+        }
+        // A typo must not fall back to `auto` on a machine that meant `never`.
+        for junk in ["nevr", "0", "false"] {
+            env::set_var("UVR_R_DOWNLOADS", junk);
+            let err = r_downloads_allowed().unwrap_err().to_string();
+            assert!(err.contains("UVR_R_DOWNLOADS"), "{junk:?}: {err}");
+        }
     }
 
     #[test]

@@ -97,6 +97,17 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **A script header can pin R, and uvr installs it if needed** (#183).
+  `# r = "~4.4"` in a `# /// script` header selects the newest installed R
+  that satisfies the constraint (the `uvr.toml` `r_version` grammar). If no
+  installed R does, `uvr run` installs the newest matching R published for
+  the platform, with the same backend and progress lines as `uvr r install`,
+  and then runs the script. `UVR_R_DOWNLOADS=never` (default `auto`) turns
+  the download off; the error then names the constraint. `--r-version` still
+  wins over the header and never downloads. An invalid `r` value is now a
+  header error. uvr's log lines (`INFO`/`WARN`) now go to stderr, so they no
+  longer mix into a script's stdout or into `uvr activate --emit` output.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`
