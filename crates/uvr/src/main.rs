@@ -225,6 +225,9 @@ async fn run() -> Result<()> {
             Some(CacheCommands::Clean(args)) => {
                 commands::cache::run_clean(&args.packages, &args.r_versions)?;
             }
+            Some(CacheCommands::Prune(args)) => {
+                commands::cache::run_prune(args.dry_run, args.ci)?;
+            }
             None => {
                 ui::welcome_group(
                     "cache",
@@ -238,6 +241,10 @@ async fn run() -> Result<()> {
                         (
                             "uvr cache clean --r-version <minor>",
                             "Remove package entries built for an R minor version",
+                        ),
+                        (
+                            "uvr cache prune",
+                            "Remove only unused entries (--dry-run to preview)",
                         ),
                     ],
                 );

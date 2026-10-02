@@ -286,6 +286,7 @@ or to the repository root.
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+| `uvr cache prune` | Remove only unused entries: leftovers of interrupted installs, and extracted packages for R minor versions that uvr cannot find on this machine (load an R module first if uvr cannot see that R). `--dry-run` lists them; `--ci` also removes the raw downloads and keeps the extracted packages |
 
 ---
 

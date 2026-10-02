@@ -734,6 +734,249 @@ fn test_cache_clean_filtered_no_match() {
     );
 }
 
+const PRUNE_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+/// `uvr` with every cache and R directory under `home`, and no `R_HOME`
+/// from a calling R session.
+fn prune_cmd(home: &std::path::Path) -> Command {
+    let mut cmd = uvr_cmd();
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("UVR_CACHE_DIR", home.join("cache"))
+        .env("UVR_PACKAGES_DIR", home.join("packages"))
+        .env("UVR_R_INSTALL_DIR", home.join("r-versions"))
+        .env_remove("R_HOME");
+    cmd
+}
+
+/// Seed `home` for `uvr cache prune`: a managed R 4.5, an extract for it
+/// (kept), an extract for R 3.6 (stale), a download with its sidecar (kept
+/// unless --ci), and two leftovers of a crashed sync (orphans).
+fn seed_prune_fixture(home: &std::path::Path) {
+    let cache = home.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("aabbccdd-pkg_1.0.tar.gz"), "tarball").unwrap();
+    fs::write(cache.join("aabbccdd-pkg_1.0.tar.sha256"), "sha").unwrap();
+    fs::write(cache.join("11223344-gone_1.0.tar.sha256"), "orphan").unwrap();
+    let partial = cache.join(".uvr-dl-x1y2z3");
+    fs::write(&partial, "partial").unwrap();
+    // Old enough that no running sync can still own it.
+    fs::File::options()
+        .write(true)
+        .open(&partial)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60))
+        .unwrap();
+
+    for (name, minor) in [("keep", "4.5"), ("old", "3.6")] {
+        let entry = home
+            .join("packages")
+            .join(format!("{name}-1.0-{PRUNE_HEX}"));
+        fs::create_dir_all(entry.join(name)).unwrap();
+        fs::write(
+            entry.join(name).join("DESCRIPTION"),
+            format!("Package: {name}\n"),
+        )
+        .unwrap();
+        fs::write(
+            entry.join(".uvr-meta"),
+            format!("r_minor={minor}\nkind=binary\n"),
+        )
+        .unwrap();
+    }
+
+    // Detection of a managed R only checks that its binary exists.
+    let bin = home.join("r-versions").join("4.5.3").join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("R"), "").unwrap();
+    fs::write(bin.join("R.exe"), "").unwrap();
+}
+
+#[test]
+fn test_cache_prune_dry_run_prune_and_ci() {
+    let home = TempDir::new().unwrap();
+    seed_prune_fixture(home.path());
+    let cache = home.path().join("cache");
+    let packages = home.path().join("packages");
+    let kept = packages.join(format!("keep-1.0-{PRUNE_HEX}"));
+    let stale = packages.join(format!("old-1.0-{PRUNE_HEX}"));
+    let orphans = [
+        cache.join(".uvr-dl-x1y2z3"),
+        cache.join("11223344-gone_1.0.tar.sha256"),
+    ];
+    let downloads = [
+        cache.join("aabbccdd-pkg_1.0.tar.gz"),
+        cache.join("aabbccdd-pkg_1.0.tar.sha256"),
+    ];
+
+    // Byte counts: orphans "partial" + "orphan" = 13; the stale extract
+    // "Package: old\n" + "r_minor=3.6\nkind=binary\n" = 37; downloads 10.
+    prune_cmd(home.path())
+        .args(["cache", "prune", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed R: ").and(predicate::str::contains("4.5")))
+        .stdout(predicate::str::contains(
+            "Dry run: would prune 3 cache entries (50 B)",
+        ))
+        .stdout(predicate::str::contains(
+            "Leftovers of interrupted installs: 2 (13 B)",
+        ))
+        .stdout(predicate::str::contains(
+            "Extracted packages for R versions that are not installed: 1 (37 B)",
+        ))
+        .stdout(predicate::str::contains(".uvr-dl-x1y2z3"))
+        .stdout(predicate::str::contains("11223344-gone_1.0.tar.sha256"))
+        .stdout(predicate::str::contains(format!("old-1.0-{PRUNE_HEX}")))
+        .stdout(predicate::str::contains("Raw downloads").not());
+    for path in orphans.iter().chain(&downloads).chain([&stale, &kept]) {
+        assert!(path.exists(), "--dry-run removed {}", path.display());
+    }
+
+    prune_cmd(home.path())
+        .args(["cache", "prune"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 3 cache entries (50 B)"))
+        .stdout(predicate::str::contains(
+            "Leftovers of interrupted installs: 2 (13 B)",
+        ))
+        .stdout(predicate::str::contains(
+            "Extracted packages for R versions that are not installed: 1 (37 B)",
+        ));
+    for path in orphans.iter().chain([&stale]) {
+        assert!(!path.exists(), "prune kept {}", path.display());
+    }
+    for path in &downloads {
+        assert!(path.exists(), "prune removed {}", path.display());
+    }
+    assert!(kept.join("keep").join("DESCRIPTION").exists());
+
+    // --ci also drops the raw downloads, and keeps the extract.
+    prune_cmd(home.path())
+        .args(["cache", "prune", "--ci"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 2 cache entries (10 B)"))
+        .stdout(predicate::str::contains("Raw downloads (--ci): 2 (10 B)"));
+    for path in &downloads {
+        assert!(!path.exists(), "--ci kept {}", path.display());
+    }
+    assert!(kept.join("keep").join("DESCRIPTION").exists());
+}
+
+// Not on Windows: R detection there also probes the Program Files dirs,
+// which a test cannot hide.
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_cache_prune_keeps_extracts_when_no_r_is_found() {
+    let home = TempDir::new().unwrap();
+    seed_prune_fixture(home.path());
+    fs::remove_dir_all(home.path().join("r-versions")).unwrap();
+    let no_r = TempDir::new().unwrap();
+
+    prune_cmd(home.path())
+        .env("PATH", no_r.path())
+        .args(["cache", "prune"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No R installation found"))
+        .stdout(predicate::str::contains("Pruned 2 cache entries (13 B)"))
+        .stdout(predicate::str::contains("not installed").not());
+
+    let packages = home.path().join("packages");
+    assert!(packages.join(format!("old-1.0-{PRUNE_HEX}")).exists());
+    assert!(packages.join(format!("keep-1.0-{PRUNE_HEX}")).exists());
+    assert!(!home.path().join("cache").join(".uvr-dl-x1y2z3").exists());
+}
+
+/// Regression: a sync after a prune still gets every untouched package from
+/// the cache. Runs a real, fully cached `uvr sync` against a fake managed R
+/// (a shell script), so it needs no R and no network.
+#[cfg(unix)]
+#[test]
+fn test_sync_after_cache_prune_still_hits_the_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    seed_prune_fixture(home.path());
+    let r_home = home.path().join("r-versions").join("4.5.3");
+    let r_bin = r_home.join("bin").join("R");
+    fs::write(&r_bin, "#!/bin/sh\necho 4.5.3\n").unwrap();
+    fs::set_permissions(&r_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The entry sync looks up for `fakepkg` under this R: a source build,
+    // keyed on the managed R's libR.
+    let libr = r_home.join("lib").join(if cfg!(target_os = "macos") {
+        "libR.dylib"
+    } else {
+        "libR.so"
+    });
+    let key = uvr_core::installer::package_cache::cache_key(
+        "fakepkg",
+        "1.0",
+        Some("md5:0123"),
+        "4.5",
+        false,
+        Some(&libr),
+        None,
+    );
+    let entry = home.path().join("packages").join(&key);
+    fs::create_dir_all(entry.join("fakepkg")).unwrap();
+    fs::write(
+        entry.join("fakepkg").join("DESCRIPTION"),
+        "Package: fakepkg\nVersion: 1.0\n",
+    )
+    .unwrap();
+    fs::write(entry.join(".uvr-meta"), "r_minor=4.5\nkind=source\n").unwrap();
+
+    let project = TempDir::new().unwrap();
+    fs::write(
+        project.path().join("uvr.toml"),
+        "[project]\nname = \"demo\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("uvr.lock"),
+        "[r]\nversion = \"4.5.3\"\n\n[[package]]\nname = \"fakepkg\"\n\
+         version = \"1.0\"\nsource = \"cran\"\nchecksum = \"md5:0123\"\n",
+    )
+    .unwrap();
+    // A companion package built for this R, so sync does not download one.
+    let companion = project.path().join(".uvr").join("library").join("uvr");
+    fs::create_dir_all(&companion).unwrap();
+    fs::write(
+        companion.join("DESCRIPTION"),
+        "Package: uvr\nBuilt: R 4.5.3; ; 2026-01-01; unix\n",
+    )
+    .unwrap();
+
+    // PATH holds only the fake R, so no system R is found.
+    let path = r_home.join("bin");
+    prune_cmd(home.path())
+        .env("PATH", &path)
+        .args(["cache", "prune"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Pruned 3 cache entries"));
+    assert!(entry.join("fakepkg").join("DESCRIPTION").exists());
+
+    prune_cmd(home.path())
+        .env("PATH", &path)
+        .current_dir(project.path())
+        .args(["sync"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("100% cache hit"));
+    assert!(project
+        .path()
+        .join(".uvr")
+        .join("library")
+        .join("fakepkg")
+        .join("DESCRIPTION")
+        .exists());
+}
+
 // ─── help ──────────────────────────────────────────────────
 
 #[test]

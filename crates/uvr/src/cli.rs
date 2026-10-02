@@ -540,6 +540,22 @@ pub enum CacheCommands {
     /// Remove cached package downloads and extracted packages
     /// (everything by default; use --package / --r-version to filter)
     Clean(CacheCleanArgs),
+
+    /// Remove only unused cache entries: leftovers from interrupted installs,
+    /// and extracted packages built for an R minor version that is not installed
+    Prune(CachePruneArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CachePruneArgs {
+    /// List what would be removed, and remove nothing
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Also remove the raw download cache and keep the extracted packages
+    /// (like `uv cache prune --ci`), before a CI job saves its cache
+    #[arg(long)]
+    pub ci: bool,
 }
 
 #[derive(Debug, Args)]

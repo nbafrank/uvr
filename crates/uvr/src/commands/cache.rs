@@ -1,8 +1,11 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use uvr_core::installer::package_cache::{self, dir_size};
+use uvr_core::r_version::detector;
 
 use crate::ui;
 
@@ -315,6 +318,319 @@ fn remove_matching_package_entries(
     Ok(outcome)
 }
 
+/// A leftover younger than this can belong to a `uvr sync` that is still
+/// running: a live download or cache store looks the same as a crashed one.
+const ORPHAN_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Why `uvr cache prune` removes an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PruneReason {
+    /// Left behind by an interrupted download or cache store.
+    Orphan,
+    /// Extracted package built for an R minor version that is not installed.
+    StaleR,
+    /// Raw download cache file (only with `--ci`).
+    Download,
+}
+
+impl PruneReason {
+    fn label(self) -> &'static str {
+        match self {
+            PruneReason::Orphan => "Leftovers of interrupted installs",
+            PruneReason::StaleR => "Extracted packages for R versions that are not installed",
+            PruneReason::Download => "Raw downloads (--ci)",
+        }
+    }
+}
+
+/// One cache entry that `uvr cache prune` removes.
+#[derive(Debug)]
+struct PruneEntry {
+    reason: PruneReason,
+    path: PathBuf,
+    bytes: u64,
+}
+
+/// What a scan of the two caches found.
+#[derive(Debug, Default)]
+struct PrunePlan {
+    entries: Vec<PruneEntry>,
+    /// Extracted-package entries without R-version metadata (created by an
+    /// older uvr). Their R version is unknown, so they are kept.
+    legacy_skipped: u64,
+    /// Temp files and staging dirs younger than the age limit. A running
+    /// sync can own them, so they are kept.
+    young_skipped: u64,
+}
+
+/// `uvr cache prune [--dry-run] [--ci]`.
+///
+/// Removes only entries that no sync can use: leftovers of interrupted
+/// downloads and cache stores, and extracted packages built for an R minor
+/// version that uvr cannot find on this machine. `--ci` also removes the raw
+/// download cache files. Reports the count and bytes for each category.
+pub fn run_prune(dry_run: bool, ci: bool) -> Result<()> {
+    let mut installed: Vec<String> = detector::find_all()
+        .iter()
+        .map(|r| normalize_r_minor(&r.version))
+        .collect();
+    installed.sort();
+    installed.dedup();
+    if installed.is_empty() {
+        // With no R found, every extract would look stale.
+        ui::warn(
+            "No R installation found; keeping all extracted packages. \
+             Install R (or load its module), then prune again to remove extracts for old R versions",
+        );
+    } else {
+        ui::info(format!(
+            "Installed R: {} (extracted packages for other R versions are unused)",
+            installed.join(", ")
+        ));
+    }
+
+    let plan = plan_prune(
+        &uvr_core::env_vars::cache_dir_or_temp(),
+        &package_cache::global_packages_dir(),
+        &installed,
+        ci,
+        ORPHAN_MIN_AGE,
+    )?;
+
+    let mut reasons = vec![PruneReason::Orphan];
+    if !installed.is_empty() {
+        reasons.push(PruneReason::StaleR);
+    }
+    if ci {
+        reasons.push(PruneReason::Download);
+    }
+
+    let (entries, failed) = if dry_run {
+        (plan.entries, RemovalFailures::new())
+    } else {
+        remove_planned(plan.entries)
+    };
+    for (path, err) in &failed {
+        ui::warn(format!("Failed to remove {}: {err}", path.display()));
+    }
+    if entries.is_empty() && !failed.is_empty() {
+        let noun = if failed.len() == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        anyhow::bail!(
+            "Could not remove {} cache {noun}; see the warnings above",
+            failed.len()
+        );
+    }
+
+    let bytes: u64 = entries.iter().map(|e| e.bytes).sum();
+    let summary = format!(
+        "{} cache {} ({})",
+        entries.len(),
+        if entries.len() == 1 {
+            "entry"
+        } else {
+            "entries"
+        },
+        ui::palette::format_bytes(bytes)
+    );
+    if dry_run {
+        ui::info(format!("Dry run: would prune {summary}"));
+    } else {
+        ui::success(format!("Pruned {summary}"));
+    }
+    for reason in reasons {
+        let (count, bytes) = tally(&entries, reason);
+        ui::bullet(format!(
+            "{}: {count} ({})",
+            reason.label(),
+            ui::palette::format_bytes(bytes)
+        ));
+    }
+    if dry_run && !entries.is_empty() {
+        ui::info("Would remove:");
+        for entry in &entries {
+            ui::bullet_dim(format!(
+                "{} ({})",
+                entry.path.display(),
+                ui::palette::format_bytes(entry.bytes)
+            ));
+        }
+    }
+    if plan.legacy_skipped > 0 {
+        let noun = if plan.legacy_skipped == 1 {
+            "entry"
+        } else {
+            "entries"
+        };
+        ui::info(format!(
+            "Kept {} legacy {noun} without R-version metadata \
+             (created by an older uvr; use `uvr cache clean --package` or a full clean to remove them)",
+            plan.legacy_skipped
+        ));
+    }
+    if plan.young_skipped > 0 {
+        ui::info(format!(
+            "Kept {} leftover(s) changed less than an hour ago (a running sync can still use them)",
+            plan.young_skipped
+        ));
+    }
+    Ok(())
+}
+
+/// Count and total bytes of the `entries` with `reason`.
+fn tally(entries: &[PruneEntry], reason: PruneReason) -> (u64, u64) {
+    entries
+        .iter()
+        .filter(|e| e.reason == reason)
+        .fold((0, 0), |(count, bytes), e| (count + 1, bytes + e.bytes))
+}
+
+/// Find what `uvr cache prune` removes, without removing anything.
+///
+/// Download cache (top-level regular files only; directories such as
+/// `with-envs/` and symlinks are never candidates):
+/// - `.uvr-dl-*` files: partial downloads (`download_one`'s temp files);
+/// - `*.sha256` sidecars whose tarball is gone;
+/// - with `ci`, every other file too.
+///
+/// Extracted-package cache (real directories only):
+/// - `.tmp*` directories: staging dirs of an interrupted
+///   `package_cache::store` (tempfile's default prefix);
+/// - cache entries whose recorded R minor is not in `installed_r_minors`.
+///   An empty `installed_r_minors` means no R was found, and then no entry
+///   counts as stale (otherwise every entry would).
+///
+/// Temp files and staging dirs younger than `min_age` are kept: they can
+/// belong to a sync that is still running.
+fn plan_prune(
+    cache_dir: &Path,
+    packages_dir: &Path,
+    installed_r_minors: &[String],
+    ci: bool,
+    min_age: Duration,
+) -> Result<PrunePlan> {
+    let mut plan = PrunePlan::default();
+
+    if cache_dir.exists() {
+        let files: Vec<(PathBuf, std::fs::Metadata)> = std::fs::read_dir(cache_dir)
+            .with_context(|| format!("Cannot read cache dir {}", cache_dir.display()))?
+            .flatten()
+            // DirEntry::file_type does not follow symlinks.
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_file()))
+            .filter_map(|e| Some((e.path(), e.metadata().ok()?)))
+            .collect();
+        // `download_one` names a sidecar `<tarball>.with_extension("sha256")`.
+        let is_sidecar = |p: &Path| p.extension().is_some_and(|ext| ext == "sha256");
+        let live_sidecars: HashSet<PathBuf> = files
+            .iter()
+            .filter(|(p, _)| !is_sidecar(p))
+            .map(|(p, _)| p.with_extension("sha256"))
+            .collect();
+        for (path, meta) in files {
+            let is_partial = path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(".uvr-dl-"));
+            let reason = if is_partial {
+                if !is_older_than(&meta, min_age) {
+                    plan.young_skipped += 1;
+                    continue;
+                }
+                PruneReason::Orphan
+            } else if is_sidecar(&path) && !live_sidecars.contains(&path) {
+                PruneReason::Orphan
+            } else if ci {
+                PruneReason::Download
+            } else {
+                continue;
+            };
+            plan.entries.push(PruneEntry {
+                reason,
+                bytes: meta.len(),
+                path,
+            });
+        }
+    }
+
+    if packages_dir.exists() {
+        for entry in std::fs::read_dir(packages_dir)
+            .with_context(|| format!("Cannot read package cache dir {}", packages_dir.display()))?
+            .flatten()
+        {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let path = entry.path();
+            let reason = if name.starts_with(".tmp") {
+                if !entry.metadata().is_ok_and(|m| is_older_than(&m, min_age)) {
+                    plan.young_skipped += 1;
+                    continue;
+                }
+                PruneReason::Orphan
+            } else if !installed_r_minors.is_empty()
+                && package_cache::package_name_from_key(name).is_some()
+            {
+                match package_cache::read_entry_meta(&path) {
+                    Some(meta) if !installed_r_minors.contains(&meta.r_minor) => {
+                        PruneReason::StaleR
+                    }
+                    Some(_) => continue,
+                    None => {
+                        plan.legacy_skipped += 1;
+                        continue;
+                    }
+                }
+            } else {
+                continue;
+            };
+            plan.entries.push(PruneEntry {
+                reason,
+                bytes: dir_size(&path),
+                path,
+            });
+        }
+    }
+
+    Ok(plan)
+}
+
+/// Whether `meta` was last modified at least `age` ago. A modification time
+/// in the future counts as new.
+fn is_older_than(meta: &std::fs::Metadata, age: Duration) -> bool {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|elapsed| elapsed >= age)
+}
+
+/// Remove the planned entries. Symlinks are unlinked, never followed:
+/// `symlink_metadata` does not follow one, and `remove_dir_all` does not
+/// follow the ones inside a tree. Returns the entries that were removed and
+/// the failures.
+fn remove_planned(entries: Vec<PruneEntry>) -> (Vec<PruneEntry>, RemovalFailures) {
+    let mut removed = Vec::new();
+    let mut failed = Vec::new();
+    for entry in entries {
+        let is_dir = std::fs::symlink_metadata(&entry.path).is_ok_and(|m| m.is_dir());
+        let result = if is_dir {
+            std::fs::remove_dir_all(&entry.path)
+        } else {
+            std::fs::remove_file(&entry.path)
+        };
+        match result {
+            Ok(()) => removed.push(entry),
+            Err(err) => failed.push((entry.path, err)),
+        }
+    }
+    (removed, failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +868,220 @@ mod tests {
             target.path().join("keep.txt").exists(),
             "symlink target contents must survive"
         );
+    }
+
+    /// A download cache and an extracted-package cache with one of each kind
+    /// of entry `uvr cache prune` has to tell apart. Returns the temp dir
+    /// guard, the download cache dir, and the package cache dir.
+    fn prune_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let packages = dir.path().join("packages");
+        std::fs::create_dir_all(cache.join("with-envs").join("abc123")).unwrap();
+        std::fs::write(cache.join("with-envs/abc123/lockfile"), "env").unwrap();
+        for (name, body) in [
+            // Tarballs and their sidecars, in each shape `with_extension` gives.
+            ("aaaaaaaa-rlang_1.1.4.tar.gz", "rlang"),
+            ("aaaaaaaa-rlang_1.1.4.tar.sha256", "sha-rlang"),
+            ("bbbbbbbb-cli_3.6.6.tgz", "cli"),
+            ("bbbbbbbb-cli_3.6.6.sha256", "sha-cli"),
+            // A GitHub tarball: its URL basename has no extension.
+            ("cccccccc-0123abcd", "gh"),
+            ("cccccccc-0123abcd.sha256", "sha-gh"),
+            // A valid download that was never extracted is not an orphan.
+            ("dddddddd-never_1.0.tar.gz", "never"),
+            ("cran-packages.txt", "index"),
+            // Orphans: a sidecar whose tarball is gone, a partial download.
+            ("eeeeeeee-gone_1.0.tar.sha256", "orphan"),
+            (".uvr-dl-AbC123", "partial"),
+        ] {
+            std::fs::write(cache.join(name), body).unwrap();
+        }
+
+        make_cache_entry(&packages, "rlang", "1.1.4", HEX32, Some("4.5"));
+        make_cache_entry(&packages, "old", "1.0", HEX32, Some("3.6"));
+        make_cache_entry(&packages, "legacy", "1.0", HEX32, None);
+        // Staging dir of an interrupted `package_cache::store`.
+        std::fs::create_dir_all(packages.join(".tmpStaging/pkg")).unwrap();
+        std::fs::write(
+            packages.join(".tmpStaging/pkg/DESCRIPTION"),
+            "Package: pkg\n",
+        )
+        .unwrap();
+        // Clutter that is not uvr's to judge.
+        std::fs::create_dir_all(packages.join("not-a-key")).unwrap();
+        std::fs::write(packages.join("junk.txt"), "junk").unwrap();
+        (dir, cache, packages)
+    }
+
+    /// The plan as `(reason, file name)` pairs, sorted by name.
+    fn planned(plan: &PrunePlan) -> Vec<(PruneReason, String)> {
+        let mut out: Vec<(PruneReason, String)> = plan
+            .entries
+            .iter()
+            .map(|e| {
+                let name = e.path.file_name().unwrap().to_string_lossy().to_string();
+                (e.reason, name)
+            })
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
+    fn minors(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn prune_plan_finds_only_orphans_and_extracts_for_missing_r() {
+        let (_dir, cache, packages) = prune_fixture();
+
+        let plan = plan_prune(&cache, &packages, &minors(&["4.5"]), false, Duration::ZERO).unwrap();
+
+        assert_eq!(
+            planned(&plan),
+            vec![
+                (PruneReason::Orphan, ".tmpStaging".to_string()),
+                (PruneReason::Orphan, ".uvr-dl-AbC123".to_string()),
+                (
+                    PruneReason::Orphan,
+                    "eeeeeeee-gone_1.0.tar.sha256".to_string()
+                ),
+                (PruneReason::StaleR, format!("old-1.0-{HEX32}")),
+            ]
+        );
+        assert_eq!(plan.legacy_skipped, 1, "entry without metadata is kept");
+        assert_eq!(plan.young_skipped, 0);
+        // Planning removes nothing: this is what --dry-run reports.
+        assert!(plan.entries.iter().all(|e| e.path.exists()));
+    }
+
+    #[test]
+    fn prune_removes_exactly_the_plan_and_tallies_bytes_per_category() {
+        let (_dir, cache, packages) = prune_fixture();
+
+        let plan = plan_prune(&cache, &packages, &minors(&["4.5"]), false, Duration::ZERO).unwrap();
+        let (removed, failed) = remove_planned(plan.entries);
+
+        assert!(failed.is_empty(), "unexpected failures: {failed:?}");
+        // "Package: pkg\n" (13) + "partial" (7) + "orphan" (6)
+        assert_eq!(tally(&removed, PruneReason::Orphan), (3, 26));
+        // "Package: old\n" (13) + "r_minor=3.6\nkind=binary\n" (24)
+        assert_eq!(tally(&removed, PruneReason::StaleR), (1, 37));
+        assert_eq!(tally(&removed, PruneReason::Download), (0, 0));
+        assert!(removed.iter().all(|e| !e.path.exists()));
+
+        for kept in [
+            cache.join("aaaaaaaa-rlang_1.1.4.tar.gz"),
+            cache.join("aaaaaaaa-rlang_1.1.4.tar.sha256"),
+            cache.join("bbbbbbbb-cli_3.6.6.tgz"),
+            cache.join("bbbbbbbb-cli_3.6.6.sha256"),
+            cache.join("cccccccc-0123abcd"),
+            cache.join("cccccccc-0123abcd.sha256"),
+            cache.join("dddddddd-never_1.0.tar.gz"),
+            cache.join("cran-packages.txt"),
+            cache.join("with-envs/abc123/lockfile"),
+            packages.join(format!("rlang-1.1.4-{HEX32}/rlang/DESCRIPTION")),
+            packages.join(format!("rlang-1.1.4-{HEX32}/.uvr-meta")),
+            packages.join(format!("legacy-1.0-{HEX32}/legacy/DESCRIPTION")),
+            packages.join("not-a-key"),
+            packages.join("junk.txt"),
+        ] {
+            assert!(kept.exists(), "{} must survive a prune", kept.display());
+        }
+    }
+
+    #[test]
+    fn prune_keeps_leftovers_that_a_running_sync_may_own() {
+        let (_dir, cache, packages) = prune_fixture();
+
+        // The fixture's temp file and staging dir are brand new.
+        let plan = plan_prune(&cache, &packages, &minors(&["4.5"]), false, ORPHAN_MIN_AGE).unwrap();
+
+        assert_eq!(
+            planned(&plan),
+            vec![
+                (
+                    PruneReason::Orphan,
+                    "eeeeeeee-gone_1.0.tar.sha256".to_string()
+                ),
+                (PruneReason::StaleR, format!("old-1.0-{HEX32}")),
+            ]
+        );
+        assert_eq!(plan.young_skipped, 2, "kept leftovers are reported");
+    }
+
+    #[test]
+    fn prune_with_no_r_found_keeps_every_extract() {
+        let (_dir, cache, packages) = prune_fixture();
+
+        // No R found: every entry would look stale, so none may count as stale.
+        let plan = plan_prune(&cache, &packages, &[], false, Duration::ZERO).unwrap();
+
+        assert_eq!(tally(&plan.entries, PruneReason::StaleR), (0, 0));
+        assert_eq!(tally(&plan.entries, PruneReason::Orphan).0, 3);
+        assert_eq!(plan.legacy_skipped, 0);
+    }
+
+    #[test]
+    fn prune_ci_drops_downloads_and_keeps_extracts() {
+        let (_dir, cache, packages) = prune_fixture();
+
+        let plan = plan_prune(&cache, &packages, &minors(&["4.5"]), true, Duration::ZERO).unwrap();
+        let (removed, failed) = remove_planned(plan.entries);
+
+        assert!(failed.is_empty(), "unexpected failures: {failed:?}");
+        // Every top-level file except the two orphans:
+        // 5 + 9 + 3 + 7 + 2 + 6 + 5 + 5 bytes.
+        assert_eq!(tally(&removed, PruneReason::Download), (8, 42));
+        assert_eq!(tally(&removed, PruneReason::Orphan).0, 3);
+        assert_eq!(tally(&removed, PruneReason::StaleR).0, 1);
+        let left: Vec<_> = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec!["with-envs"], "only with-envs/ stays");
+        assert!(cache.join("with-envs/abc123/lockfile").exists());
+        assert!(packages
+            .join(format!("rlang-1.1.4-{HEX32}/rlang/DESCRIPTION"))
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_never_follows_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let packages = dir.path().join("packages");
+        // Looks like a stale entry, but lives outside the cache.
+        let outside = make_cache_entry(dir.path(), "ext", "1.0", HEX32, Some("3.6"));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(dir.path().join("file.tar.gz"), "outside").unwrap();
+
+        let stale = make_cache_entry(&packages, "old", "1.0", HEX32, Some("3.6"));
+        std::os::unix::fs::symlink(&outside, packages.join(format!("lnk-1.0-{HEX32}"))).unwrap();
+        std::os::unix::fs::symlink(&outside, stale.join("escape")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("file.tar.gz"),
+            cache.join("aaaaaaaa-link_1.0.tar.gz"),
+        )
+        .unwrap();
+
+        let plan = plan_prune(&cache, &packages, &minors(&["4.5"]), true, Duration::ZERO).unwrap();
+        assert_eq!(
+            planned(&plan),
+            vec![(PruneReason::StaleR, format!("old-1.0-{HEX32}"))]
+        );
+
+        let (removed, failed) = remove_planned(plan.entries);
+        assert!(failed.is_empty(), "unexpected failures: {failed:?}");
+        assert_eq!(removed.len(), 1);
+        assert!(!stale.exists());
+        assert!(outside.join("ext/DESCRIPTION").exists());
+        assert!(dir.path().join("file.tar.gz").exists());
+        assert!(packages
+            .join(format!("lnk-1.0-{HEX32}"))
+            .symlink_metadata()
+            .is_ok());
     }
 }

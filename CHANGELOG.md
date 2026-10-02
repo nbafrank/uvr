@@ -97,6 +97,19 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **`uvr cache prune`** (#192). Reclaims cache space without the full
+  re-download that `uvr cache clean` causes for every project. It removes
+  only what no sync can use: partial downloads, `.sha256` sidecars whose
+  tarball is gone, and staging directories left by an interrupted install,
+  plus extracted packages built for an R minor version that uvr cannot find
+  on this machine. A download without an extract is kept. Leftovers changed
+  less than an hour ago are kept and reported, because a sync that is still
+  running has the same files. When uvr finds no R at all, it keeps every
+  extract. `--dry-run` lists each entry and removes
+  nothing; `--ci` (like `uv cache prune --ci`) also removes the raw download
+  cache and keeps the extracted packages. The output gives the count and the
+  bytes for each category.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`
