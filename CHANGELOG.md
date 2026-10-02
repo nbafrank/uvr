@@ -97,6 +97,22 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **Depend on a package you develop next to the project: `uvr add ../mypkg`**
+  (#188). An argument that starts with `.` or `/` (or is an absolute path)
+  is a local source directory; it is recorded as
+  `mypkg = { path = "../mypkg" }`, keyed by the DESCRIPTION `Package:` name
+  and relative to `uvr.toml` even when typed from a subdirectory. A bare
+  `name` or `owner/repo` keeps its old meaning, even if a directory of that
+  name exists. The lock records `source = "local:../mypkg"` with the
+  DESCRIPTION version, and its `Imports`/`Depends`/`LinkingTo` (and
+  `Remotes:`, as for a manifest git dependency) resolve like any other
+  package's. Sync builds the directory with `R CMD INSTALL` on every run,
+  so edits arrive without a version bump, and never puts it in the global
+  package cache or swaps it for a same-named binary. A missing directory or
+  one without a DESCRIPTION `Package:` fails with a clear error, and
+  `uvr sync --frozen` warns that such a lockfile is not reproducible on
+  other machines. `uvr export` writes renv's `Source: Local` record.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

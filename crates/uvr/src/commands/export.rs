@@ -146,6 +146,13 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             None
         };
 
+        // renv's own record for a local install: `RemoteType: local` with the
+        // directory in `RemoteUrl`.
+        let local_path = match &pkg.source {
+            PackageSource::Local { path } => Some(path.clone()),
+            _ => None,
+        };
+
         let entry = RenvPackage {
             package: pkg.name.clone(),
             version,
@@ -169,14 +176,17 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             remote_type: match (&git_url, git_host_info) {
                 (Some(_), _) => Some("git".to_string()),
                 (None, Some(_)) => Some("git2r".to_string()),
-                (None, None) => url_source.then(|| "url".to_string()),
+                (None, None) => url_source
+                    .then(|| "url".to_string())
+                    .or(local_path.as_ref().map(|_| "local".to_string())),
             },
             remote_url: git_url
                 .or_else(|| {
                     git_host_info
                         .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}"))
                 })
-                .or_else(|| pkg.url.clone().filter(|_| url_source)),
+                .or_else(|| pkg.url.clone().filter(|_| url_source))
+                .or(local_path),
         };
         packages.insert(pkg.name.clone(), entry);
     }
@@ -230,7 +240,7 @@ fn export_source_and_repository(src: &PackageSource) -> (String, Option<String>)
         // renv's own spelling for a git remote.
         PackageSource::Git { .. } => ("git".to_string(), None),
         PackageSource::Url => ("URL".to_string(), None),
-        PackageSource::Local => ("Local".to_string(), None),
+        PackageSource::Local { .. } => ("Local".to_string(), None),
         PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
     }
 }
@@ -787,6 +797,32 @@ mod tests {
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "pat-s");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "abc123");
+    }
+
+    #[test]
+    fn export_renv_local_package_matches_renvs_local_record() {
+        let lockfile = single_package_lockfile(LockedPackage {
+            name: "mypkg".into(),
+            version: "0.1.0".into(),
+            raw_version: Some("0.1-0".into()),
+            source: PackageSource::Local {
+                path: "../mypkg".into(),
+            },
+            checksum: None,
+            requires: vec![],
+            url: None,
+            system_requirements: None,
+            dev: false,
+            subdirectory: None,
+        });
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let pkg = &parsed["Packages"]["mypkg"];
+        assert_eq!(pkg["Source"], "Local");
+        assert_eq!(pkg["RemoteType"], "local");
+        assert_eq!(pkg["RemoteUrl"], "../mypkg");
+        assert_eq!(pkg["Version"], "0.1-0");
+        assert!(pkg.get("Repository").is_none(), "{pkg}");
     }
 
     #[test]

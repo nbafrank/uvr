@@ -91,7 +91,12 @@ pub enum PackageSource {
     /// A source tarball pinned by URL (#189). The tarball is in
     /// `LockedPackage.url`, its `sha256:` in `checksum`. Serializes as `"url"`.
     Url,
-    Local,
+    /// A package built from a local source directory. `path` is written as
+    /// it appears in `uvr.toml` (relative to the manifest, or absolute).
+    /// Serializes as `"local:<path>"`. Not reproducible across machines.
+    Local {
+        path: String,
+    },
     /// A custom CRAN-like repository (r-multiverse, r-universe, PPM, etc.)
     Custom {
         name: String,
@@ -116,7 +121,6 @@ impl<'de> Deserialize<'de> for PackageSource {
             "cran" => PackageSource::Cran,
             "bioconductor" => PackageSource::Bioconductor,
             "github" => PackageSource::GitHub,
-            "local" => PackageSource::Local,
             "url" => PackageSource::Url,
             _ => {
                 // `forgejo:<host>` with a non-empty host → Forgejo variant.
@@ -147,6 +151,16 @@ impl<'de> Deserialize<'de> for PackageSource {
                         });
                     }
                 }
+                // Same shape again for `local:<path>`. uvr never wrote the
+                // old bare `"local"`, so it (and `"local:"`) stays Custom
+                // instead of becoming a path that points at the project root.
+                if let Some(path) = s.strip_prefix("local:") {
+                    if !path.is_empty() {
+                        return Ok(PackageSource::Local {
+                            path: path.to_string(),
+                        });
+                    }
+                }
                 PackageSource::Custom { name: s }
             }
         })
@@ -163,7 +177,7 @@ impl std::fmt::Display for PackageSource {
             PackageSource::Gitlab { host } => write!(f, "gitlab:{host}"),
             PackageSource::Git { url } => write!(f, "git:{url}"),
             PackageSource::Url => write!(f, "url"),
-            PackageSource::Local => write!(f, "local"),
+            PackageSource::Local { path } => write!(f, "local:{path}"),
             PackageSource::Custom { name } => write!(f, "{name}"),
         }
     }
@@ -483,6 +497,51 @@ source = "gitlab:git.local:3000"
                      source = \"forgejo:codefloe.com\"\n";
         let lf: Lockfile = input.parse().unwrap();
         assert_eq!(lf.to_toml_string().unwrap(), input);
+    }
+
+    #[test]
+    fn round_trip_local_source() {
+        let input = r#"[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "local:../My Pkg"
+raw_version = "0.1-0"
+"#;
+        let lf: Lockfile = input.parse().expect("parse local source");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Local {
+                path: "../My Pkg".to_string()
+            }
+        );
+        // The relative path stays relative, spelled as written.
+        assert_eq!(lf.to_toml_string().unwrap(), input);
+
+        let abs = PackageSource::Local {
+            path: "/srv/pkgs/mypkg".to_string(),
+        };
+        assert_eq!(abs.to_string(), "local:/srv/pkgs/mypkg");
+    }
+
+    #[test]
+    fn bare_local_source_stays_readable_as_custom() {
+        // `Local` used to be a unit variant written as `"local"`. No code path
+        // ever produced it, but a lockfile that carries it must still parse
+        // and round-trip unchanged — without turning into an empty path.
+        for raw in ["local", "local:"] {
+            let input = format!(
+                "[r]\nversion = \"4.4.2\"\n\n[[package]]\nname = \"x\"\nversion = \"0.1.0\"\nsource = \"{raw}\"\n"
+            );
+            let lf: Lockfile = input.parse().expect("parse");
+            assert!(matches!(
+                lf.packages[0].source,
+                PackageSource::Custom { ref name } if name == raw
+            ));
+            assert_eq!(lf.to_toml_string().unwrap(), input);
+        }
     }
 
     #[test]

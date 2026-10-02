@@ -4,6 +4,7 @@ pub mod forgejo;
 pub mod git_generic;
 pub mod github;
 pub mod gitlab;
+pub mod local;
 pub mod p3m;
 pub mod p3m_status;
 pub mod url;

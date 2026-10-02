@@ -332,6 +332,216 @@ fn test_add_rejects_an_unsafe_subdirectory_fragment() {
     assert!(!content.contains("escape"), "{content}");
 }
 
+// ─── path dependencies (#188) ──────────────────────────────
+
+/// A project at `<tmp>/proj` with a pure-R package `tinypkg` checked out at
+/// `<tmp>/tiny-checkout` (the directory name is not the package name).
+fn project_with_sibling_package() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let pkg = dir.path().join("tiny-checkout");
+    fs::create_dir_all(pkg.join("R")).unwrap();
+    fs::write(
+        pkg.join("DESCRIPTION"),
+        "Package: tinypkg\nVersion: 0.1-0\nTitle: Tiny\nDescription: Tiny.\n\
+         License: MIT\nEncoding: UTF-8\n",
+    )
+    .unwrap();
+    fs::write(pkg.join("NAMESPACE"), "export(hello)\n").unwrap();
+    fs::write(
+        pkg.join("R").join("hello.R"),
+        "hello <- function() \"hello from tinypkg\"\n",
+    )
+    .unwrap();
+    uvr_cmd()
+        .args(["init", "proj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    dir
+}
+
+#[test]
+fn test_add_no_lock_records_a_manifest_relative_path_dependency() {
+    let dir = project_with_sibling_package();
+    let proj = dir.path().join("proj");
+    let sub = proj.join("analysis");
+    fs::create_dir(&sub).unwrap();
+
+    // Typed from a subdirectory: recorded relative to uvr.toml, keyed by
+    // the DESCRIPTION name.
+    uvr_cmd()
+        .args(["add", "--no-lock", "../../tiny-checkout"])
+        .current_dir(&sub)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tinypkg"));
+
+    let content = fs::read_to_string(proj.join("uvr.toml")).unwrap();
+    let m: uvr_core::manifest::Manifest = content.parse().unwrap();
+    assert_eq!(
+        m.dependencies["tinypkg"].path(),
+        Some("../tiny-checkout"),
+        "{content}"
+    );
+    assert!(!proj.join("uvr.lock").exists());
+}
+
+#[test]
+fn test_add_rejects_missing_and_non_package_directories() {
+    let dir = project_with_sibling_package();
+    let proj = dir.path().join("proj");
+    fs::create_dir(dir.path().join("not-a-package")).unwrap();
+    let before = fs::read_to_string(proj.join("uvr.toml")).unwrap();
+
+    for (spec, message) in [
+        ("../missing", "'../missing' does not exist"),
+        ("../not-a-package", "is not an R package"),
+    ] {
+        uvr_cmd()
+            .args(["add", "--no-lock", spec])
+            .current_dir(&proj)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(message));
+    }
+    assert_eq!(fs::read_to_string(proj.join("uvr.toml")).unwrap(), before);
+}
+
+#[test]
+fn test_add_does_not_treat_an_existing_directory_as_a_path_without_path_syntax() {
+    let dir = init_project("no-sniff");
+    // A checkout that happens to be named like a GitHub spec.
+    let checkout = dir.path().join("tidyverse").join("ggplot2");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::write(
+        checkout.join("DESCRIPTION"),
+        "Package: ggplot2\nVersion: 9.9.9\n",
+    )
+    .unwrap();
+
+    uvr_cmd()
+        .args(["add", "--no-lock", "tidyverse/ggplot2"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let m: uvr_core::manifest::Manifest = fs::read_to_string(dir.path().join("uvr.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(m.dependencies["ggplot2"].git(), Some("tidyverse/ggplot2"));
+    assert_eq!(m.dependencies["ggplot2"].path(), None);
+
+    // Only explicit path syntax selects the directory.
+    uvr_cmd()
+        .args(["add", "--no-lock", "./tidyverse/ggplot2"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let m: uvr_core::manifest::Manifest = fs::read_to_string(dir.path().join("uvr.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        m.dependencies["ggplot2"].path(),
+        Some("./tidyverse/ggplot2")
+    );
+}
+
+/// Hand-written manifest + lock for the sibling package, so the install
+/// needs no index fetch.
+fn write_local_lock(proj: &std::path::Path, path: &str) {
+    let mut toml = fs::read_to_string(proj.join("uvr.toml")).unwrap();
+    toml.push_str(&format!(
+        "\n[dependencies]\ntinypkg = {{ path = \"{path}\" }}\n"
+    ));
+    fs::write(proj.join("uvr.toml"), toml).unwrap();
+    fs::write(
+        proj.join("uvr.lock"),
+        format!(
+            "[r]\nversion = \"*\"\n\n[[package]]\nname = \"tinypkg\"\nversion = \"0.1.0\"\n\
+             source = \"local:{path}\"\nraw_version = \"0.1-0\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_sync_installs_a_path_package_from_its_directory() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = project_with_sibling_package();
+    let proj = dir.path().join("proj");
+    write_local_lock(&proj, "../tiny-checkout");
+
+    uvr_cmd()
+        .args(["sync"])
+        .current_dir(&proj)
+        .assert()
+        .success();
+    let installed = proj.join(".uvr/library/tinypkg");
+    assert!(installed.join("Meta/package.rds").exists());
+    let desc = fs::read_to_string(installed.join("DESCRIPTION")).unwrap();
+    assert!(desc.contains("Version: 0.1-0"), "{desc}");
+
+    // An edit without a version bump still reaches the library.
+    fs::write(
+        dir.path().join("tiny-checkout/R/hello.R"),
+        "hello <- function() \"edited\"\n",
+    )
+    .unwrap();
+    uvr_cmd()
+        .args(["sync"])
+        .current_dir(&proj)
+        .assert()
+        .success();
+    fs::write(proj.join("hello.R"), "cat(tinypkg::hello())\n").unwrap();
+    uvr_cmd()
+        .args(["run", "hello.R"])
+        .current_dir(&proj)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("edited"));
+}
+
+#[test]
+fn test_sync_fails_clearly_when_a_locked_path_is_missing() {
+    let dir = project_with_sibling_package();
+    let proj = dir.path().join("proj");
+    write_local_lock(&proj, "../moved-away");
+
+    // Fails before any download, whether or not R is installed.
+    uvr_cmd()
+        .args(["sync"])
+        .current_dir(&proj)
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("'../moved-away' does not exist")
+                .or(predicate::str::contains("R not found")),
+        );
+}
+
+#[test]
+fn test_frozen_sync_warns_that_a_path_lock_is_not_reproducible() {
+    let dir = project_with_sibling_package();
+    let proj = dir.path().join("proj");
+    // A missing directory makes the frozen re-resolve fail fast; the warning
+    // must already be out by then.
+    write_local_lock(&proj, "../moved-away");
+
+    uvr_cmd()
+        .args(["sync", "--frozen"])
+        .current_dir(&proj)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "uvr.lock contains local path dependencies (tinypkg); it is not reproducible \
+             across machines",
+        ));
+}
+
 // ─── import ────────────────────────────────────────────────
 
 #[test]
