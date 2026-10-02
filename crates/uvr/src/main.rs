@@ -207,6 +207,12 @@ async fn run() -> Result<()> {
             Some(RCommands::Javareconf) => {
                 commands::r_cmd::javareconf::run()?;
             }
+            Some(RCommands::Dir) => {
+                commands::r_cmd::dir::run()?;
+            }
+            Some(RCommands::Find(args)) => {
+                commands::r_cmd::find::run(args.constraint)?;
+            }
             None => {
                 ui::welcome_group(
                     "r",
@@ -217,6 +223,8 @@ async fn run() -> Result<()> {
                         ("uvr r list", "List installed R versions"),
                         ("uvr r use <ver>", "Set the R version constraint"),
                         ("uvr r pin <ver>", "Write an exact R version to .r-version"),
+                        ("uvr r dir", "Print the managed R install directory"),
+                        ("uvr r find [constraint]", "Print the path to a matching R"),
                     ],
                 );
             }
@@ -224,6 +232,12 @@ async fn run() -> Result<()> {
         Commands::Cache(cache_args) => match cache_args.command {
             Some(CacheCommands::Clean(args)) => {
                 commands::cache::run_clean(&args.packages, &args.r_versions)?;
+            }
+            Some(CacheCommands::Dir) => {
+                commands::cache::run_dir()?;
+            }
+            Some(CacheCommands::Size) => {
+                commands::cache::run_size();
             }
             None => {
                 ui::welcome_group(
@@ -239,6 +253,8 @@ async fn run() -> Result<()> {
                             "uvr cache clean --r-version <minor>",
                             "Remove package entries built for an R minor version",
                         ),
+                        ("uvr cache dir", "Print the download cache directory"),
+                        ("uvr cache size", "Print the total cache size"),
                     ],
                 );
             }

@@ -276,6 +276,8 @@ or to the repository root.
 | `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
 | `uvr r use <ver>` | Set R version constraint in `uvr.toml` |
 | `uvr r pin <ver>` | Write exact version to `.r-version` |
+| `uvr r dir` | Print the managed R install directory (`~/.uvr/r-versions/`, or `UVR_R_INSTALL_DIR`) |
+| `uvr r find [constraint]` | Print the path to the newest R that satisfies the constraint; with no constraint, the R the project uses. Exits non-zero if none matches |
 | `uvr export` | Export lockfile to renv.lock format |
 | `uvr export -o renv.lock` | Export to a file |
 | `uvr import` | Import packages from an renv.lock file |
@@ -286,6 +288,8 @@ or to the repository root.
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+| `uvr cache dir` | Print the download cache directory (`~/.uvr/cache/`, or `UVR_CACHE_DIR`) |
+| `uvr cache size` | Print the total size of the download and extracted-package caches, as `uvr doctor` reports them |
 
 ---
 

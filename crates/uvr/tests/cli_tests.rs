@@ -263,6 +263,80 @@ fn test_r_install_rejects_an_empty_install_dir() {
 }
 
 #[test]
+fn test_r_dir_prints_the_install_dir_override() {
+    // #191: stdout is the bare path, so `$(uvr r dir)` works in scripts.
+    let root = TempDir::new().unwrap();
+    uvr_cmd()
+        .env("UVR_R_INSTALL_DIR", root.path())
+        .args(["r", "dir"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", root.path().display()));
+}
+
+/// A fake uvr-managed R at `<root>/<version>/bin/R` that answers uvr's
+/// version query (`query_r_version` takes the last version-shaped line).
+#[cfg(unix)]
+fn fake_managed_r(root: &std::path::Path, version: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.join(version).join("bin").join("R");
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::write(&bin, format!("#!/bin/sh\necho {version}\n")).unwrap();
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_find_prints_the_r_that_satisfies_a_constraint() {
+    // #191. Versions far above any real R, so the host's R never matches.
+    let root = TempDir::new().unwrap();
+    let old = fake_managed_r(root.path(), "9.8.0");
+    let new = fake_managed_r(root.path(), "9.9.1");
+    let find = |cwd: &std::path::Path, args: &[&str]| {
+        uvr_cmd()
+            .env("UVR_R_INSTALL_DIR", root.path())
+            .env_remove("R_HOME")
+            .current_dir(cwd)
+            .args(["r", "find"])
+            .args(args)
+            .assert()
+            .success()
+    };
+
+    let plain = TempDir::new().unwrap();
+    // No constraint, no project: the newest managed R.
+    find(plain.path(), &[]).stdout(format!("{}\n", new.display()));
+    find(plain.path(), &["<9.9"]).stdout(format!("{}\n", old.display()));
+
+    // A `.r-version` pin selects the R when no constraint is given ...
+    let pinned = TempDir::new().unwrap();
+    fs::write(pinned.path().join(".r-version"), "9.8.0\n").unwrap();
+    find(pinned.path(), &[]).stdout(format!("{}\n", old.display()));
+    // ... but never overrides an explicit constraint: the printed R must
+    // satisfy the constraint that was asked for.
+    find(pinned.path(), &[">=9.9"]).stdout(format!("{}\n", new.display()));
+}
+
+#[test]
+fn test_r_find_fails_when_no_r_satisfies_the_constraint() {
+    // #191: non-zero exit, nothing on stdout, and a message that names the
+    // constraint (or says no R exists at all, on a machine without R).
+    let root = TempDir::new().unwrap();
+    uvr_cmd()
+        .env("UVR_R_INSTALL_DIR", root.path())
+        .env_remove("R_HOME")
+        .args(["r", "find", ">=99.0"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(
+            predicate::str::contains("'>=99.0' not satisfied")
+                .or(predicate::str::contains("R not found")),
+        );
+}
+
+#[test]
 fn test_sync_without_lockfile_fails() {
     let dir = init_project("no-lock-test");
     uvr_cmd()
@@ -668,6 +742,52 @@ fn test_update_dry_run_on_empty_project() {
 }
 
 // ─── cache ─────────────────────────────────────────────────
+
+#[test]
+fn test_cache_dir_prints_only_the_path() {
+    // #191: bare path on stdout, also under `-q`, so `$(uvr cache dir)` works.
+    let cache = TempDir::new().unwrap();
+    for args in [&["cache", "dir"][..], &["-q", "cache", "dir"][..]] {
+        uvr_cmd()
+            .env("UVR_CACHE_DIR", cache.path())
+            .args(args)
+            .assert()
+            .success()
+            .stdout(format!("{}\n", cache.path().display()));
+    }
+}
+
+#[test]
+fn test_cache_size_matches_doctor() {
+    // #191: `cache size` is the sum of the two figures `uvr doctor` shows.
+    let home = TempDir::new().unwrap();
+    let cache = home.path().join("cache");
+    let packages = home.path().join("packages");
+    let entry = packages
+        .join("pkg-1.0-0123456789abcdef0123456789abcdef")
+        .join("pkg");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("aabbccdd-pkg_1.0.tar.gz"), vec![0u8; 2048]).unwrap();
+    fs::create_dir_all(&entry).unwrap();
+    fs::write(entry.join("libs.so"), vec![0u8; 3072]).unwrap();
+
+    let run = |args: &[&str]| {
+        uvr_cmd()
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("UVR_CACHE_DIR", &cache)
+            .env("UVR_PACKAGES_DIR", &packages)
+            .current_dir(home.path())
+            .args(args)
+            .assert()
+            .success()
+    };
+
+    run(&["cache", "size"]).stdout("5.0 KB\n");
+    run(&["doctor"])
+        .stdout(predicate::str::contains("1 file(s), 2.0 KB"))
+        .stdout(predicate::str::contains("1 entries, 3.0 KB"));
+}
 
 #[test]
 fn test_cache_clean() {

@@ -133,6 +133,47 @@ fn run_clean_filtered(packages: &[String], r_versions: &[String]) -> Result<()> 
     Ok(())
 }
 
+/// `uvr cache dir` — print the download cache directory and nothing else, so
+/// `$(uvr cache dir)` works in scripts.
+pub fn run_dir() -> Result<()> {
+    // Not `cache_dir_or_temp`: its HOME-less warning goes through tracing,
+    // which writes to stdout and would end up inside `$(uvr cache dir)`.
+    let dir = uvr_core::env_vars::cache_dir()
+        .context("Cannot determine the cache directory: HOME is not set. Set UVR_CACHE_DIR.")?;
+    println!("{}", dir.display());
+    Ok(())
+}
+
+/// `uvr cache size` — print the combined size of the download cache and the
+/// extracted-package cache. Both figures come from the helpers `uvr doctor`
+/// uses, so the two commands always agree.
+pub fn run_size() {
+    let downloads = uvr_core::env_vars::cache_dir()
+        .map(|dir| download_cache_stats(&dir).1)
+        .unwrap_or(0);
+    let (_, packages) = package_cache::cache_stats();
+    println!("{}", ui::palette::format_bytes(downloads + packages));
+}
+
+/// File count and total bytes of the top-level files in the download cache.
+/// Subdirectories (such as `with-envs/` from `uvr run --with`) are not
+/// counted. Shared by `uvr doctor` and `uvr cache size`.
+pub fn download_cache_stats(dir: &Path) -> (usize, u64) {
+    let mut count = 0usize;
+    let mut size = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    count += 1;
+                    size += meta.len();
+                }
+            }
+        }
+    }
+    (count, size)
+}
+
 /// Reduce an R version to its minor series ("4.5.3" → "4.5"). Values without
 /// at least three dot-separated components are returned unchanged.
 fn normalize_r_minor(version: &str) -> String {
@@ -352,6 +393,19 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(bytes, 0);
         assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn download_cache_stats_counts_top_level_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("abcd1234-rlang_1.1.4.tar.gz"), b"rlang").unwrap();
+        std::fs::write(dir.path().join("p3m-4.5-x.txt"), b"idx").unwrap();
+        let nested = dir.path().join("with-envs").join("abc123");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("lockfile"), b"not counted").unwrap();
+
+        assert_eq!(download_cache_stats(dir.path()), (2, 8));
+        assert_eq!(download_cache_stats(&dir.path().join("missing")), (0, 0));
     }
 
     #[test]

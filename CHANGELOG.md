@@ -97,6 +97,17 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **`uvr cache dir`, `uvr cache size`, `uvr r dir` and `uvr r find
+  [constraint]`** (#191). Small read-only commands, like `uv cache dir/size`
+  and `uv python dir/find`, for scripts, CI, and debugging somebody else's
+  setup. Each prints only the path or size on stdout, so `$(uvr r find)`
+  works. `cache size` adds up the two figures `uvr doctor` shows. `r dir`
+  honours `UVR_R_INSTALL_DIR`. `r find` prints the newest working R that
+  satisfies the constraint. It ignores a `.r-version` pin here, so the
+  printed R always satisfies the constraint. With no constraint it prints the R the project uses (pin, then the
+  `uvr.toml` constraint, then the newest R). It exits non-zero when no
+  installed R matches.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

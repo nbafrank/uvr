@@ -466,6 +466,20 @@ pub enum RCommands {
 
     /// Run `sudo R CMD javareconf` against the project's managed R to register the JVM
     Javareconf,
+
+    /// Print the directory that uvr-managed R versions are installed in (like uv python dir)
+    Dir,
+
+    /// Print the path to the R binary that satisfies a constraint (like uv python find)
+    Find(RFindArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RFindArgs {
+    /// R version constraint to satisfy, e.g. ">=4.3" or "4.4.2".
+    /// If omitted, prints the R the current project uses: the `.r-version`
+    /// pin, then the uvr.toml constraint, then the newest installed R.
+    pub constraint: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -540,6 +554,12 @@ pub enum CacheCommands {
     /// Remove cached package downloads and extracted packages
     /// (everything by default; use --package / --r-version to filter)
     Clean(CacheCleanArgs),
+
+    /// Print the download cache directory (UVR_CACHE_DIR)
+    Dir,
+
+    /// Print the size of the download and extracted-package caches, as `uvr doctor` reports them
+    Size,
 }
 
 #[derive(Debug, Args)]

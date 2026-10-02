@@ -1,3 +1,5 @@
+pub mod dir;
+pub mod find;
 pub mod install;
 pub mod javareconf;
 pub mod list;

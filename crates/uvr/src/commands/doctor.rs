@@ -385,7 +385,7 @@ fn check_project(issues: &mut Vec<String>) {
 fn check_cache() {
     let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_default();
     if cache_dir.exists() {
-        let (count, size) = dir_stats(&cache_dir);
+        let (count, size) = crate::commands::cache::download_cache_stats(&cache_dir);
         ui::check(
             true,
             "Downloads",
@@ -426,22 +426,6 @@ fn simple_check(name: &str, ok: bool, note: Option<&str>) {
         }
     };
     ui::check(ok, name, status, LABEL_W);
-}
-
-fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
-    let mut count = 0usize;
-    let mut size = 0u64;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    count += 1;
-                    size += meta.len();
-                }
-            }
-        }
-    }
-    (count, size)
 }
 
 fn check_env_vars() {
