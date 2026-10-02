@@ -332,16 +332,32 @@ v Installed 2 package(s) in 1.75s
 You are epic!
 ```
 
-The dependencies install into a cached environment keyed by the dependency
-set, so the second run of that script — or any other script wanting the same
-packages — starts immediately. Nothing is written next to the script.
+Each entry takes the same specs as `uvr add`, so a shared script can pin
+what it needs:
+
+```r
+# /// script
+# dependencies = [
+#   "ggplot2>=3.4",                        # version constraint (or ggplot2@>=3.4)
+#   "DESeq2 (bioc)",                       # Bioconductor — the header's --bioc
+#   "rladies/praise@v1.0.0",               # GitHub, optional @ref
+#   "forgejo::codeberg.org/owner/pkg",     # Forgejo
+#   "gitlab::gitlab.com/group/pkg@main",   # GitLab
+# ]
+# ///
+```
+
+The dependencies install into a cached environment keyed by the R version
+and the full specs, so the second run of that script — or any other script
+wanting the same packages — starts immediately, while two headers that differ
+only by a version or ref get separate environments. Nothing is written next
+to the script.
 
 The header is the R analogue of Python's [PEP 723](https://peps.python.org/pep-0723/)
-inline script metadata, which `uv run` uses. It must start at column zero,
-may follow a shebang or banner comment, and takes plain package names today
-(version constraints, Bioconductor and git sources are planned). A malformed
-or duplicated header is an error naming the file and the problem, never
-silently ignored.
+inline script metadata, which `uv run` uses. It must start at column zero and
+may follow a shebang or banner comment. A malformed or duplicated header, or
+an entry `uvr add` would refuse, is an error naming the file and the problem,
+never silently ignored.
 
 Scripts run isolated from any project you happen to be standing in: the
 project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,

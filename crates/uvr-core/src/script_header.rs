@@ -8,8 +8,9 @@
 //! ```r
 //! # /// script
 //! # dependencies = [
-//! #   "ggplot2",
-//! #   "dplyr",
+//! #   "ggplot2>=3.4",
+//! #   "DESeq2 (bioc)",
+//! #   "tidyverse/ggplot2@main",
 //! # ]
 //! # ///
 //!
@@ -30,14 +31,16 @@
 //! silently discard the later block — a stale header surviving a bad merge
 //! is exactly how that bites.
 //!
-//! This is the first slice (#181): plain package names only. Version
-//! constraints, Bioconductor and git sources arrive with #182, and the `r`
-//! version pin with #183 — both are rejected or warned about here rather
-//! than accepted and quietly misread.
+//! Each entry is a dependency spec in the grammar `uvr add` takes
+//! ([`crate::dep_spec`]), so a header can pin versions and name
+//! Bioconductor or git sources (#182). The `r` version pin arrives with
+//! #183 and is only captured here.
 
 use serde::Deserialize;
 
+use crate::dep_spec;
 use crate::error::{Result, UvrError};
+use crate::manifest::DependencySpec;
 
 /// Opens the block. Matched exactly, ignoring only trailing whitespace.
 const FENCE_OPEN: &str = "# /// script";
@@ -45,33 +48,27 @@ const FENCE_OPEN: &str = "# /// script";
 const FENCE_CLOSE: &str = "# ///";
 
 /// The declarations parsed out of a script's inline header.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScriptHeader {
+    /// `(package name, spec)` pairs in the order written — the same shape
+    /// `uvr add` produces.
+    pub dependencies: Vec<(String, DependencySpec)>,
+
+    /// R version constraint. Parsed but not yet acted on — see [`parse`].
+    pub r: Option<String>,
+}
+
+/// The header's TOML as written, before its specs are parsed.
 ///
 /// Unknown keys are ignored rather than rejected, so a script written for a
 /// newer uvr still runs on an older one instead of failing on a key it hasn't
 /// learned yet.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub struct ScriptHeader {
-    /// Package names, in the order written.
+#[derive(Deserialize)]
+struct RawHeader {
     #[serde(default)]
-    pub dependencies: Vec<String>,
-
-    /// R version constraint. Parsed but not yet acted on — see [`parse`].
+    dependencies: Vec<String>,
     #[serde(default)]
-    pub r: Option<String>,
-}
-
-/// True for a bare R package name — a letter, then letters, digits and dots.
-///
-/// The rule *Writing R Extensions* sets, and the whole grammar this slice
-/// accepts. Anything else (`ggplot2>=3.4`, `DESeq2 (bioc)`, `user/repo@ref`)
-/// is a spec kind #182 introduces; accepting one now would send it to the
-/// resolver as a literal package name and produce a baffling
-/// "Package not found: ggplot2>=3.4" instead of naming the real problem.
-fn is_plain_package_name(spec: &str) -> bool {
-    let mut chars = spec.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '.')
-        && !spec.ends_with('.')
+    r: Option<String>,
 }
 
 /// Escape control characters so header-derived text is safe to print.
@@ -128,7 +125,7 @@ pub fn parse(source: &str) -> Result<Option<ScriptHeader>> {
     }
 
     let mut body = String::new();
-    let mut header: Option<ScriptHeader> = None;
+    let mut header: Option<RawHeader> = None;
     for line in lines.by_ref() {
         // Checked before the comment strip below, which would otherwise
         // consume the closing fence as a body line: `# ///` less its `# `
@@ -164,16 +161,16 @@ pub fn parse(source: &str) -> Result<Option<ScriptHeader>> {
         )));
     };
 
-    if let Some(bad) = header
-        .dependencies
-        .iter()
-        .find(|spec| !is_plain_package_name(spec))
-    {
-        return Err(parse_err(format!(
-            "`{bad}` is not a plain package name. Version constraints, \
-             Bioconductor and git sources in script headers are not \
-             supported yet (#182)"
-        )));
+    let mut dependencies = Vec::with_capacity(header.dependencies.len());
+    for spec in &header.dependencies {
+        // No part of any spec (name, version, host, ref) can hold a control
+        // character. Refusing them here keeps header text that *is* accepted
+        // from carrying a live escape sequence into later diagnostics — a
+        // resolver error echoes a spec's ref, for one.
+        if spec.chars().any(char::is_control) {
+            return Err(parse_err(format!("`{spec}` contains a control character")));
+        }
+        dependencies.push(dep_spec::parse(spec, false).map_err(|e| parse_err(e.to_string()))?);
     }
 
     // The rest of the file gets the same scan the opening fence did, so a
@@ -186,18 +183,31 @@ pub fn parse(source: &str) -> Result<Option<ScriptHeader>> {
         )));
     }
 
-    Ok(Some(header))
+    Ok(Some(ScriptHeader {
+        dependencies,
+        r: header.r,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The package names a header declares, in order.
     fn deps(source: &str) -> Vec<String> {
         parse(source)
             .expect("should parse")
             .expect("should have a header")
             .dependencies
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Parse a header holding the single entry `spec`.
+    fn one(spec: &str) -> Result<(String, DependencySpec)> {
+        let source = format!("# /// script\n# dependencies = [{spec:?}]\n# ///\n");
+        Ok(parse(&source)?.expect("a header").dependencies.remove(0))
     }
 
     #[test]
@@ -321,7 +331,10 @@ library(ggplot2)
         let source = "# /// script\n# r = \">=4.3\"\n# dependencies = [\"cli\"]\n# ///\n";
         let header = parse(source).unwrap().unwrap();
         assert_eq!(header.r.as_deref(), Some(">=4.3"));
-        assert_eq!(header.dependencies, vec!["cli"]);
+        assert_eq!(
+            header.dependencies,
+            vec![("cli".to_string(), DependencySpec::default())]
+        );
     }
 
     #[test]
@@ -333,24 +346,104 @@ library(ggplot2)
     }
 
     #[test]
-    fn specs_this_slice_cannot_honour_are_rejected_by_name() {
-        // Passing these through would reach the resolver as literal package
-        // names and fail with "Package not found: ggplot2>=3.4" — a message
-        // that describes neither the cause nor the fix.
-        for spec in [
-            "ggplot2>=3.4",
-            "DESeq2 (bioc)",
-            "tidyverse/ggplot2@main",
-            "forgejo::codeberg.org/o/r",
-            "",
+    fn a_plain_name_is_the_default_spec() {
+        // What `--with` passes too — and what the with-env cache key hashes
+        // as a bare name, so existing environments keep their keys (#182).
+        assert_eq!(
+            one("jsonlite").unwrap(),
+            ("jsonlite".to_string(), DependencySpec::default())
+        );
+    }
+
+    #[test]
+    fn a_version_constraint_is_kept() {
+        for spec in ["ggplot2>=3.4", "ggplot2 >=3.4", "ggplot2@>=3.4"] {
+            assert_eq!(
+                one(spec).unwrap(),
+                (
+                    "ggplot2".to_string(),
+                    DependencySpec::Version(">=3.4".to_string())
+                ),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bioc_entry_is_what_uvr_add_bioc_produces() {
+        let (name, spec) = one("DESeq2 (bioc)").unwrap();
+        assert_eq!(name, "DESeq2");
+        assert!(spec.is_bioc());
+        assert_eq!((name, spec), dep_spec::parse("DESeq2", true).unwrap());
+
+        let (_, spec) = one("DESeq2>=1.40 (bioc)").unwrap();
+        assert!(spec.is_bioc());
+        assert_eq!(spec.version_req(), Some(">=1.40"));
+    }
+
+    #[test]
+    fn git_entries_are_what_uvr_add_produces() {
+        for (spec, name, git, rev) in [
+            (
+                "tidyverse/ggplot2@main",
+                "ggplot2",
+                "tidyverse/ggplot2",
+                Some("main"),
+            ),
+            ("rladies/praise", "praise", "rladies/praise", None),
+            (
+                "forgejo::codeberg.org/owner/pkg@v1.0",
+                "pkg",
+                "forgejo::codeberg.org/owner/pkg",
+                Some("v1.0"),
+            ),
+            (
+                "gitlab::gitlab.com/group/sub/pkg@abc123",
+                "pkg",
+                "gitlab::gitlab.com/group/sub/pkg",
+                Some("abc123"),
+            ),
         ] {
-            let source = format!("# /// script\n# dependencies = [\"{spec}\"]\n# ///\n");
-            let err = match parse(&source) {
+            let parsed = one(spec).unwrap();
+            assert_eq!(parsed, dep_spec::parse(spec, false).unwrap(), "{spec}");
+            let (got_name, DependencySpec::Detailed(d)) = parsed else {
+                panic!("{spec}: expected a detailed spec");
+            };
+            assert_eq!(got_name, name, "{spec}");
+            assert_eq!(d.git.as_deref(), Some(git), "{spec}");
+            assert_eq!(d.rev.as_deref(), rev, "{spec}");
+        }
+
+        let (name, spec) = one("owner/repo@v2#subdirectory=pkgs/inner").unwrap();
+        assert_eq!(name, "inner");
+        assert_eq!(spec.subdirectory(), Some("pkgs/inner"));
+    }
+
+    #[test]
+    fn a_spec_uvr_add_refuses_is_a_header_error_saying_why() {
+        for (spec, why) in [
+            ("", "Invalid package name"),
+            ("ggplot2>>3", "Invalid version constraint"),
+            ("gitlab.com/user/repo", "Unsupported git host"),
+            ("user/repo (bioc)", "git source"),
+        ] {
+            let err = match one(spec) {
                 Err(e) => e.to_string(),
                 Ok(ok) => panic!("`{spec}` should be rejected, got {ok:?}"),
             };
-            assert!(err.contains("not a plain package name"), "got: {err}");
+            assert!(err.contains(why), "`{spec}`: {err}");
+            assert!(err.contains(spec), "`{spec}` not named: {err}");
         }
+    }
+
+    #[test]
+    fn an_accepted_spec_cannot_carry_a_control_character() {
+        // A git ref is free text as far as the spec grammar goes, and it is
+        // echoed back by resolver errors. Refused at the header instead.
+        let source = "# /// script\n# dependencies = [\"user/repo@\\u001b[31mmain\"]\n# ///\n";
+        let err = parse(source).unwrap_err().to_string();
+        assert!(err.contains("control character"), "{err}");
+        assert!(!err.contains('\u{1b}'), "raw ESC leaked: {err:?}");
     }
 
     #[test]

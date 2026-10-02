@@ -2052,12 +2052,11 @@ fn test_stray_code_inside_the_header_names_the_offending_line() {
 }
 
 #[test]
-fn test_a_spec_grammar_this_slice_cannot_honour_is_rejected() {
-    // Passing `ggplot2>=3.4` through would reach the resolver as a literal
-    // package name and fail with "Package not found: ggplot2>=3.4" plus a
-    // nonsense `uvr add cran/ggplot2>=3.4@master` suggestion — naming
-    // neither the cause nor the fix.
-    let dir = script_dir("# /// script\n# dependencies = [\"ggplot2>=3.4\"]\n# ///\n");
+fn test_a_bad_spec_in_a_script_header_is_named_before_any_install() {
+    // #182: header entries use `uvr add`'s grammar, and a spec it refuses is
+    // a header error naming the entry — not a semver error from deep in the
+    // resolver after the index downloads.
+    let dir = script_dir("# /// script\n# dependencies = [\"ggplot2>>3.4\"]\n# ///\n");
     uvr_cmd()
         .args(["run", "script.R"])
         .current_dir(dir.path())
@@ -2066,7 +2065,8 @@ fn test_a_spec_grammar_this_slice_cannot_honour_is_rejected() {
         .stderr(predicate::str::contains(
             "Invalid script header in script.R",
         ))
-        .stderr(predicate::str::contains("not a plain package name"));
+        .stderr(predicate::str::contains("Invalid version constraint"))
+        .stderr(predicate::str::contains("ggplot2>>3.4"));
 }
 
 #[test]
@@ -2196,6 +2196,70 @@ fn test_headered_script_runs_standalone_in_an_empty_directory() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"ok\""));
+}
+
+#[test]
+#[ignore = "requires network access to CRAN/P3M and a managed R"]
+fn test_headered_script_honours_a_version_constraint() {
+    // #182: the header pins a version. A satisfiable pin installs and runs;
+    // an unsatisfiable one must fail, which proves the constraint reaches
+    // the resolver rather than being dropped.
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir(
+        "# /// script\n\
+         # dependencies = [\"jsonlite>=1.8\"]\n\
+         # ///\n\
+         cat(as.character(packageVersion(\"jsonlite\") >= \"1.8\"))\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("TRUE"));
+
+    let impossible =
+        script_dir("# /// script\n# dependencies = [\"jsonlite>=999\"]\n# ///\nprint(1)\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(impossible.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("jsonlite"));
+}
+
+#[test]
+#[ignore = "requires network access to GitHub, CRAN/P3M and a managed R"]
+fn test_headered_script_installs_a_github_package() {
+    // #182: a header entry can name a git source, as `uvr add` can.
+    let cache = TempDir::new().unwrap();
+    // praise is on CRAN too, so a successful run alone would pass even if
+    // the header's source were ignored; the environment's lockfile says
+    // where the package came from.
+    let dir = script_dir(
+        "# /// script\n\
+         # dependencies = [\"rladies/praise\"]\n\
+         # ///\n\
+         cat(praise::praise(\"PRAISED ${adjective}\"))\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PRAISED"));
+
+    let envs: Vec<_> = fs::read_dir(cache.path().join("with-envs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(envs.len(), 1, "{envs:?}");
+    let lock = fs::read_to_string(envs[0].join("uvr.lock")).unwrap();
+    assert!(lock.contains("name = \"praise\""), "{lock}");
+    assert!(lock.contains("source = \"github\""), "{lock}");
 }
 
 #[test]

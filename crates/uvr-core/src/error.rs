@@ -18,6 +18,11 @@ pub enum UvrError {
     #[error("{0}")]
     ScriptHeaderParse(String),
 
+    /// A dependency spec (`uvr add` argument or script-header entry) is
+    /// malformed. Rendered bare: the message already quotes the spec.
+    #[error("{0}")]
+    InvalidDependencySpec(String),
+
     #[error("Package not found: {0}. If this package was recently archived from CRAN, try installing from the CRAN GitHub mirror: uvr add cran/{0}@master")]
     PackageNotFound(String),
 

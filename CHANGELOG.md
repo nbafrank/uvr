@@ -97,6 +97,17 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **Script headers take the full `uvr add` spec vocabulary** (#182). A
+  `# /// script` entry can now carry a version constraint (`"ggplot2>=3.4"`
+  or `"ggplot2@>=3.4"`), a Bioconductor marker (`"DESeq2 (bioc)"`), or a git
+  source (`"user/repo@ref"`, `forgejo::…`, `gitlab::…`), so a shared script
+  pins what it needs. The ephemeral environment is keyed on the full specs,
+  so headers differing only by version get separate environments, while
+  plain names keep their existing cache keys and no environment is rebuilt.
+  One parser now serves both, so `uvr add` accepts the `pkg>=1.0` and
+  `pkg (bioc)` spellings too and rejects a malformed version constraint
+  before it touches `uvr.toml`.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`
