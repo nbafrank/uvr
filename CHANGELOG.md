@@ -97,6 +97,16 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **Activating a uvr project no longer breaks a Python virtual environment's
+  `deactivate`** (#303). A shell has one function namespace, so uvr's
+  `deactivate` replaced the venv's, and removing uvr's on the way out left the
+  shell with no `deactivate` at all and the venv still active. The work now
+  lives in `uvr_deactivate`, which every activation defines. `deactivate` is
+  an alias for it, created only when no other tool owns that name; when one
+  does, uvr says which name to use instead. Re-sourcing the shim also unwinds
+  through `uvr_deactivate`, so it can never tear down a venv. Reported by
+  @davidorme.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

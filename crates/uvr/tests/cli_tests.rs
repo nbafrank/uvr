@@ -1833,6 +1833,60 @@ fn test_activate_emit_sh_is_valid_shell() {
 }
 
 #[test]
+fn test_activate_leaves_another_tools_deactivate_alone() {
+    // #303: a Python venv defines `deactivate`. uvr used to define its own
+    // over it, and `unset -f deactivate` on the way out then left the shell
+    // with no deactivate at all, and the venv still active.
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("venvclash");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "sh"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    fs::write(dir.path().join("emitted.sh"), &script).unwrap();
+    fs::write(
+        dir.path().join("drive.sh"),
+        r#"VIRTUAL_ENV=/fake/venv; export VIRTUAL_ENV
+deactivate() { echo "VENV-RAN"; unset VIRTUAL_ENV; unset -f deactivate; }
+. ./emitted.sh
+echo "ACTIVE=${R_LIBS_USER:-unset}"
+uvr_deactivate
+echo "AFTER_UVR libs=${R_LIBS_USER:-unset} venv=${VIRTUAL_ENV:-unset}"
+deactivate
+echo "AFTER_VENV venv=${VIRTUAL_ENV:-unset}"
+"#,
+    )
+    .unwrap();
+
+    let res = std::process::Command::new("sh")
+        .arg("./drive.sh")
+        .current_dir(dir.path())
+        .output()
+        .expect("run sh");
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(
+        stdout.contains("ACTIVE=") && !stdout.contains("ACTIVE=unset"),
+        "the project library was not applied:\n{stdout}"
+    );
+    // uvr's own name always works, and it restores only uvr's variables.
+    assert!(
+        stdout.contains("AFTER_UVR libs=unset venv=/fake/venv"),
+        "uvr_deactivate did not restore the shell, or touched the venv:\n{stdout}"
+    );
+    // The venv's function survived, so the user can still leave the venv.
+    assert!(
+        stdout.contains("VENV-RAN") && stdout.contains("AFTER_VENV venv=unset"),
+        "the venv's own deactivate was replaced:\n{stdout}{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+}
+
+#[test]
 fn test_activate_emit_every_shell_succeeds() {
     if !have_r() {
         eprintln!("skipping: no R on PATH");
