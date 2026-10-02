@@ -378,7 +378,8 @@ pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
 }
 
 fn query_r_version_uncached(binary: &std::path::Path) -> Option<String> {
-    let output = Command::new(binary)
+    let mut cmd = Command::new(binary);
+    cmd
         // When uvr runs inside an R session (RStudio terminal, `system("uvr …")`
         // from uvr-r), the enclosing session's R_HOME/R_LIBS* leak into this
         // spawn. The queried binary knows its own home; an inherited R_HOME
@@ -393,9 +394,10 @@ fn query_r_version_uncached(binary: &std::path::Path) -> Option<String> {
             "--slave",
             "-e",
             "cat(R.version$major, \".\", R.version$minor, sep='')",
-        ])
-        .output()
-        .ok()?;
+        ]);
+    // A busy executable would otherwise be memoized as "no R here" for the
+    // rest of the run (#301).
+    let output = crate::process::retry_text_file_busy(|| cmd.output()).ok()?;
     if !output.status.success() {
         return None;
     }
