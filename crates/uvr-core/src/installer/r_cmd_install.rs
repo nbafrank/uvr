@@ -145,8 +145,9 @@ impl RCmdInstall {
             }
             Ok(())
         })();
-        if result.is_err() {
-            cleanup_lock_dir(library, package_name);
+        match result {
+            Ok(()) => crate::installer::install_marker::mark(&library.join(package_name)),
+            Err(_) => cleanup_lock_dir(library, package_name),
         }
         result
     }
@@ -169,8 +170,9 @@ impl RCmdInstall {
     {
         let timeout = effective_install_timeout(timeout);
         let result = self.install_streaming_inner(tarball, library, package_name, timeout, on_line);
-        if result.is_err() {
-            cleanup_lock_dir(library, package_name);
+        match result {
+            Ok(()) => crate::installer::install_marker::mark(&library.join(package_name)),
+            Err(_) => cleanup_lock_dir(library, package_name),
         }
         result
     }
@@ -651,6 +653,49 @@ mod tests {
             |_| {},
         );
         assert!(result.is_ok(), "deadlocked or failed: {result:?}");
+    }
+
+    /// #255: a successful `R CMD INSTALL` stamps the package as uvr-installed,
+    /// on both the streaming (sync) and the quiet (companion) path.
+    #[cfg(unix)]
+    #[test]
+    fn successful_install_marks_the_package() {
+        use crate::installer::install_marker::is_marked;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fake_r = tmp.path().join("R");
+        // Fake `R CMD INSTALL --library=<lib> ...`: create the installed tree.
+        std::fs::write(
+            &fake_r,
+            "#!/bin/sh\n\
+             lib=\"${3#--library=}\"\n\
+             mkdir -p \"$lib/fake/Meta\"\n\
+             echo 'Package: fake' > \"$lib/fake/DESCRIPTION\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_r, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tarball = tmp.path().join("fake_1.0.tar.gz");
+        std::fs::write(&tarball, b"not a real tarball").unwrap();
+        let installer = RCmdInstall::new(fake_r.to_string_lossy().to_string());
+
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        installer
+            .install_streaming(
+                &tarball,
+                &lib,
+                "fake",
+                Some(Duration::from_secs(20)),
+                |_| {},
+            )
+            .unwrap();
+        assert!(is_marked(&lib.join("fake")));
+
+        let lib = tmp.path().join("lib2");
+        std::fs::create_dir_all(&lib).unwrap();
+        installer.install(&tarball, &lib, "fake").unwrap();
+        assert!(is_marked(&lib.join("fake")));
     }
 
     /// Regression for #113: on timeout, a build's grandchildren (make/cc/Rscript)

@@ -260,6 +260,7 @@ or to the repository root.
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
 | `uvr sync --no-companion` | Skip the uvr companion R package install |
 | `uvr sync --unattended` | CI mode: skip IDE config, companion, and working-tree writes |
+| `uvr sync --prune-all` | Also remove packages that are not in `uvr.lock` and that uvr did not install (by default, `sync` keeps packages that `install.packages()` or other tools put into the project library) |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |

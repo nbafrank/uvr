@@ -240,12 +240,26 @@ pub fn lookup(name: &str, key: &str) -> Option<PathBuf> {
     }
 }
 
-/// Attach a cached package directory to the project library.
+/// Attach a cached package directory to the project library, stamped as
+/// uvr-installed (#255).
 ///
+/// Entries stored since #255 already carry the marker, which the attach
+/// reproduces. An older entry gets it here: in the cache entry itself when
+/// the library holds a symlink to it, otherwise as a library-local file.
+pub fn clone_to_library(
+    cached_pkg_dir: &Path,
+    library: &Path,
+    package_name: &str,
+) -> std::io::Result<()> {
+    attach_to_library(cached_pkg_dir, library, package_name)?;
+    crate::installer::install_marker::mark(&library.join(package_name));
+    Ok(())
+}
+
 /// See module docs for the per-platform strategy. On any attach-time failure
 /// (clonefile rejects a non-APFS volume, symlink creation hits a weird FS)
 /// we silently fall back to a recursive copy so sync always makes progress.
-pub fn clone_to_library(
+fn attach_to_library(
     cached_pkg_dir: &Path,
     library: &Path,
     package_name: &str,
@@ -1304,5 +1318,32 @@ mod tests {
 
         assert!(dst.join("DESCRIPTION").exists());
         assert!(dst.join("R/foo.R").exists());
+    }
+
+    /// #255: a warm cache hit stamps the attached package as uvr-installed,
+    /// including one attached from an entry stored before the marker existed.
+    #[test]
+    fn clone_to_library_marks_the_attached_package() {
+        use crate::installer::install_marker::{is_marked, marker_path};
+
+        let tmp = TempDir::new().unwrap();
+        let cache_pkg = tmp.path().join("cache").join("cli");
+        std::fs::create_dir_all(cache_pkg.join("Meta")).unwrap();
+        std::fs::write(cache_pkg.join("DESCRIPTION"), "Package: cli\n").unwrap();
+        let library = tmp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        clone_to_library(&cache_pkg, &library, "cli").unwrap();
+        assert!(is_marked(&library.join("cli")));
+
+        // An entry that already carries a marker keeps it as it is.
+        let other = tmp.path().join("library2");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(marker_path(&cache_pkg), "uvr/0.0.1\n").unwrap();
+        clone_to_library(&cache_pkg, &other, "cli").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(marker_path(&other.join("cli"))).unwrap(),
+            "uvr/0.0.1\n"
+        );
     }
 }

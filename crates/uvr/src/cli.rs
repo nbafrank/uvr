@@ -273,6 +273,13 @@ pub struct SyncArgs {
     /// portable `manylinux` repo.
     #[arg(long)]
     pub no_binary: bool,
+
+    /// Also remove packages that are not in uvr.lock and that uvr did not
+    /// install (#255). By default `uvr sync` removes only unlocked packages
+    /// uvr installed, and keeps what `install.packages()` or another tool
+    /// put into the project library.
+    #[arg(long)]
+    pub prune_all: bool,
 }
 
 // ────────────────────────────────────────────────────────────

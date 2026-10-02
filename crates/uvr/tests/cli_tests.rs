@@ -274,6 +274,24 @@ fn test_sync_without_lockfile_fails() {
 }
 
 #[test]
+fn test_sync_accepts_prune_all() {
+    // #255: the flag parses and reaches the command, which then fails on
+    // the missing lockfile like a plain `uvr sync`.
+    uvr_cmd()
+        .args(["sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--prune-all"));
+    let dir = init_project("prune-all-test");
+    uvr_cmd()
+        .args(["sync", "--prune-all"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No lockfile found"));
+}
+
+#[test]
 fn test_lockfile_round_trip() {
     let path = fixture("sample_project/uvr.lock");
     let content = fs::read_to_string(&path).unwrap();

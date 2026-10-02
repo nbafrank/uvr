@@ -146,6 +146,7 @@ async fn run() -> Result<()> {
                 args.library,
                 timeout,
                 ide,
+                args.prune_all,
             )
             .await?;
         }
