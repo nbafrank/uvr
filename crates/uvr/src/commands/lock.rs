@@ -528,8 +528,11 @@ fn collect_git_requests(manifest: &uvr_core::manifest::Manifest) -> Result<VecDe
         .collect()
 }
 
+/// Queue the `Remotes:` entries declared by the package `parent`. Messages
+/// name `parent`, so a bad entry can be traced back to its DESCRIPTION.
 fn enqueue_remote_entries(
     queue: &mut VecDeque<GitRequest>,
+    parent: &str,
     entries: Vec<uvr_core::manifest::RemoteEntry>,
     parent_dependencies: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
@@ -544,7 +547,8 @@ fn enqueue_remote_entries(
                 bound: true,
             } => {
                 anyhow::bail!(
-                    "Unsupported bound Remotes entry '{entry}': {reason}; refusing registry fallback"
+                    "Unsupported bound Remotes entry '{entry}' in '{parent}': {reason}; \
+                     refusing registry fallback"
                 );
             }
             uvr_core::manifest::RemoteEntry::Unsupported {
@@ -552,7 +556,8 @@ fn enqueue_remote_entries(
                 reason,
                 bound: false,
             } => tracing::warn!(
-                "Ignoring unbound Remotes entry '{entry}': {reason}; falling back to registry resolution"
+                "Ignoring unbound Remotes entry '{entry}' in '{parent}': {reason}; \
+                 falling back to registry resolution"
             ),
         }
     }
@@ -700,7 +705,7 @@ async fn resolve_git_deps(
     // A manifest URL tarball is a manifest source like a git one, so its
     // `Remotes:` join the walk (#244 source-chain rule).
     for (info, remotes, parent_dependencies) in url_seeds {
-        enqueue_remote_entries(&mut queue, remotes, &parent_dependencies)?;
+        enqueue_remote_entries(&mut queue, &info.name, remotes, &parent_dependencies)?;
         resolved_from.insert(info.name.clone(), info.url.clone());
         pre_resolved.insert(info.name.clone(), info);
     }
@@ -840,8 +845,9 @@ async fn resolve_git_deps(
             }
         };
 
-        outcomes.insert(identity, Ok(info.name.clone()));
-        ensure_bound_name(&request, &info.name)?;
+        let parent = info.name.clone();
+        outcomes.insert(identity, Ok(parent.clone()));
+        ensure_bound_name(&request, &parent)?;
 
         if let Some(existing) = pre_resolved.get(&info.name) {
             if !is_same_resolution(existing, &info) {
@@ -874,7 +880,7 @@ async fn resolve_git_deps(
             pre_resolved.insert(info.name.clone(), info);
         }
 
-        enqueue_remote_entries(&mut queue, remotes, &parent_dependencies)?;
+        enqueue_remote_entries(&mut queue, &parent, remotes, &parent_dependencies)?;
     }
 
     Ok(pre_resolved)
@@ -1110,6 +1116,7 @@ mod tests {
         let mut queue = VecDeque::new();
         enqueue_remote_entries(
             &mut queue,
+            "parent",
             vec![
                 remote(
                     "alias",
@@ -1150,6 +1157,7 @@ mod tests {
         let mut queue = VecDeque::new();
         enqueue_remote_entries(
             &mut queue,
+            "parent",
             vec![remote(
                 "suggested",
                 false,
@@ -1179,6 +1187,7 @@ mod tests {
         let first_dependencies = ["child"].into_iter().map(str::to_string).collect();
         enqueue_remote_entries(
             &mut queue,
+            "parent",
             vec![remote(
                 "child",
                 false,
@@ -1195,6 +1204,7 @@ mod tests {
         let child_dependencies = ["grandchild"].into_iter().map(str::to_string).collect();
         enqueue_remote_entries(
             &mut queue,
+            "parent",
             vec![remote(
                 "grandchild",
                 false,
@@ -1216,6 +1226,7 @@ mod tests {
         let mut queue = VecDeque::new();
         let error = enqueue_remote_entries(
             &mut queue,
+            "parentpkg",
             vec![RemoteEntry::Unsupported {
                 entry: "owner/repo/subdir#42".into(),
                 reason: "pull requests are unsupported".into(),
@@ -1226,6 +1237,10 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("refusing registry fallback"), "{error}");
+        assert!(
+            error.contains("'owner/repo/subdir#42' in 'parentpkg'"),
+            "{error}"
+        );
 
         let exact = GitRequest {
             provider: GitKind::GitHub,
@@ -1256,18 +1271,33 @@ mod tests {
 
     #[test]
     fn unsupported_unbound_root_remote_is_not_enqueued() {
+        // Capture the warning: it must name the entry and the package that
+        // declared it (#168).
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::sync::Arc::new(log.reopen().unwrap()))
+            .with_ansi(false)
+            .finish();
         let mut queue = VecDeque::new();
-        enqueue_remote_entries(
-            &mut queue,
-            vec![RemoteEntry::Unsupported {
-                entry: "owner/repo#42".into(),
-                reason: "pull requests are unsupported".into(),
-                bound: false,
-            }],
-            &Default::default(),
-        )
-        .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            enqueue_remote_entries(
+                &mut queue,
+                "parentpkg",
+                vec![RemoteEntry::Unsupported {
+                    entry: "owner/repo#42".into(),
+                    reason: "pull requests are unsupported".into(),
+                    bound: false,
+                }],
+                &Default::default(),
+            )
+            .unwrap();
+        });
         assert!(queue.is_empty());
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            logged.contains("WARN") && logged.contains("'owner/repo#42' in 'parentpkg'"),
+            "{logged}"
+        );
     }
 
     #[tokio::test]

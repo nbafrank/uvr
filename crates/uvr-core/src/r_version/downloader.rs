@@ -731,7 +731,7 @@ pub async fn download_and_install_r(
     if !r_binary.exists() {
         // Don't leave a tree without bin/R behind: it would trip the
         // exists-but-broken reinstall path on every subsequent run.
-        let _ = std::fs::remove_dir_all(&install_dir);
+        remove_failed_install(&install_dir);
         return Err(UvrError::Other(format!(
             "R binary not found after installation at {}",
             r_binary.display()
@@ -772,12 +772,27 @@ pub async fn download_and_install_r(
         verify_r_runs(&r_binary).inspect_err(|_| {
             // Leave nothing behind that the exists-only short-circuit would
             // treat as installed on the next run.
-            let _ = std::fs::remove_dir_all(&install_dir);
+            remove_failed_install(&install_dir);
         })?;
     }
 
     info!("R {version} installed to {}", install_dir.display());
     Ok(install_dir)
+}
+
+/// Best-effort removal of a failed install. The caller already returns the
+/// install error, so a failed cleanup is only a warning, but it must be
+/// visible: the partial tree it leaves is what the next `uvr r install`
+/// trips over.
+fn remove_failed_install(install_dir: &Path) {
+    match std::fs::remove_dir_all(install_dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::warn!(
+            "Could not remove the failed R install at {}: {e}. Remove it by hand \
+             before you install again.",
+            install_dir.display()
+        ),
+        _ => {}
+    }
 }
 
 /// Resolve the user-requested version to a full `X.Y.Z`.

@@ -25,27 +25,21 @@ fn run_clean_all() -> Result<()> {
 
     let mut count = 0u64;
     let mut bytes = 0u64;
+    let mut failed = 0usize;
 
-    // Clean tarball download cache (may also contain subdirectories such as
-    // `with-envs/` created by `uvr run --with`).
-    if cache_dir.exists() {
-        let (removed, removed_bytes, failed) = remove_cache_entries(&cache_dir)?;
-        count += removed;
-        bytes += removed_bytes;
-        for (path, err) in &failed {
-            ui::warn(format!("Failed to remove {}: {err}", path.display()));
+    // The tarball download cache (which may also hold subdirectories such as
+    // `with-envs/` from `uvr run --with`), then the global package cache.
+    // Both go entry by entry, so only what was really removed is counted.
+    for dir in [cache_dir, package_cache::global_packages_dir()] {
+        if dir.exists() {
+            let (removed, removed_bytes, failures) = remove_cache_entries(&dir)?;
+            count += removed;
+            bytes += removed_bytes;
+            failed += warn_failures(&failures);
         }
     }
 
-    // Clean global package cache
-    let packages_dir = package_cache::global_packages_dir();
-    if packages_dir.exists() {
-        let (pkg_count, pkg_bytes) = package_cache::cache_stats();
-        count += pkg_count;
-        bytes += pkg_bytes;
-        let _ = std::fs::remove_dir_all(&packages_dir);
-    }
-
+    ensure_any_removed(count, failed)?;
     if count == 0 {
         ui::success("Cache is already empty");
     } else {
@@ -70,6 +64,7 @@ fn run_clean_filtered(packages: &[String], r_versions: &[String]) -> Result<()> 
 
     let mut count = 0u64;
     let mut bytes = 0u64;
+    let mut failed = 0usize;
 
     // Tarball download cache: filenames embed `<name>_<version>`, so only the
     // package filter can apply — a tarball's R version is not recoverable from
@@ -79,12 +74,11 @@ fn run_clean_filtered(packages: &[String], r_versions: &[String]) -> Result<()> 
         let cache_dir = uvr_core::env_vars::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from(".uvr").join("cache"));
         if cache_dir.exists() {
-            let (removed, removed_bytes, failed) = remove_matching_tarballs(&cache_dir, packages)?;
+            let (removed, removed_bytes, failures) =
+                remove_matching_tarballs(&cache_dir, packages)?;
             count += removed;
             bytes += removed_bytes;
-            for (path, err) in &failed {
-                ui::warn(format!("Failed to remove {}: {err}", path.display()));
-            }
+            failed += warn_failures(&failures);
         }
     }
 
@@ -96,9 +90,7 @@ fn run_clean_filtered(packages: &[String], r_versions: &[String]) -> Result<()> 
         count += outcome.removed;
         bytes += outcome.removed_bytes;
         legacy_skipped = outcome.legacy_skipped;
-        for (path, err) in &outcome.failed {
-            ui::warn(format!("Failed to remove {}: {err}", path.display()));
-        }
+        failed += warn_failures(&outcome.failed);
     }
 
     let mut filter_desc: Vec<String> = Vec::new();
@@ -110,6 +102,7 @@ fn run_clean_filtered(packages: &[String], r_versions: &[String]) -> Result<()> 
     }
     let filter_desc = filter_desc.join("; ");
 
+    ensure_any_removed(count, failed)?;
     if count == 0 {
         ui::info(format!("No cache entries matched {filter_desc}"));
     } else {
@@ -145,6 +138,25 @@ fn normalize_r_minor(version: &str) -> String {
 
 /// Entries that could not be removed, with the error for each path.
 type RemovalFailures = Vec<(PathBuf, std::io::Error)>;
+
+/// Print one warning per entry that could not be removed; return how many.
+fn warn_failures(failures: &RemovalFailures) -> usize {
+    for (path, err) in failures {
+        ui::warn(format!("Failed to remove {}: {err}", path.display()));
+    }
+    failures.len()
+}
+
+/// Fail when every removal failed: "nothing to clean" and "could not clean
+/// anything" must not look the same (#168). After a partial failure the
+/// entries that did go are still reported, next to the warnings.
+fn ensure_any_removed(count: u64, failed: usize) -> Result<()> {
+    if count == 0 && failed > 0 {
+        let noun = if failed == 1 { "entry" } else { "entries" };
+        anyhow::bail!("Could not remove {failed} cache {noun}; see the warnings above");
+    }
+    Ok(())
+}
 
 /// Remove every entry in `cache_dir`, using `remove_dir_all` for directories
 /// and `remove_file` for everything else (symlinks are unlinked, not followed).
@@ -352,6 +364,17 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(bytes, 0);
         assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn nothing_removed_is_an_error_only_when_something_failed() {
+        assert!(ensure_any_removed(0, 0).is_ok(), "empty cache");
+        assert!(ensure_any_removed(3, 1).is_ok(), "partial failure");
+        let error = ensure_any_removed(0, 2).unwrap_err().to_string();
+        assert!(
+            error.contains("Could not remove 2 cache entries"),
+            "{error}"
+        );
     }
 
     #[test]

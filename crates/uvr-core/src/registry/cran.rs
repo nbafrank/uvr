@@ -631,7 +631,13 @@ pub(crate) fn write_cache_meta(key: &str, etag: Option<&str>, last_modified: Opt
     if let Some(lm) = last_modified {
         content.push_str(&format!("last-modified: {lm}\n"));
     }
-    let _ = std::fs::write(&meta_path, content);
+    if let Err(e) = std::fs::write(&meta_path, content) {
+        warn!(
+            "Failed to write cache meta to {}: {e}; the next index fetch will be a \
+             full download instead of a conditional GET",
+            meta_path.display()
+        );
+    }
 }
 
 /// Parse DCF-format PACKAGES text into a `CranIndex`.

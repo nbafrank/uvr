@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use uvr_core::r_version::downloader::Platform;
@@ -120,28 +122,62 @@ pub async fn run(check_only: bool) -> Result<()> {
     }
 
     let backup_path = bin_dir.join(format!("{bin_name}.bak"));
-    // Remove old backup if exists
-    let _ = std::fs::remove_file(&backup_path);
+    // Remove the old backup if one exists. If this fails, the rename below
+    // fails too and reports it; the warning says why.
+    remove_backup(&backup_path);
 
     // On Windows, a running binary can't be deleted but CAN be renamed.
     // Move current → backup, then move new → current.
-    std::fs::rename(&current_exe, &backup_path).context("Failed to back up current binary")?;
-    if let Err(e) = tmp_path.persist(&current_exe) {
-        // Restore from backup on failure
-        let _ = std::fs::rename(&backup_path, &current_exe);
-        return Err(anyhow::Error::from(e).context("Failed to replace binary"));
-    }
+    swap_binary(&current_exe, &backup_path, || {
+        tmp_path.persist(&current_exe)?;
+        Ok(())
+    })?;
 
     // On Unix, clean up backup immediately. On Windows, leave it — the old
     // binary is still locked by this running process and will be cleaned up
-    // on the next self-update invocation (see "Remove old backup" above).
+    // on the next self-update invocation (see "Remove the old backup" above).
     #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::fs::remove_file(&backup_path);
-    }
+    remove_backup(&backup_path);
 
     ui::success(format!("Updated to v{latest}"));
     Ok(())
+}
+
+/// Move `current_exe` to `backup_path`, then call `install` to put the new
+/// binary in its place. If `install` fails, move the backup back. If that
+/// fails too, there is no `uvr` at `current_exe` any more, so the error says
+/// where the old binary is and how to put it back.
+fn swap_binary(
+    current_exe: &Path,
+    backup_path: &Path,
+    install: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    std::fs::rename(current_exe, backup_path).context("Failed to back up current binary")?;
+    let Err(e) = install() else {
+        return Ok(());
+    };
+    let e = e.context("Failed to replace binary");
+    match std::fs::rename(backup_path, current_exe) {
+        Ok(()) => Err(e.context("Update failed; the previous binary was restored")),
+        Err(restore_err) => Err(e.context(format!(
+            "Update failed and the previous binary could not be restored ({restore_err}). \
+             It is at {}; move it back to {} to get uvr working again",
+            backup_path.display(),
+            current_exe.display()
+        ))),
+    }
+}
+
+/// Remove a leftover backup binary. A missing file is the normal case; any
+/// other failure only leaves a stale `.bak` behind, so it is a warning.
+fn remove_backup(backup_path: &Path) {
+    match std::fs::remove_file(backup_path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::warn!(
+            "Could not remove the old backup binary {}: {e}",
+            backup_path.display()
+        ),
+        _ => {}
+    }
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -241,6 +277,64 @@ struct GitHubAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swap_binary_installs_and_keeps_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("uvr");
+        let bak = dir.path().join("uvr.bak");
+        std::fs::write(&exe, "old").unwrap();
+
+        swap_binary(&exe, &bak, || Ok(std::fs::write(&exe, "new")?)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "old");
+    }
+
+    #[test]
+    fn swap_binary_restores_backup_when_install_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("uvr");
+        let bak = dir.path().join("uvr.bak");
+        std::fs::write(&exe, "old").unwrap();
+
+        let error = swap_binary(&exe, &bak, || anyhow::bail!("disk full")).unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+        assert!(!bak.exists());
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("previous binary was restored"),
+            "{message}"
+        );
+        assert!(message.contains("disk full"), "{message}");
+    }
+
+    #[test]
+    fn swap_binary_names_backup_when_restore_also_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("uvr");
+        let bak = dir.path().join("uvr.bak");
+        std::fs::write(&exe, "old").unwrap();
+
+        // A non-empty directory at the binary path makes the restoring
+        // rename fail on every platform.
+        let error = swap_binary(&exe, &bak, || {
+            std::fs::create_dir_all(exe.join("blocker"))?;
+            anyhow::bail!("disk full")
+        })
+        .unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "old");
+        let headline = error.to_string();
+        assert!(headline.contains("could not be restored"), "{headline}");
+        assert!(
+            headline.contains(&bak.display().to_string())
+                && headline.contains(&exe.display().to_string()),
+            "{headline}"
+        );
+        assert!(format!("{error:#}").contains("disk full"), "{error:#}");
+    }
 
     #[test]
     fn test_is_newer() {

@@ -145,7 +145,20 @@ fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result
 
     // 1. Honour .r-version exact pin
     let pin = honor_pin
-        .then(|| read_r_version_pin_from(&std::env::current_dir().unwrap_or_default()))
+        .then(|| {
+            // If the working directory cannot be resolved (deleted, or a
+            // parent is unreadable), `.` still finds a pin in the directory
+            // itself, but the walk cannot go up to its parents. The old empty
+            // path behaved the same, without telling the user.
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Cannot determine the working directory ({e}); a .r-version pin \
+                     in a parent directory will not be found"
+                );
+                PathBuf::from(".")
+            });
+            read_r_version_pin_from(&cwd)
+        })
         .flatten();
     if let Some(pinned) = pin {
         let bin = find_exact_version(&installations, &pinned)?;

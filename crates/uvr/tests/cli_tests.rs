@@ -709,6 +709,38 @@ fn test_cache_clean() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_cache_clean_reports_entries_it_cannot_remove() {
+    // #168: a clean where every removal fails used to print "Cache is already
+    // empty" and exit 0.
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    let cache = home.path().join("cache");
+    let locked = cache.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("file"), b"x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores directory permissions, so there is nothing to test.
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        return;
+    }
+
+    let assert = uvr_cmd()
+        .env("HOME", home.path())
+        .env("UVR_CACHE_DIR", &cache)
+        .env("UVR_PACKAGES_DIR", home.path().join("packages"))
+        .args(["cache", "clean"])
+        .assert();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert
+        .failure()
+        .stderr(predicate::str::contains("Failed to remove"))
+        .stderr(predicate::str::contains("Could not remove 1 cache entry"))
+        .stdout(predicate::str::contains("already empty").not());
+}
+
 #[test]
 fn test_cache_clean_filtered_no_match() {
     // Filtered clean with no matching entries reports and touches nothing.
