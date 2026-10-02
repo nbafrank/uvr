@@ -323,6 +323,11 @@ pub struct LockArgs {
     /// Re-resolve and upgrade all packages to their latest allowed versions
     #[arg(long)]
     pub upgrade: bool,
+
+    /// Upgrade only NAME in uvr.lock, holding every other package at its
+    /// locked version (repeatable). Installs nothing — run `uvr sync` after.
+    #[arg(short = 'P', long, value_name = "NAME", conflicts_with = "upgrade")]
+    pub upgrade_package: Vec<String>,
 }
 
 // ────────────────────────────────────────────────────────────

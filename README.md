@@ -264,6 +264,7 @@ or to the repository root.
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
 | `uvr lock --upgrade` | Upgrade all packages to their latest allowed versions |
+| `uvr lock --upgrade-package <pkg>` | Upgrade only `<pkg>` in `uvr.lock` (repeatable, short `-P`), holding every other package at its locked version; installs nothing |
 | `uvr tree` | Show the dependency tree |
 | `uvr tree --depth 1` | Show only direct dependencies |
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |

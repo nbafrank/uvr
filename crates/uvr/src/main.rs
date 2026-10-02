@@ -159,7 +159,11 @@ async fn run() -> Result<()> {
             commands::update::run(args.packages, args.dry_run, args.jobs).await?;
         }
         Commands::Lock(args) => {
-            commands::lock::run(args.upgrade).await?;
+            if args.upgrade_package.is_empty() {
+                commands::lock::run(args.upgrade).await?;
+            } else {
+                commands::lock::run_upgrade_package(args.upgrade_package).await?;
+            }
         }
         Commands::Tree(args) => {
             commands::tree::run(args.depth)?;

@@ -97,6 +97,15 @@ Pure tracking section — fixes and small features land here between tags.
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **`uvr lock --upgrade-package <pkg>` (`-P`) upgrades one package in
+  `uvr.lock` and nothing else** (#196). It is the lock-only form of
+  `uvr update <pkg>` and uses the same resolution: every other package is
+  held at its locked version, and a conflict with a held-back package is an
+  error that leaves `uvr.lock` unchanged. It installs nothing, so you can
+  review a single bump before `uvr sync`. A second run with nothing newer
+  does not write the file and says so. The flag is repeatable and cannot be
+  combined with `--upgrade`.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`

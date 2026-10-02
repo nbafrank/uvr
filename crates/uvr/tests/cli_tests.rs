@@ -667,6 +667,32 @@ fn test_update_dry_run_on_empty_project() {
         .stderr(predicate::str::contains("Dry run"));
 }
 
+// ─── lock ──────────────────────────────────────────────────
+
+#[test]
+fn test_lock_upgrade_package_rejects_unknown_name() {
+    // The name check runs before any index fetch, so this stays offline.
+    let dir = init_project("lock-upgrade-test");
+    uvr_cmd()
+        .args(["lock", "--upgrade-package", "nosuchpkg"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "'nosuchpkg' is not in the manifest",
+        ));
+    assert!(!dir.path().join("uvr.lock").exists());
+}
+
+#[test]
+fn test_lock_upgrade_package_conflicts_with_upgrade() {
+    uvr_cmd()
+        .args(["lock", "--upgrade", "-P", "jsonlite"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
 // ─── cache ─────────────────────────────────────────────────
 
 #[test]

@@ -279,6 +279,119 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
     }
 }
 
+/// Pins for a targeted upgrade (`uvr update <pkg>`, `uvr lock
+/// --upgrade-package`): every locked package except `targets`, held at its
+/// locked version (#127). Each target must be a direct or dev dependency; a
+/// git target is simply left unpinned, so its ref re-resolves.
+pub fn targeted_upgrade_pins(
+    manifest: &uvr_core::manifest::Manifest,
+    old: Option<&Lockfile>,
+    targets: &[String],
+) -> Result<HashMap<String, PackageInfo>> {
+    for pkg in targets {
+        if !manifest.dependencies.contains_key(pkg) && !manifest.dev_dependencies.contains_key(pkg)
+        {
+            anyhow::bail!(
+                "Package '{}' is not in the manifest. Use `uvr add {0}` to add it.",
+                pkg
+            );
+        }
+    }
+    let mut pins = HashMap::new();
+    for pkg in old.map(|lf| lf.packages.as_slice()).unwrap_or_default() {
+        if !targets.contains(&pkg.name) {
+            pins.insert(
+                pkg.name.clone(),
+                uvr_core::resolver::locked_to_package_info(pkg)?,
+            );
+        }
+    }
+    Ok(pins)
+}
+
+/// `uvr lock --upgrade-package`: the lock-only half of `uvr update <pkg>`.
+pub async fn run_upgrade_package(packages: Vec<String>) -> Result<()> {
+    let project = Project::find_cwd().context("Not inside a uvr project")?;
+    let start = ui::now();
+    ui::info(format!(
+        "Upgrading {} in uvr.lock",
+        packages
+            .iter()
+            .map(|p| ui::palette::pkg(p).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    let changed = upgrade_packages_in_lock(&project, &packages, |pins| {
+        resolve_only_upgraded(&project, pins)
+    })
+    .await?;
+    if changed {
+        ui::summary(
+            "Lockfile updated — nothing installed; run `uvr sync` to apply",
+            format!(
+                "resolved in {}",
+                ui::palette::format_duration(start.elapsed())
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Re-resolve `packages` with everything else pinned and write `uvr.lock`
+/// only if the result differs; returns whether it wrote. Never installs.
+/// `resolve` turns pins into a lockfile (the network resolve in production,
+/// a fixture index in tests).
+async fn upgrade_packages_in_lock<F, Fut>(
+    project: &Project,
+    packages: &[String],
+    resolve: F,
+) -> Result<bool>
+where
+    F: FnOnce(HashMap<String, PackageInfo>) -> Fut,
+    Fut: std::future::Future<Output = Result<Lockfile>>,
+{
+    let old = project.load_lockfile().context("Failed to read uvr.lock")?;
+    let pins = targeted_upgrade_pins(&project.manifest, old.as_ref(), packages)?;
+    // Without a lock there is nothing to hold back; a full resolve would
+    // quietly move every package.
+    let Some(old) = old else {
+        anyhow::bail!("No uvr.lock to upgrade in. Run `uvr lock` first.");
+    };
+    let new = resolve(pins).await.with_context(|| {
+        format!(
+            "Targeted upgrade failed with the other packages held at their locked versions; \
+             uvr.lock is unchanged. If the error above is a version conflict, the upgraded \
+             package needs a newer version of a held-back dependency — upgrade that package \
+             too (`uvr lock --upgrade-package {} --upgrade-package <conflicting-pkg>`) or \
+             upgrade everything with `uvr lock --upgrade`.",
+            packages.join(" --upgrade-package ")
+        )
+    })?;
+
+    if new == old {
+        ui::success("Nothing to upgrade — uvr.lock unchanged");
+        return Ok(false);
+    }
+    for pkg in &new.packages {
+        match old.get_package(&pkg.name) {
+            Some(prev) if prev.version != pkg.version => {
+                ui::row_upgrade(&pkg.name, &prev.version, &pkg.version)
+            }
+            None => ui::row_added(&pkg.name, &pkg.version),
+            _ => {}
+        }
+    }
+    for pkg in &old.packages {
+        if new.get_package(&pkg.name).is_none() {
+            ui::row_removed(&pkg.name, &pkg.version);
+        }
+    }
+    project
+        .save_lockfile(&new)
+        .context("Failed to write uvr.lock")?;
+    Ok(true)
+}
+
 /// Which registry to query for a `git = "..."` manifest value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum GitKind {
@@ -1502,5 +1615,123 @@ mod tests {
         );
         // A GitHub repository named like a prefix is still GitHub.
         assert_eq!(classify_git("git/git"), GitKind::GitHub);
+    }
+
+    // ── lock --upgrade-package (#196) ──
+
+    const OLD_INDEX: &str = "Package: jsonlite\nVersion: 1.8.0\n\n\
+        Package: shiny\nVersion: 1.0.0\nImports: rlang\n\n\
+        Package: rlang\nVersion: 1.0.0\n";
+    const NEW_INDEX: &str = "Package: jsonlite\nVersion: 1.9.0\n\n\
+        Package: shiny\nVersion: 1.1.0\nImports: rlang\n\n\
+        Package: rlang\nVersion: 1.1.0\n";
+
+    /// Stand-in for `resolve_only_upgraded`: the same resolver, fed a
+    /// fixture PACKAGES index instead of a live CRAN fetch.
+    fn resolve_fixture(
+        project: &Project,
+        index: &str,
+        pins: HashMap<String, PackageInfo>,
+    ) -> Result<Lockfile> {
+        let registry = CranRegistry::for_test(
+            uvr_core::registry::cran::parse_packages_gz(index)?,
+            "https://fixture.invalid/src/contrib".into(),
+        );
+        Ok(Resolver::new(&registry).resolve(&project.manifest, None, None, pins)?)
+    }
+
+    /// A project depending on jsonlite and shiny (rlang only transitively),
+    /// locked against `OLD_INDEX`, with jsonlite 1.8.0 in its library.
+    fn locked_project() -> (tempfile::TempDir, Project) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut manifest = uvr_core::manifest::Manifest::new("t", None);
+        for name in ["jsonlite", "shiny"] {
+            manifest.add_dep(name.into(), DependencySpec::Version("*".into()), false);
+        }
+        manifest.write(&dir.path().join("uvr.toml")).unwrap();
+        let project = Project::find(dir.path()).unwrap();
+        let lock = resolve_fixture(&project, OLD_INDEX, HashMap::new()).unwrap();
+        project.save_lockfile(&lock).unwrap();
+        let installed = project.dot_uvr_dir().join("library").join("jsonlite");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("DESCRIPTION"), "Version: 1.8.0\n").unwrap();
+        (dir, project)
+    }
+
+    async fn upgrade(project: &Project, target: &str, index: &str) -> Result<bool> {
+        upgrade_packages_in_lock(project, &[target.to_string()], |pins| {
+            std::future::ready(resolve_fixture(project, index, pins))
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn upgrade_package_moves_only_the_named_package_and_installs_nothing() {
+        let (_dir, project) = locked_project();
+        assert!(upgrade(&project, "jsonlite", NEW_INDEX).await.unwrap());
+
+        let lock = project.load_lockfile().unwrap().unwrap();
+        let version = |name| lock.get_package(name).unwrap().version.clone();
+        assert_eq!(version("jsonlite"), "1.9.0");
+        assert_eq!(version("shiny"), "1.0.0", "direct dep must be held");
+        assert_eq!(version("rlang"), "1.0.0", "transitive dep must be held");
+
+        let library = project.dot_uvr_dir().join("library");
+        let entries: Vec<_> = std::fs::read_dir(&library)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["jsonlite"]);
+        assert_eq!(
+            std::fs::read_to_string(library.join("jsonlite").join("DESCRIPTION")).unwrap(),
+            "Version: 1.8.0\n",
+            "the library must not be touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn upgrade_package_conflict_errors_and_leaves_the_lock_unchanged() {
+        let (_dir, project) = locked_project();
+        let before = std::fs::read(project.lock_path()).unwrap();
+        // The new shiny needs a newer rlang than the held-back one.
+        let index = NEW_INDEX.replace("Imports: rlang", "Imports: rlang (>= 1.1.0)");
+        let err = upgrade(&project, "shiny", &index).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Version conflict for package 'rlang'"),
+            "{msg}"
+        );
+        assert!(msg.contains("uvr.lock is unchanged"), "{msg}");
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn repeated_upgrade_package_is_a_byte_identical_no_op() {
+        let (_dir, project) = locked_project();
+        assert!(upgrade(&project, "jsonlite", NEW_INDEX).await.unwrap());
+        let before = std::fs::read(project.lock_path()).unwrap();
+        assert!(!upgrade(&project, "jsonlite", NEW_INDEX).await.unwrap());
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn upgrade_package_rejects_non_manifest_names_and_a_missing_lock() {
+        let (_dir, project) = locked_project();
+        let before = std::fs::read(project.lock_path()).unwrap();
+        // Unknown, and transitive-only: `uvr update <pkg>` rejects both too.
+        for name in ["nosuchpkg", "rlang"] {
+            let err = upgrade(&project, name, NEW_INDEX).await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("'{name}' is not in the manifest")),
+                "{err}"
+            );
+        }
+        assert_eq!(std::fs::read(project.lock_path()).unwrap(), before);
+
+        std::fs::remove_file(project.lock_path()).unwrap();
+        let err = upgrade(&project, "jsonlite", NEW_INDEX).await.unwrap_err();
+        assert!(err.to_string().contains("No uvr.lock"), "{err}");
+        assert!(!project.lock_path().exists());
     }
 }
