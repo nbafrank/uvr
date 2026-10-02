@@ -2559,3 +2559,34 @@ fn test_ide_flag_is_scoped_to_init_sync_import() {
         .failure()
         .stderr(predicate::str::contains("unexpected argument"));
 }
+
+// ─── uvr sysdeps (#256) ───────────────────────────────────────────
+
+#[test]
+fn test_sysdeps_without_a_lockfile_says_to_run_lock() {
+    // The command reads the lockfile on purpose: system dependencies come
+    // from resolved DESCRIPTIONs, so answering from uvr.toml alone would
+    // mean a full resolution — the cost `uvr sysdeps` exists to avoid.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "sdproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    uvr_cmd()
+        .arg("sysdeps")
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uvr lock"));
+}
+
+#[test]
+fn test_sysdeps_outside_a_project_fails() {
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .arg("sysdeps")
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+}

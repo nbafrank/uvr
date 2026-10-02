@@ -13,6 +13,7 @@ pub mod run;
 pub mod scan;
 pub mod self_update;
 pub mod sync;
+pub mod sysdeps;
 pub mod tree;
 pub mod update;
 pub mod util;

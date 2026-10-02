@@ -260,6 +260,8 @@ or to the repository root.
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
 | `uvr sync --no-companion` | Skip the uvr companion R package install |
 | `uvr sync --unattended` | CI mode: skip IDE config, companion, and working-tree writes |
+| `uvr sysdeps` | Report missing system dependencies without installing anything |
+| `uvr sysdeps --all` | List every system dependency, installed or not |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
@@ -604,6 +606,18 @@ prints the install command for your distro's package manager (`apt-get`,
 
   Install with: sudo apt-get install -y libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev
 ```
+
+To ask the question without syncing — writing a Dockerfile, adding a CI
+setup step, or just checking before you commit to an install:
+
+```sh
+uvr sysdeps        # what is missing here; exits 1 when anything is
+uvr sysdeps --all  # everything the project needs, installed or not; exits 0
+```
+
+`uvr sysdeps` reads `uvr.lock`, so run `uvr lock` first. Use `--all` when
+building an image: the image has nothing installed yet, so "what is missing
+on this host" is the wrong question.
 
 Pass `--install-system-deps` (or set `UVR_INSTALL_SYSREQS=1`) and uvr runs
 the commands itself, showing each one and where it came from before

@@ -129,6 +129,14 @@ Pure tracking section — fixes and small features land here between tags.
   `uvr r uninstall <ver> && uvr r install <ver>`. Reported with a
   verified one-line diagnosis by @Felixmil.
 
+- **`uvr sysdeps` reports a project's system dependencies without syncing**
+  (#256). The sysreqs machinery ran only inside `uvr sync`, so there was no
+  way to ask what a project needs before installing it — the question a
+  Dockerfile or a CI setup step actually has. Reads `uvr.lock` and exits
+  non-zero when anything is missing, so CI can gate on it. `--all` lists
+  every resolved dependency whether or not it is installed here, and exits 0:
+  an image being built has none of it yet, so filtering against the current
+  host is the wrong question. Linux-only, like the check it wraps.
 - **GitHub dependencies can select an R package in a repository
   subdirectory, directly or through transitive DESCRIPTION `Remotes:`** (#244).
   Direct declarations use

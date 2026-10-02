@@ -86,6 +86,9 @@ pub enum Commands {
     /// Scan project R/Rmd/Qmd files for package usage missing from uvr.toml
     Scan(ScanArgs),
 
+    /// Report the project's system dependencies without syncing
+    Sysdeps(SysdepsArgs),
+
     /// Generate shell completions
     Completions(CompletionsArgs),
 
@@ -418,6 +421,14 @@ pub struct ImportArgs {
 // ────────────────────────────────────────────────────────────
 //  scan
 // ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct SysdepsArgs {
+    /// List every system dependency, not just the ones missing here.
+    /// Exits 0 — a listing, not a check.
+    #[arg(long)]
+    pub all: bool,
+}
 
 #[derive(Debug, Args)]
 pub struct ScanArgs {
