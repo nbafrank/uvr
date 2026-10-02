@@ -270,7 +270,7 @@ fn render_error(e: &anyhow::Error) {
         None => headline.clone(),
     };
     let hint = hint_for(&full);
-    ui::error_block(&headline, context.as_deref(), hint);
+    ui::error_block(&headline, context.as_deref(), hint.as_deref());
 }
 
 /// Parse the `--timeout <DURATION>` CLI flag value into a `Duration`.
@@ -286,12 +286,29 @@ fn parse_cli_timeout(s: Option<&str>) -> Result<Option<std::time::Duration>> {
         })
 }
 
-fn hint_for(msg: &str) -> Option<&'static str> {
+fn hint_for(msg: &str) -> Option<String> {
+    // R's etc/Makeconf records the `-std=` its build host used, so an R built
+    // with a newer toolchain can ask for a standard this host's compiler
+    // predates: R installs fine, then every source build fails with only the
+    // compiler's own words to go on (#231).
+    if let Some(flag) = rejected_std_flag(msg) {
+        let needs = if matches!(flag, "-std=gnu23" | "-std=c23") {
+            " (it needs gcc >= 14 or clang >= 18)"
+        } else {
+            ""
+        };
+        return Some(format!(
+            "The compiler rejected `{flag}`{needs}. This flag usually comes from R's \
+             etc/Makeconf, so this R was built for a newer C/C++ compiler than this host \
+             has. Install a newer compiler, or use an R build that matches this host's \
+             toolchain."
+        ));
+    }
     let m = msg.to_ascii_lowercase();
     // Checked before the generic network cases: a rejected certificate is
     // a trust problem, and telling the user to check their connection
     // sends them to fix the wrong thing (#227).
-    if uvr_core::error::looks_like_certificate_failure(msg) {
+    let hint = if uvr_core::error::looks_like_certificate_failure(msg) {
         Some(
             "This is a TLS trust failure, not a connectivity problem. If you are behind a \
              proxy or VPN that inspects TLS, install its CA certificate into your system \
@@ -340,12 +357,30 @@ fn hint_for(msg: &str) -> Option<&'static str> {
         )
     } else {
         None
-    }
+    };
+    hint.map(String::from)
+}
+
+/// The `-std=` flag a compiler refused, from gcc's "unrecognized
+/// command-line option '-std=gnu23'" or clang's "invalid value 'gnu23' in
+/// '-std=gnu23'". Only the error line counts: the build log also echoes
+/// every compile command, and those carry the same flag.
+fn rejected_std_flag(msg: &str) -> Option<&str> {
+    msg.lines()
+        .filter(|l| l.contains("unrecognized") || l.contains("invalid value"))
+        .find_map(|l| {
+            let flag = &l[l.find("-std=")?..];
+            // gcc quotes with ' or, in a UTF-8 locale, with ‘ ’.
+            let end = flag["-std=".len()..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | ':')))
+                .map_or(flag.len(), |i| i + "-std=".len());
+            Some(&flag[..end])
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::hint_for;
+    use super::{hint_for, rejected_std_flag};
 
     #[test]
     fn certificate_failures_get_the_trust_hint_not_a_network_one() {
@@ -403,5 +438,53 @@ mod tests {
                    make: /opt/gfortran/bin/gfortran: No such file or directory";
         let hint = hint_for(msg).expect("missing toolchain should carry a hint");
         assert!(hint.contains("mac.r-project.org"), "{hint}");
+    }
+
+    #[test]
+    fn a_compiler_rejecting_makeconfs_std_flag_gets_the_toolchain_hint() {
+        // #231: Alpine 3.20 (gcc 13) with R 4.5.1's musl build, whose
+        // Makeconf has `CC = gcc -std=gnu23`. The echoed compile command
+        // carries the flag too; only the error line may match.
+        let msg = "Failed to install packages after add\n\
+                   Failed to install rlang\n\
+                   R CMD INSTALL failed for 'rlang' (exit 1):\n\
+                   gcc -std=gnu23 -I\"/opt/R/include\" -fpic -g -O2 -c capture.c -o capture.o\n\
+                   gcc: error: unrecognized command-line option '-std=gnu23'; \
+                   did you mean '-std=gnu2x'?\n\
+                   using C compiler: 'gcc (Alpine 13.2.1_git20240309) 13.2.1 20240309'";
+        let hint = hint_for(msg).expect("rejected -std flag should carry a hint");
+        assert!(hint.contains("`-std=gnu23`"), "{hint}");
+        assert!(hint.contains("gcc >= 14"), "{hint}");
+        assert!(hint.contains("Makeconf"), "{hint}");
+    }
+
+    #[test]
+    fn rejected_std_flag_reads_gcc_and_clang_wording() {
+        // clang 17 (Alpine 3.20's clang17), and gcc in a UTF-8 locale,
+        // which quotes with ‘ ’ instead of '.
+        assert_eq!(
+            rejected_std_flag("error: invalid value 'gnu23' in '-std=gnu23'"),
+            Some("-std=gnu23")
+        );
+        assert_eq!(
+            rejected_std_flag(
+                "g++: error: unrecognized command-line option ‘-std=gnu++23’; \
+                 did you mean ‘-std=gnu++20’?"
+            ),
+            Some("-std=gnu++23")
+        );
+        // A compile command echoed in the log is not a rejection.
+        assert_eq!(
+            rejected_std_flag(
+                "gcc -std=gnu23 -c foo.c -o foo.o\n\
+                 foo.c:1:10: fatal error: zlib.h: No such file or directory"
+            ),
+            None
+        );
+        // Only C23 gets a version floor; other standards name the flag alone.
+        let hint = hint_for("gcc: error: unrecognized command-line option '-std=gnu++23'")
+            .expect("rejected -std flag should carry a hint");
+        assert!(hint.contains("`-std=gnu++23`"), "{hint}");
+        assert!(!hint.contains("gcc >= 14"), "{hint}");
     }
 }
