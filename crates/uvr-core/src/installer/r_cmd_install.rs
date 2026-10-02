@@ -472,7 +472,14 @@ impl RCmdInstall {
             }
 
             if cfg!(target_os = "macos") {
-                let (brew_lib, brew_inc, brew_pkgconfig) = if cfg!(target_arch = "aarch64") {
+                // The Homebrew prefix matches the R doing the compiling, which
+                // under Rosetta is not uvr's own architecture (#155).
+                let r_platform =
+                    crate::r_version::downloader::Platform::of_r(Path::new(&self.r_binary));
+                let (brew_lib, brew_inc, brew_pkgconfig) = if matches!(
+                    r_platform,
+                    Ok(crate::r_version::downloader::Platform::MacOsArm64)
+                ) {
                     (
                         "/opt/homebrew/lib",
                         "/opt/homebrew/include",

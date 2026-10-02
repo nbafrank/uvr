@@ -445,6 +445,8 @@ uvr r pin 4.4.2
 
 R versions are installed to `~/.uvr/r-versions/` and managed independently of any system R installation. uvr downloads **portable, relocatable R builds** from the [rstudio/r-builds](https://github.com/rstudio/r-builds) project ([`cdn.posit.co/r`](https://cdn.posit.co/r/versions.json)): each is a self-contained archive that detects its own location at runtime — no system-wide install, no admin/`sudo`, and no post-install patching. This makes it ideal for corporate and university environments where users cannot install software system-wide.
 
+On macOS, R is installed for the machine's architecture, not uvr's: on an Apple Silicon Mac an Intel (`x86_64`) uvr running under Rosetta 2 still installs native arm64 R. Set `UVR_R_ARCH=x86_64` (or `arm64`) to choose the other one. Binary packages follow the architecture of the R that loads them.
+
 ---
 
 ## CI usage

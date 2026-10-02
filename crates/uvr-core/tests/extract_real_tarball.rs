@@ -56,6 +56,7 @@ async fn run_extract(name: &str, version: &str) {
         library.path(),
         name,
         None,
+        std::env::consts::ARCH,
     ) {
         Ok(()) => {
             let extracted = library.path().join(name);

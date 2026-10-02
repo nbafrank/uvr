@@ -16,7 +16,88 @@ pub enum Platform {
 }
 
 impl Platform {
+    /// The platform to install R for.
+    ///
+    /// The OS is the one uvr was built for, but on macOS the architecture is
+    /// the machine's, not uvr's (#155): an x86_64 uvr running under Rosetta 2
+    /// would otherwise download Intel R and run it translated forever.
+    /// `hw.optional.arm64` is 1 on Apple Silicon even inside a translated
+    /// process, and absent on Intel. `UVR_R_ARCH` overrides both. Elsewhere
+    /// this is the compiled-in platform, as before.
     pub fn detect() -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        let (r_arch, hw_arm64) = (
+            crate::env_vars::r_arch(),
+            Command::new("/usr/sbin/sysctl")
+                .args(["-n", "hw.optional.arm64"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (r_arch, hw_arm64): (Option<&str>, Option<String>) = (None, None);
+        Ok(Self::compiled()?.at_runtime(r_arch, hw_arm64.as_deref()))
+    }
+
+    /// Apply the `UVR_R_ARCH` override, else the `hw.optional.arm64` probe.
+    /// A failed or missing probe keeps the compiled-in architecture.
+    fn at_runtime(self, r_arch: Option<&str>, hw_arm64: Option<&str>) -> Self {
+        match (r_arch, hw_arm64.map(str::trim)) {
+            (Some(arch), _) => self.with_arch(arch),
+            (None, Some("1")) => self.with_arch("aarch64"),
+            _ => self,
+        }
+    }
+
+    /// The platform of the R whose `bin/R` is `r_binary`.
+    ///
+    /// Binary packages must match the R that loads them, which is not
+    /// necessarily uvr's own architecture or [`Platform::detect`]'s: a
+    /// Rosetta uvr may run an arm64 R, and an Intel R installed before #155
+    /// stays Intel. macOS R (portable, CRAN framework, Homebrew) has
+    /// `lib/libR.dylib` next to `bin/`, so its Mach-O header answers without
+    /// starting R. Anything else — a universal libR, a layout without it, or
+    /// any non-macOS R — falls back to [`Platform::detect`].
+    pub fn of_r(r_binary: &Path) -> Result<Self> {
+        let arch = std::fs::canonicalize(r_binary).ok().and_then(|bin| {
+            let libr = bin.parent()?.parent()?.join("lib").join("libR.dylib");
+            crate::installer::binary_install::macho_arch(&libr)
+        });
+        match arch {
+            Some(arch) => Ok(Self::compiled()?.with_arch(arch)),
+            None => Self::detect(),
+        }
+    }
+
+    /// Same OS, given architecture (`aarch64`/`arm64` or `x86_64`). Pairs
+    /// uvr has no variant for (Windows arm64) keep `self`.
+    fn with_arch(self, arch: &str) -> Self {
+        let arm = match arch {
+            "aarch64" | "arm64" => true,
+            "x86_64" => false,
+            _ => return self,
+        };
+        match self {
+            Platform::MacOsArm64 | Platform::MacOsX86_64 if arm => Platform::MacOsArm64,
+            Platform::MacOsArm64 | Platform::MacOsX86_64 => Platform::MacOsX86_64,
+            Platform::LinuxX86_64 | Platform::LinuxArm64 if arm => Platform::LinuxArm64,
+            Platform::LinuxX86_64 | Platform::LinuxArm64 => Platform::LinuxX86_64,
+            Platform::WindowsX86_64 => self,
+        }
+    }
+
+    /// CPU architecture in Rust's vocabulary: `x86_64` or `aarch64`.
+    pub fn arch(&self) -> &'static str {
+        match self {
+            Platform::LinuxX86_64 | Platform::MacOsX86_64 | Platform::WindowsX86_64 => "x86_64",
+            Platform::LinuxArm64 | Platform::MacOsArm64 => "aarch64",
+        }
+    }
+
+    /// The platform this uvr binary was built for. `uvr upgrade` uses it to
+    /// pick the uvr release asset; R and packages use [`Platform::detect`]
+    /// and [`Platform::of_r`].
+    pub fn compiled() -> Result<Self> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         return Ok(Platform::MacOsArm64);
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -477,10 +558,7 @@ fn host_triple_from_os_release(content: Option<&str>, platform: Platform) -> Hos
         }
     }
 
-    let arch = match platform {
-        Platform::LinuxX86_64 | Platform::MacOsX86_64 | Platform::WindowsX86_64 => "x86_64",
-        Platform::LinuxArm64 | Platform::MacOsArm64 => "aarch64",
-    };
+    let arch = platform.arch();
 
     let (vendor, os, default_abi) = match platform {
         Platform::LinuxX86_64 | Platform::LinuxArm64 => ("pc", "linux", "gnu"),
@@ -559,11 +637,11 @@ fn host_info_from_os_release(
     }
 }
 
-/// Detect the host info. `r_version` should be the R version in use for the
-/// project (caller-supplied because uvr knows the project R version).
-pub fn host_info(r_version: &str) -> HostInfo {
+/// Detect the host info. `r_version` and `platform` describe the R in use for
+/// the project (caller-supplied: the architecture must be that R's, see
+/// [`Platform::of_r`]).
+pub fn host_info(r_version: &str, platform: Platform) -> HostInfo {
     let content = std::fs::read_to_string("/etc/os-release").ok();
-    let platform = Platform::detect().unwrap_or(Platform::LinuxX86_64);
     host_info_from_os_release(content.as_deref(), platform, r_version)
 }
 
@@ -654,6 +732,19 @@ pub async fn download_and_install_r(
         // and reinstall fresh.
         if crate::r_version::detector::query_r_version(&r_binary).is_some() {
             info!("R {version} already installed at {}", install_dir.display());
+            // #155: an Intel R from an older Rosetta uvr is kept as is. Say
+            // so rather than let "installed" suggest it is now native.
+            if let Ok(have) = Platform::of_r(&r_binary) {
+                if have.arch() != platform.arch() {
+                    tracing::warn!(
+                        "R {version} at {} is {}, not {}. To replace it: \
+                         uvr r uninstall {version} && uvr r install {version}",
+                        install_dir.display(),
+                        have.arch(),
+                        platform.arch()
+                    );
+                }
+            }
             return Ok(install_dir);
         }
         info!(
@@ -1240,6 +1331,66 @@ mod tests {
                 | Platform::LinuxArm64
                 | Platform::WindowsX86_64
         ));
+    }
+
+    // #155: the R architecture is decided at run time on macOS.
+    #[test]
+    fn runtime_arch_override_beats_probe_and_probe_beats_build() {
+        use Platform::*;
+        // Rosetta: x86_64 build, Apple Silicon hardware.
+        assert_eq!(MacOsX86_64.at_runtime(None, Some("1\n")), MacOsArm64);
+        // Intel Mac: the key is missing, sysctl prints nothing.
+        assert_eq!(MacOsX86_64.at_runtime(None, Some("")), MacOsX86_64);
+        assert_eq!(MacOsX86_64.at_runtime(None, Some("0")), MacOsX86_64);
+        // sysctl could not run: keep the build's arch.
+        assert_eq!(MacOsX86_64.at_runtime(None, None), MacOsX86_64);
+        assert_eq!(MacOsArm64.at_runtime(None, None), MacOsArm64);
+        // UVR_R_ARCH wins over the probe, both ways.
+        assert_eq!(
+            MacOsX86_64.at_runtime(Some("x86_64"), Some("1")),
+            MacOsX86_64
+        );
+        assert_eq!(
+            MacOsArm64.at_runtime(Some("x86_64"), Some("1")),
+            MacOsX86_64
+        );
+        assert_eq!(MacOsX86_64.at_runtime(Some("aarch64"), None), MacOsArm64);
+        // Same OS only; Windows has no arm64 variant to switch to.
+        assert_eq!(LinuxX86_64.at_runtime(Some("aarch64"), None), LinuxArm64);
+        assert_eq!(
+            WindowsX86_64.at_runtime(Some("aarch64"), None),
+            WindowsX86_64
+        );
+    }
+
+    #[test]
+    fn of_r_reads_libr_mach_o_header() {
+        // Real headers of R 4.5.1's lib/libR.dylib from the arm64 and Intel
+        // portable tarballs (mach_header_64 magic + cputype, little-endian).
+        for (header, arch) in [
+            ([0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01], "aarch64"),
+            ([0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01], "x86_64"),
+        ] {
+            let home = TempDir::new().unwrap();
+            std::fs::create_dir_all(home.path().join("bin")).unwrap();
+            std::fs::create_dir_all(home.path().join("lib")).unwrap();
+            std::fs::write(home.path().join("bin/R"), "#!/bin/sh\n").unwrap();
+            std::fs::write(home.path().join("lib/libR.dylib"), header).unwrap();
+            let got = Platform::of_r(&home.path().join("bin/R")).unwrap();
+            // uvr has no Windows arm64 platform, so `with_arch` keeps x86_64.
+            let arch = if cfg!(windows) { "x86_64" } else { arch };
+            assert_eq!(got.arch(), arch);
+            assert_eq!(got.is_macos(), Platform::compiled().unwrap().is_macos());
+        }
+        // No libR.dylib (any non-macOS R): falls back to `detect()`.
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join("bin")).unwrap();
+        std::fs::write(home.path().join("bin/R"), "#!/bin/sh\n").unwrap();
+        let _env = crate::env_vars::env_lock();
+        assert_eq!(
+            Platform::of_r(&home.path().join("bin/R")).unwrap(),
+            Platform::detect().unwrap()
+        );
     }
 
     #[test]

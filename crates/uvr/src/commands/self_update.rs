@@ -31,7 +31,9 @@ pub async fn run(check_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    let target = Platform::detect()
+    // The asset for this build, not for the machine: an x86_64 uvr under
+    // Rosetta keeps updating to x86_64 (#155).
+    let target = Platform::compiled()
         .map(|p| p.rust_target_triple())
         .unwrap_or("unknown");
     let ext = if cfg!(target_os = "windows") {

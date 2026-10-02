@@ -156,6 +156,26 @@ pub fn r_install_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"))
 }
 
+/// UVR_R_ARCH
+///
+/// macOS only. Architecture `uvr r install` downloads R for: `arm64` (or
+/// `aarch64`) or `x86_64`. Unset, uvr uses the machine's architecture — on an
+/// Apple Silicon Mac that is arm64 even when uvr itself is an x86_64 build
+/// running under Rosetta 2 (#155); set `x86_64` to install Intel R there.
+/// Other values are ignored. Returned in Rust's vocabulary (`aarch64` /
+/// `x86_64`).
+pub fn r_arch() -> Option<&'static str> {
+    match read_env_var("UVR_R_ARCH")?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "arm64" | "aarch64" => Some("aarch64"),
+        "x86_64" => Some("x86_64"),
+        _ => None,
+    }
+}
+
 /// UVR_REPOS — comma-separated list of CRAN-like repository URLs to use
 /// in addition to (and at higher priority than) any `[[sources]]` in
 /// `uvr.toml`. Each URL becomes a `[[sources]]` entry whose name is
@@ -282,6 +302,7 @@ mod tests {
             "UVR_NO_COMPANION",
             "UVR_PACKAGES_DIR",
             "UVR_PROGRESS",
+            "UVR_R_ARCH",
             "UVR_R_INSTALL_DIR",
             "UVR_REPOS",
             "UVR_UNATTENDED",
@@ -303,6 +324,7 @@ mod tests {
         assert!(!unattended());
         assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
+        assert_eq!(r_arch(), None);
 
         let default_r_install = r_install_dir();
         assert!(default_r_install.is_some());
@@ -353,6 +375,16 @@ mod tests {
         env::set_var("UVR_R_INSTALL_DIR", "/custom/r-versions");
         assert_eq!(r_install_dir(), Some(PathBuf::from("/custom/r-versions")));
 
+        for (raw, want) in [
+            ("arm64", Some("aarch64")),
+            ("AArch64", Some("aarch64")),
+            (" x86_64 ", Some("x86_64")),
+            ("intel", None),
+        ] {
+            env::set_var("UVR_R_ARCH", raw);
+            assert_eq!(r_arch(), want, "UVR_R_ARCH={raw:?}");
+        }
+
         // 3. Empty-string env vars falling through to default
         for &var in &vars_to_test {
             env::set_var(var, "");
@@ -368,6 +400,7 @@ mod tests {
         assert_eq!(library(), None);
         assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
+        assert_eq!(r_arch(), None);
         // …and the project's library path falls back to project-local.
         assert!(project.library_path().ends_with(".uvr/library"));
 

@@ -648,6 +648,15 @@ async fn install_from_lockfile_with_r(
         None
     };
 
+    // Binary packages follow the R that loads them, not uvr's own build: an
+    // x86_64 uvr under Rosetta runs arm64 R, and an Intel R installed before
+    // #155 stays Intel. Decides the P3M channel, the Built:/UA triple, the
+    // Mach-O check, and the package-cache key.
+    let r_platform = Platform::of_r(&r_binary);
+    let r_arch = r_platform
+        .as_ref()
+        .map_or(std::env::consts::ARCH, Platform::arch);
+
     // Retroactively patch already-installed binary packages whose .so files still
     // reference the CRAN framework libR path (installed before patching support was
     // added). macOS only — Windows DLLs use PATH, not install names.
@@ -715,6 +724,7 @@ async fn install_from_lockfile_with_r(
             &pkg.version,
             nested_identity.as_deref().or(pkg.checksum.as_deref()),
             &r_minor_str,
+            r_arch,
             binary_cache_allowed && nested.is_none(),
             libr_path.as_deref(),
             binary_flavor.as_deref(),
@@ -758,13 +768,15 @@ async fn install_from_lockfile_with_r(
     // told us they were binary (would extract a source tree as if it were a
     // binary package — silent breakage). Built once and attached per-spec
     // below.
-    let detected_platform = Platform::detect();
-
+    //
     // Build HostInfo once — used for UA construction and Built: matching.
-    let host_info = uvr_core::r_version::downloader::host_info(&r_minor_str);
+    let host_info = uvr_core::r_version::downloader::host_info(
+        &r_minor_str,
+        *r_platform.as_ref().unwrap_or(&Platform::LinuxX86_64),
+    );
     let user_agent = uvr_core::r_version::downloader::user_agent(&host_info);
     // For backward compat with downstream code expecting Option<String>:
-    let linux_ppm_user_agent: Option<String> = match detected_platform {
+    let linux_ppm_user_agent: Option<String> = match r_platform {
         Ok(Platform::LinuxX86_64 | Platform::LinuxArm64) => Some(user_agent.clone()),
         _ => None,
     };
@@ -802,7 +814,7 @@ async fn install_from_lockfile_with_r(
             // Nothing to consult: every package takes the source path below.
             None
         } else if custom_binary.is_empty() {
-            match detected_platform {
+            match r_platform {
                 Ok(platform) => {
                     let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
                         Some(uvr_core::r_version::downloader::detect_posit_distro_slug())
@@ -1326,6 +1338,7 @@ async fn install_from_lockfile_with_r(
                         &library,
                         &plan.pkg.name,
                         libr_path.as_deref(),
+                        r_arch,
                     )
                     .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
                 }
@@ -1375,6 +1388,7 @@ async fn install_from_lockfile_with_r(
                 &plan.pkg.version,
                 nested_identity.as_deref().or(plan.pkg.checksum.as_deref()),
                 &r_minor_str,
+                r_arch,
                 cache_key_binary,
                 libr_path.as_deref(),
                 binary_flavor.as_deref(),
@@ -1964,7 +1978,8 @@ fn r_minor(version: &str) -> String {
 ///
 /// Cheap — reads `/etc/os-release`, no network.
 fn binary_repo_flavor() -> Option<String> {
-    match Platform::detect() {
+    // Only the OS matters here; `compiled` also skips `detect`'s macOS probe.
+    match Platform::compiled() {
         Ok(Platform::LinuxX86_64) | Ok(Platform::LinuxArm64) => {
             let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
             uvr_core::registry::p3m::ppm_linux_repo(&slug).map(str::to_string)
