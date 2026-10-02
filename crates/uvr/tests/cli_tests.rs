@@ -263,6 +263,99 @@ fn test_r_install_rejects_an_empty_install_dir() {
 }
 
 #[test]
+fn test_resolution_flag_is_offered_on_lock_add_update() {
+    // #193: the strategy knob lives on every command that resolves.
+    for command in ["lock", "add", "update"] {
+        uvr_cmd()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--resolution"))
+            .stdout(predicate::str::contains("lowest-direct"));
+    }
+}
+
+#[test]
+fn test_resolution_flag_rejects_an_unknown_strategy() {
+    // clap refuses the value before any resolution (or network) starts.
+    let dir = init_project("badflag");
+    uvr_cmd()
+        .args(["lock", "--resolution", "newest"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'newest'"))
+        .stderr(predicate::str::contains("lowest-direct"));
+}
+
+#[test]
+fn test_manifest_with_an_unknown_strategy_is_rejected() {
+    let dir = init_project("badtable");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str("\n[resolution]\nstrategy = \"newest\"\n");
+    fs::write(&toml_path, toml).unwrap();
+    uvr_cmd()
+        .args(["lock"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("newest"));
+}
+
+#[test]
+fn test_exclude_newer_flag_is_offered_on_lock() {
+    uvr_cmd()
+        .args(["lock", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--exclude-newer <DATE>"));
+}
+
+#[test]
+fn test_exclude_newer_flag_rejects_dates_without_a_snapshot() {
+    // #194: clap refuses the date before any network access.
+    let dir = init_project("baddate");
+    for (date, why) in [
+        ("2024-02-30", "expected YYYY-MM-DD"),
+        ("2017-01-01", "before 2017-10-10"),
+        ("2999-01-01", "in the future"),
+    ] {
+        uvr_cmd()
+            .args(["lock", "--exclude-newer", date])
+            .current_dir(dir.path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(why));
+    }
+}
+
+#[test]
+fn test_frozen_sync_resolves_at_the_manifest_exclude_newer_date() {
+    // #194: `sync --frozen` checks the lock against `[resolution]
+    // exclude-newer`. A date with no snapshot fails that check before any
+    // network access, which shows the date is read; `uvr lock` checks it too.
+    let dir = init_project("frozendate");
+    let toml_path = dir.path().join("uvr.toml");
+    let mut toml = fs::read_to_string(&toml_path).unwrap();
+    toml.push_str("\n[resolution]\nexclude-newer = \"2017-01-01\"\n");
+    fs::write(&toml_path, toml).unwrap();
+    fs::write(
+        dir.path().join("uvr.lock"),
+        "[r]\nversion = \"4.5.1\"\nresolved_as_of = \"2017-01-01\"\n",
+    )
+    .unwrap();
+    for args in [&["sync", "--frozen"][..], &["lock"][..]] {
+        uvr_cmd()
+            .args(args)
+            .current_dir(dir.path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("exclude-newer date 2017-01-01"));
+    }
+}
+
+#[test]
 fn test_sync_without_lockfile_fails() {
     let dir = init_project("no-lock-test");
     uvr_cmd()

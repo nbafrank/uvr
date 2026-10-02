@@ -6,7 +6,7 @@ use semver::{Version, VersionReq};
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::{LockedPackage, Lockfile, PackageSource};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, ResolutionStrategy};
 use crate::registry::{Dep, PackageInfo};
 
 use self::graph::DependencyGraph;
@@ -30,15 +30,31 @@ pub struct ResolvedPackage {
 /// Trait to abstract over CRAN / Bioconductor / GitHub registries.
 pub trait PackageRegistry {
     fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo>;
+
+    /// Like `resolve_package`, but picks the oldest satisfying version (#193).
+    /// The default suits registries that carry one version per package
+    /// (a Bioconductor release), where oldest and newest are the same.
+    fn resolve_package_lowest(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+        self.resolve_package(name, constraint)
+    }
 }
 
 pub struct Resolver<'a> {
     registry: &'a dyn PackageRegistry,
+    strategy: ResolutionStrategy,
 }
 
 impl<'a> Resolver<'a> {
     pub fn new(registry: &'a dyn PackageRegistry) -> Self {
-        Resolver { registry }
+        Resolver {
+            registry,
+            strategy: ResolutionStrategy::Highest,
+        }
+    }
+
+    pub fn with_strategy(mut self, strategy: ResolutionStrategy) -> Self {
+        self.strategy = strategy;
+        self
     }
 
     /// Resolve all manifest dependencies into a `Lockfile`.
@@ -73,6 +89,23 @@ impl<'a> Resolver<'a> {
             .map(str::to_string)
             .or_else(|| manifest.project.r_version.clone())
             .unwrap_or_else(|| "*".to_string());
+
+        // The registry lookup each package gets under the strategy (#193).
+        let lookup = |name: &str, constraint: Option<&str>| {
+            let lowest = match self.strategy {
+                ResolutionStrategy::Highest => false,
+                ResolutionStrategy::Lowest => true,
+                ResolutionStrategy::LowestDirect => {
+                    manifest.dependencies.contains_key(name)
+                        || manifest.dev_dependencies.contains_key(name)
+                }
+            };
+            if lowest {
+                self.registry.resolve_package_lowest(name, constraint)
+            } else {
+                self.registry.resolve_package(name, constraint)
+            }
+        };
 
         let mut resolution: Resolution = HashMap::new();
         let mut graph = DependencyGraph::default();
@@ -153,9 +186,7 @@ impl<'a> Resolver<'a> {
                                 });
                             }
                             // Try re-resolving with the stricter constraint.
-                            if let Ok(new_info) =
-                                self.registry.resolve_package(&name, Some(c.as_str()))
-                            {
+                            if let Ok(new_info) = lookup(&name, Some(c.as_str())) {
                                 // Verify the new version satisfies ALL prior constraints.
                                 let all_ok = seen_constraints
                                     .get(&name)
@@ -246,8 +277,7 @@ impl<'a> Resolver<'a> {
                 }
                 pi.clone()
             } else {
-                self.registry
-                    .resolve_package(&name, constraint.as_deref())?
+                lookup(&name, constraint.as_deref())?
             };
 
             graph.add_node(&name);
@@ -294,6 +324,26 @@ impl<'a> Resolver<'a> {
         // Validate the graph has no cycles (topo sort will error on cycles).
         graph.topological_sort()?;
 
+        // A low pick is often replaced by a higher one when a stricter
+        // constraint arrives later, and the dependencies of the replaced
+        // version stay behind. Drop what no selected version requires.
+        // Highest resolution keeps its output unchanged.
+        if self.strategy != ResolutionStrategy::Highest {
+            let roots: HashSet<&str> = manifest
+                .dependencies
+                .keys()
+                .chain(manifest.dev_dependencies.keys())
+                .map(String::as_str)
+                .collect();
+            let orphans: Vec<String> = find_dev_only_packages(&resolution, &roots)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            for name in orphans {
+                resolution.remove(&name);
+            }
+        }
+
         // Determine which packages are dev-only: reachable exclusively from
         // dev_roots, not from any regular dependency root.
         let non_dev_roots: HashSet<&str> =
@@ -332,6 +382,7 @@ impl<'a> Resolver<'a> {
             r: crate::lockfile::RVersionPin {
                 version: r_version,
                 bioc_version: bioc_version.map(str::to_string),
+                resolved_as_of: None,
             },
             packages,
         })
@@ -1346,5 +1397,244 @@ mod tests {
 
         assert!(!lockfile.get_package("rlang").unwrap().dev);
         assert!(lockfile.get_package("testthat").unwrap().dev);
+    }
+
+    // ── resolution strategy (#193) ──────────────────────────────────
+
+    /// Several versions per package; honours constraints and picks from
+    /// either end, as the CRAN index does.
+    struct VersionedRegistry {
+        packages: Vec<PackageInfo>,
+    }
+
+    impl VersionedRegistry {
+        fn new(packages: Vec<(String, PackageInfo)>) -> Self {
+            VersionedRegistry {
+                packages: packages.into_iter().map(|(_, p)| p).collect(),
+            }
+        }
+
+        fn pick(&self, name: &str, constraint: Option<&str>, lowest: bool) -> Result<PackageInfo> {
+            let req = parse_version_req(constraint.unwrap_or("*"))?;
+            let mut named: Vec<&PackageInfo> =
+                self.packages.iter().filter(|p| p.name == name).collect();
+            if named.is_empty() {
+                return Err(UvrError::PackageNotFound(name.to_string()));
+            }
+            named.retain(|p| version_matches_req(&p.version, &req));
+            named.sort_by(|a, b| a.version.cmp(&b.version));
+            let pick = if lowest { named.first() } else { named.last() };
+            pick.map(|p| (*p).clone())
+                .ok_or_else(|| UvrError::NoMatchingVersion {
+                    package: name.to_string(),
+                    constraint: constraint.unwrap_or("*").to_string(),
+                })
+        }
+    }
+
+    impl PackageRegistry for VersionedRegistry {
+        fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+            self.pick(name, constraint, false)
+        }
+        fn resolve_package_lowest(
+            &self,
+            name: &str,
+            constraint: Option<&str>,
+        ) -> Result<PackageInfo> {
+            self.pick(name, constraint, true)
+        }
+    }
+
+    fn versions(lockfile: &Lockfile) -> Vec<(String, String)> {
+        lockfile
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn default_strategy_reproduces_the_fixture_lockfile() {
+        let manifest: Manifest = include_str!("../../../../tests/fixtures/sample_project/uvr.toml")
+            .parse()
+            .unwrap();
+        let fixture: Lockfile = include_str!("../../../../tests/fixtures/sample_project/uvr.lock")
+            .parse()
+            .unwrap();
+
+        // The locked versions are the newest the registry has; older ones
+        // (with other dependencies) sit beside them.
+        let mut packages: Vec<(String, PackageInfo)> = fixture
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), locked_to_package_info(p).unwrap()))
+            .collect();
+        packages.extend([
+            make_pkg(
+                "ggplot2",
+                "3.0.0",
+                vec![("dplyr", None), ("scales", None), ("plyr", None)],
+            ),
+            make_pkg("dplyr", "1.0.0", vec![("rlang", None)]),
+            make_pkg("rlang", "0.4.0", vec![]),
+            make_pkg("scales", "1.0.0", vec![]),
+            make_pkg("plyr", "1.8.0", vec![]),
+        ]);
+        let registry = VersionedRegistry::new(packages);
+
+        let resolve = |resolver: Resolver| {
+            resolver
+                .resolve(&manifest, Some("4.3.2"), None, HashMap::new())
+                .unwrap()
+        };
+        let mut default = resolve(Resolver::new(&registry));
+        // The hand-written fixture has no manifest fingerprint.
+        default.manifest_fingerprint = fixture.manifest_fingerprint.clone();
+        assert_eq!(default, fixture);
+        // The fixture is hand-written with inline arrays; uvr writes the
+        // same lockfile in its own layout, so compare against that.
+        let expected = fixture.to_toml_string().unwrap();
+        assert_eq!(default.to_toml_string().unwrap(), expected);
+        let mut highest =
+            resolve(Resolver::new(&registry).with_strategy(ResolutionStrategy::Highest));
+        highest.manifest_fingerprint = fixture.manifest_fingerprint.clone();
+        assert_eq!(highest.to_toml_string().unwrap(), expected);
+
+        // The same inputs resolve to the floors under `lowest`.
+        let lowest = resolve(Resolver::new(&registry).with_strategy(ResolutionStrategy::Lowest));
+        assert_eq!(
+            versions(&lowest),
+            pairs(&[
+                ("dplyr", "1.0.0"),
+                ("ggplot2", "3.0.0"),
+                ("plyr", "1.8.0"),
+                ("rlang", "0.4.0"),
+                ("scales", "1.0.0"),
+            ])
+        );
+    }
+
+    fn floors_registry() -> VersionedRegistry {
+        VersionedRegistry::new(vec![
+            make_pkg("app", "1.0.0", vec![("helper", None)]),
+            make_pkg("app", "2.0.0", vec![("helper", Some(">=0.5.0"))]),
+            make_pkg("helper", "0.1.0", vec![]),
+            make_pkg("helper", "0.5.0", vec![]),
+            make_pkg("helper", "0.9.0", vec![]),
+        ])
+    }
+
+    fn resolve_app(
+        registry: &dyn PackageRegistry,
+        strategy: ResolutionStrategy,
+    ) -> Result<Lockfile> {
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("app".into(), DependencySpec::Version(">=1.0".into()), false);
+        Resolver::new(registry).with_strategy(strategy).resolve(
+            &manifest,
+            None,
+            None,
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn each_strategy_picks_its_end_of_the_range() {
+        let registry = floors_registry();
+        let lock = |s| versions(&resolve_app(&registry, s).unwrap());
+        assert_eq!(
+            lock(ResolutionStrategy::Highest),
+            pairs(&[("app", "2.0.0"), ("helper", "0.9.0")])
+        );
+        // lowest: every package at its floor, the unconstrained helper at
+        // its first release.
+        assert_eq!(
+            lock(ResolutionStrategy::Lowest),
+            pairs(&[("app", "1.0.0"), ("helper", "0.1.0")])
+        );
+        // lowest-direct: only the manifest's own dependency is lowered.
+        assert_eq!(
+            lock(ResolutionStrategy::LowestDirect),
+            pairs(&[("app", "1.0.0"), ("helper", "0.9.0")])
+        );
+    }
+
+    #[test]
+    fn lowest_reaches_registries_behind_a_chain() {
+        // `uvr lock` resolves through a chain whenever Bioconductor or a
+        // custom source is configured; the strategy must pass through it.
+        let empty = MockRegistry {
+            packages: HashMap::new(),
+        };
+        let versioned = floors_registry();
+        let chain = crate::registry::RegistryChain::new(vec![&empty, &versioned]);
+        let lock = resolve_app(&chain, ResolutionStrategy::Lowest).unwrap();
+        assert_eq!(
+            versions(&lock),
+            pairs(&[("app", "1.0.0"), ("helper", "0.1.0")])
+        );
+    }
+
+    #[test]
+    fn lowest_without_a_satisfying_version_is_the_standard_error() {
+        let registry = floors_registry();
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("app".into(), DependencySpec::Version(">=3.0".into()), false);
+        for strategy in [ResolutionStrategy::Lowest, ResolutionStrategy::LowestDirect] {
+            let err = Resolver::new(&registry)
+                .with_strategy(strategy)
+                .resolve(&manifest, None, None, HashMap::new())
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "No version of 'app' satisfies constraint '>=3.0'"
+            );
+        }
+
+        // A transitive bound is reported the same way.
+        let registry = VersionedRegistry::new(vec![
+            make_pkg("app", "1.0.0", vec![("helper", Some(">=2.0.0"))]),
+            make_pkg("helper", "1.0.0", vec![]),
+        ]);
+        let err = resolve_app(&registry, ResolutionStrategy::Lowest).unwrap_err();
+        assert!(matches!(
+            err,
+            UvrError::NoMatchingVersion { ref package, ref constraint }
+                if package == "helper" && constraint == ">=2.0.0"
+        ));
+    }
+
+    #[test]
+    fn lowest_drops_dependencies_of_replaced_versions() {
+        // app asks for shared unconstrained, so lowest picks shared 1.0,
+        // whose `oldhelper` is queued. tool then needs shared >= 2.0, which
+        // replaces it; oldhelper must not stay in the lockfile.
+        let registry = VersionedRegistry::new(vec![
+            make_pkg("app", "1.0.0", vec![("shared", None)]),
+            make_pkg("tool", "1.0.0", vec![("shared", Some(">=2.0.0"))]),
+            make_pkg("shared", "1.0.0", vec![("oldhelper", None)]),
+            make_pkg("shared", "2.0.0", vec![]),
+            make_pkg("oldhelper", "1.0.0", vec![]),
+        ]);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("app".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("tool".into(), DependencySpec::Version("*".into()), true);
+        let lock = Resolver::new(&registry)
+            .with_strategy(ResolutionStrategy::Lowest)
+            .resolve(&manifest, None, None, HashMap::new())
+            .unwrap();
+        assert_eq!(
+            versions(&lock),
+            pairs(&[("app", "1.0.0"), ("shared", "2.0.0"), ("tool", "1.0.0")])
+        );
+        // Pruning keeps dev tagging intact.
+        assert!(lock.get_package("tool").unwrap().dev);
+        assert!(!lock.get_package("shared").unwrap().dev);
     }
 }

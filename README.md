@@ -264,6 +264,8 @@ or to the repository root.
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |
 | `uvr lock --upgrade` | Upgrade all packages to their latest allowed versions |
+| `uvr lock --resolution lowest` | Resolve to the oldest versions the constraints allow, to test declared floors (also on `add` and `update`; see [`[resolution]`](#resolution-strategy)) |
+| `uvr lock --exclude-newer 2024-01-01` | Resolve CRAN packages as they were on a date (see [Resolve as of a date](#resolve-as-of-a-date)) |
 | `uvr tree` | Show the dependency tree |
 | `uvr tree --depth 1` | Show only direct dependencies |
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |
@@ -583,6 +585,71 @@ export UVR_REPO_PASSWORD_INTERNAL_PPM=...
 - If a host refuses a netrc password (`401`, or `404` from `raw.githubusercontent.com`), uvr shows a warning and does not use that entry again in the same run. uvr then continues without credentials, so public repositories still work. uvr never ignores a token from a variable: if the host refuses it, uvr stops with an error.
 - For a `git::` dependency, git servers take HTTP basic auth, so uvr sends the token as the password. The user name is `UVR_GIT_USER_<HOST>`, or `x-token-auth` if that is not set (Bitbucket Cloud access tokens need that name; GitLab accepts any name). From `~/.netrc`, uvr uses the `login` and `password` of the entry. uvr gives the header to git in `GIT_CONFIG_*` environment variables, which need git 2.31 or later, and never on the command line. git sends it only to the `https://` origin of the URL. There is no variable for all `git::` hosts, because it would send one token to every host that a dependency names.
 - If uvr has no token for a `git::` host, git uses its own credential helpers. For `ssh://` and `user@host:path` URLs, git uses your ssh keys and agent, and uvr sends nothing. uvr turns off the terminal prompts of git, so a private repository without credentials fails instead of waiting for input.
+
+#### Resolution strategy
+
+```toml
+[resolution]
+strategy = "lowest-direct"   # "highest" (default), "lowest", or "lowest-direct"
+```
+
+The strategy selects which end of each allowed version range uvr uses:
+
+- `highest` (the default) uses the newest release.
+- `lowest` uses the oldest release that each constraint allows, for all
+  packages. Thus `ggplot2 = ">=3.4.0"` resolves to ggplot2 3.4.0, and you can
+  test that floor. A package that no constraint limits resolves to its first
+  CRAN release, which frequently does not build on a current R.
+- `lowest-direct` uses the oldest release for the dependencies in `uvr.toml`,
+  and the newest release for the packages that they pull in. Use this mode to
+  check your own floors in CI.
+
+`--resolution <strategy>` on `uvr lock`, `uvr add`, and `uvr update` overrides
+the setting for one run. uvr does not store the override. The next resolution
+(after a change to `uvr.toml`, such as `uvr add`, or with `uvr lock --upgrade`)
+uses the `uvr.toml` setting again. Thus, to keep a strategy, write it in
+`uvr.toml`. `uvr sync --frozen` compares the lockfile with `uvr.toml`, so a
+change of the setting there makes the lockfile stale.
+
+CRAN's package index lists only current releases. For the older releases,
+uvr gets the metadata from [crandb](https://crandb.r-pkg.org) (METACRAN),
+keeps it in `~/.uvr/cache/cran-history/`, and downloads the tarballs from the
+CRAN archive. There are no P3M binaries for old releases, thus `uvr sync`
+builds them from source. uvr does not use a release that needs a package that
+is no longer on CRAN. Bioconductor packages and custom repositories resolve
+from their index without change (a Bioconductor release has one version of
+each package). Git dependencies stay at the commit that they name.
+
+#### Resolve as of a date
+
+```toml
+[resolution]
+exclude-newer = "2024-01-01"   # YYYY-MM-DD
+```
+
+`exclude-newer` resolves CRAN packages as they were on that date, so that you
+can reproduce an analysis as it was then. uvr reads the CRAN index from the
+[Posit Package Manager](https://packagemanager.posit.co) snapshot for that day
+(`https://packagemanager.posit.co/cran/<DATE>`), and records the date in
+`uvr.lock` as `resolved_as_of`. `uvr sync` downloads the source tarballs and
+the P3M binaries from the same snapshot. The first snapshot is 2017-10-10, and
+a date in the future is an error.
+
+- The snapshot shows CRAN as Package Manager copied it on that day. Package
+  Manager can be some days behind CRAN, thus a release that CRAN published a
+  short time before the date can be absent.
+- `--exclude-newer <DATE>` on `uvr lock` overrides the setting for one run.
+  As with `--resolution`, `uvr add`, `uvr sync --frozen`, and later `uvr lock`
+  runs use the `uvr.toml` setting. Thus, to keep a date, write it in
+  `uvr.toml`. `uvr sync --frozen` fails when the date in `uvr.lock` is not
+  the date in `uvr.toml`.
+- With `--resolution lowest`, releases that are older than the snapshot's
+  release download from the CRAN archive, where their MD5 checksum applies.
+- Bioconductor packages, `[[sources]]` repositories, and git dependencies have
+  no dated snapshot. uvr shows one warning that names them, and resolves them
+  from their current state.
+- `UVR_REPOS` has no effect on the date: lock time does not read it, and at
+  sync time a mirror supplies only a binary of the exact locked version.
 
 ---
 

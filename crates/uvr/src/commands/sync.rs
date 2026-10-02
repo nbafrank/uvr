@@ -816,6 +816,8 @@ async fn install_from_lockfile_with_r(
                             platform,
                             bioc_release,
                             slug.as_deref(),
+                            // A dated lock installs from the same snapshot (#194).
+                            lockfile.r.resolved_as_of.as_deref(),
                         )
                         .await,
                     )
@@ -1754,6 +1756,29 @@ pub(super) fn validate_frozen_lock(project: &Project, lockfile: &Lockfile) -> Re
     }
     validate_locked_manifest(project, lockfile)?;
 
+    // The fingerprint covers `[resolution] exclude-newer`, but not a lock
+    // made with an `--exclude-newer` override: its date is only in the lock.
+    // A lock made at another date (or live) is out of date (#194). The
+    // manifest date is normalized as `uvr lock` does it; a date with no
+    // snapshot is an error here too.
+    let wanted = project
+        .manifest
+        .exclude_newer()
+        .map(uvr_core::registry::cran::snapshot_date)
+        .transpose()?;
+    if lockfile.r.resolved_as_of != wanted {
+        let describe = |date: Option<&str>| match date {
+            Some(date) => format!("as of {date}"),
+            None => "without a date limit".to_string(),
+        };
+        anyhow::bail!(
+            "uvr.lock was resolved {}, but uvr.toml asks for a resolution {}.\n\
+             Run `uvr lock` to update it, then commit the result.",
+            describe(lockfile.r.resolved_as_of.as_deref()),
+            describe(wanted.as_deref())
+        );
+    }
+
     // The manifest fingerprint covers the R constraint, while the lock also
     // records the concrete R minor used to resolve binary/Bioc packages.
     if let Ok(r_binary) = find_r_binary(project.manifest.project.r_version.as_deref()) {
@@ -2639,6 +2664,7 @@ mod tests {
             r: RVersionPin {
                 version: "*".into(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![locked_pkg(
                 "rlang",
@@ -2660,6 +2686,37 @@ mod tests {
     }
 
     #[test]
+    fn frozen_lock_made_at_another_date_is_out_of_date() {
+        // #194: `--exclude-newer` on `uvr lock` leaves uvr.toml unchanged, so
+        // only the lock's `resolved_as_of` shows that the date differs.
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut manifest = uvr_core::manifest::Manifest::new("research", None);
+        manifest.add_dep(
+            "rlang".into(),
+            uvr_core::manifest::DependencySpec::Version("*".into()),
+            false,
+        );
+        manifest.write(&temp.path().join("uvr.toml")).unwrap();
+        let project = Project::find(temp.path()).unwrap();
+        let lock = |as_of: Option<&str>| Lockfile {
+            manifest_fingerprint: Some(manifest.lock_fingerprint().unwrap()),
+            r: RVersionPin {
+                version: "*".into(),
+                bioc_version: None,
+                resolved_as_of: as_of.map(str::to_string),
+            },
+            packages: vec![locked_pkg(
+                "rlang",
+                "1.1.6",
+                "https://cran.example/rlang.tar.gz",
+            )],
+        };
+        validate_frozen_lock(&project, &lock(None)).unwrap();
+        let err = validate_frozen_lock(&project, &lock(Some("2024-01-01"))).unwrap_err();
+        assert!(err.to_string().contains("as of 2024-01-01"), "{err}");
+    }
+
+    #[test]
     fn legacy_frozen_lock_checks_roots_without_network() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join("uvr.toml");
@@ -2676,6 +2733,7 @@ mod tests {
             r: RVersionPin {
                 version: "*".into(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![locked_pkg(
                 "rlang",
@@ -2705,6 +2763,7 @@ mod tests {
             r: RVersionPin {
                 version: "*".into(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![locked_pkg(
                 "rlang",
@@ -2748,6 +2807,7 @@ mod tests {
             r: RVersionPin {
                 version: "*".into(),
                 bioc_version: Some("3.21".into()),
+                resolved_as_of: None,
             },
             packages: vec![pkg],
         };
@@ -2774,6 +2834,7 @@ mod tests {
             r: RVersionPin {
                 version: "*".into(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![nested_locked("rlang", NESTED_SHA, None)],
         };
@@ -3411,6 +3472,7 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
             r: RVersionPin {
                 version: "4.4.2".into(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![
                 locked_pkg(
@@ -3475,6 +3537,7 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
                 r: RVersionPin {
                     version: "4.4.2".into(),
                     bioc_version: None,
+                    resolved_as_of: None,
                 },
                 packages: vec![broken],
             })

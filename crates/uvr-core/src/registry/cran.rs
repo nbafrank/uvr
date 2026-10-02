@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use flate2::read::GzDecoder;
 use semver::{Version, VersionReq};
@@ -13,6 +14,43 @@ use crate::resolver::{is_base_package, normalize_version, parse_version_req, Pac
 
 const CRAN_PACKAGES_URL: &str = "https://cran.r-project.org/src/contrib/PACKAGES.gz";
 const CRAN_SRC_BASE: &str = "https://cran.r-project.org/src/contrib";
+
+/// Posit Package Manager's CRAN repository. `<PPM_CRAN_URL>/<YYYY-MM-DD>`
+/// serves CRAN as PPM held it on that day (#194).
+const PPM_CRAN_URL: &str = "https://packagemanager.posit.co/cran";
+
+/// Check an `exclude-newer` date and return it as `YYYY-MM-DD`. PPM has a
+/// CRAN snapshot for every day from 2017-10-10 to today (UTC), and answers
+/// 404 outside that range.
+pub fn snapshot_date(date: &str) -> Result<String> {
+    snapshot_date_on(date, chrono::Utc::now().date_naive())
+}
+
+fn snapshot_date_on(date: &str, today: chrono::NaiveDate) -> Result<String> {
+    let parsed = chrono::NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d").map_err(|_| {
+        UvrError::Other(format!(
+            "Invalid exclude-newer date '{date}': expected YYYY-MM-DD"
+        ))
+    })?;
+    let first = chrono::NaiveDate::from_ymd_opt(2017, 10, 10).expect("a valid date");
+    if parsed < first {
+        return Err(UvrError::Other(format!(
+            "exclude-newer date {parsed} is before {first}, the first day \
+             Posit Package Manager has a CRAN snapshot for"
+        )));
+    }
+    if parsed > today {
+        return Err(UvrError::Other(format!(
+            "exclude-newer date {parsed} is in the future (today is {today}, UTC)"
+        )));
+    }
+    Ok(parsed.format("%Y-%m-%d").to_string())
+}
+
+/// The tarball base of PPM's CRAN snapshot for `date`.
+fn snapshot_src_base(date: &str) -> String {
+    format!("{PPM_CRAN_URL}/{date}/src/contrib")
+}
 
 /// A parsed entry from CRAN's PACKAGES.gz.
 #[derive(Debug, Clone)]
@@ -199,7 +237,22 @@ pub struct CranIndex {
 }
 
 impl CranIndex {
+    /// The newest version satisfying `constraint`.
     pub fn get_best(&self, name: &str, constraint: Option<&str>) -> Result<&CranPackageEntry> {
+        self.select(name, constraint, false)
+    }
+
+    /// The oldest version satisfying `constraint` (#193).
+    pub fn get_lowest(&self, name: &str, constraint: Option<&str>) -> Result<&CranPackageEntry> {
+        self.select(name, constraint, true)
+    }
+
+    fn select(
+        &self,
+        name: &str,
+        constraint: Option<&str>,
+        lowest: bool,
+    ) -> Result<&CranPackageEntry> {
         let entries = self
             .packages
             .get(name)
@@ -209,17 +262,38 @@ impl CranIndex {
             Some(c) if c != "*" && !c.is_empty() => Some(parse_version_req(c)?),
             _ => None,
         };
+        let satisfies = |e: &&CranPackageEntry| {
+            req.as_ref()
+                .is_none_or(|r| crate::resolver::version_matches_req(&e.version, r))
+        };
 
-        entries
-            .iter()
-            .find(|e| {
-                req.as_ref()
-                    .is_none_or(|r| crate::resolver::version_matches_req(&e.version, r))
-            })
-            .ok_or_else(|| UvrError::NoMatchingVersion {
-                package: name.to_string(),
-                constraint: constraint.unwrap_or("*").to_string(),
-            })
+        // Entries are sorted newest-first.
+        let found = if lowest {
+            // Old releases can need packages that have since left CRAN
+            // (testthat 0.1 needs mutatr). Skip those releases, as a
+            // backtracking resolver would; if every candidate has such a
+            // dependency (a Bioconductor import, say), keep the oldest.
+            let mut candidates = entries.iter().rev().filter(satisfies);
+            let oldest = candidates.clone().next();
+            candidates
+                .find(|e| {
+                    e.requires_as_deps()
+                        .iter()
+                        .all(|d| self.packages.contains_key(&d.name))
+                })
+                .or(oldest)
+        } else {
+            entries.iter().find(satisfies)
+        };
+        found.ok_or_else(|| UvrError::NoMatchingVersion {
+            package: name.to_string(),
+            constraint: constraint.unwrap_or("*").to_string(),
+        })
+    }
+
+    /// The newest entry for `name`: the current release in a CRAN index.
+    fn newest(&self, name: &str) -> Option<&CranPackageEntry> {
+        self.packages.get(name).and_then(|v| v.first())
     }
 
     fn insert(&mut self, entry: CranPackageEntry) {
@@ -262,9 +336,27 @@ pub struct CranRegistry {
     src_base: String,
     /// Package source to record in the lockfile.
     source: PackageSource,
+    /// Packages whose older CRAN releases are merged into `index` (#193).
+    history_loaded: HashSet<String>,
+    /// Packages a lowest-version lookup asked for before their history was
+    /// loaded. The caller loads them and resolves again.
+    history_wanted: Mutex<BTreeSet<String>>,
+    /// The PPM snapshot date this index was read from (#194).
+    snapshot: Option<String>,
 }
 
 impl CranRegistry {
+    fn new(index: CranIndex, src_base: &str, source: PackageSource) -> Self {
+        CranRegistry {
+            index,
+            src_base: src_base.to_string(),
+            source,
+            history_loaded: HashSet::new(),
+            history_wanted: Mutex::new(BTreeSet::new()),
+            snapshot: None,
+        }
+    }
+
     /// Fetch (or load from cache) the CRAN index.
     pub async fn fetch(client: &reqwest::Client, force_refresh: bool) -> Result<Self> {
         Self::fetch_from(
@@ -278,6 +370,32 @@ impl CranRegistry {
             None,
         )
         .await
+    }
+
+    /// Fetch the CRAN index as PPM's snapshot of `date` holds it (#194).
+    /// `date` must come from [`snapshot_date`]. Tarballs of the releases the
+    /// snapshot lists download from the same snapshot.
+    pub async fn fetch_snapshot(
+        client: &reqwest::Client,
+        date: &str,
+        force_refresh: bool,
+    ) -> Result<Self> {
+        let src_base = snapshot_src_base(date);
+        // ponytail: PPM sends no ETag or Last-Modified, so each lock downloads
+        // the index again. Skip the request for past dates if that gets slow.
+        let mut registry = Self::fetch_from(
+            client,
+            &format!("cran-{date}"),
+            &format!("{src_base}/PACKAGES.gz"),
+            &src_base,
+            PackageSource::Cran,
+            force_refresh,
+            None,
+            None,
+        )
+        .await?;
+        registry.snapshot = Some(date.to_string());
+        Ok(registry)
     }
 
     /// Fetch a CRAN-like index from any repository that serves PACKAGES.gz.
@@ -368,13 +486,13 @@ impl CranRegistry {
     /// Test-only constructor.
     #[doc(hidden)]
     pub fn for_test(index: CranIndex, src_base: String) -> Self {
-        CranRegistry {
+        Self::new(
             index,
-            src_base,
-            source: PackageSource::Custom {
+            &src_base,
+            PackageSource::Custom {
                 name: "test".to_string(),
             },
-        }
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -424,11 +542,7 @@ impl CranRegistry {
                         let text = String::from_utf8_lossy(&raw);
                         let index = parse_packages_gz(&text)?;
                         debug!("{} index: {} packages (cached)", cache_key, index.len());
-                        return Ok(CranRegistry {
-                            index,
-                            src_base: src_base.to_string(),
-                            source,
-                        });
+                        return Ok(Self::new(index, src_base, source));
                     }
                     Ok(resp) if resp.status().is_success() => {
                         // Index changed — save new ETag/Last-Modified and body
@@ -464,11 +578,7 @@ impl CranRegistry {
                             write_cache_meta(cache_key, new_etag.as_deref(), new_lm.as_deref());
                         }
                         debug!("{} index: {} packages (updated)", cache_key, index.len());
-                        return Ok(CranRegistry {
-                            index,
-                            src_base: src_base.to_string(),
-                            source,
-                        });
+                        return Ok(Self::new(index, src_base, source));
                     }
                     Ok(_) | Err(_) => {
                         // Conditional request failed — fall back to cached data
@@ -484,11 +594,7 @@ impl CranRegistry {
                             cache_key,
                             index.len()
                         );
-                        return Ok(CranRegistry {
-                            index,
-                            src_base: src_base.to_string(),
-                            source,
-                        });
+                        return Ok(Self::new(index, src_base, source));
                     }
                 }
             }
@@ -502,11 +608,7 @@ impl CranRegistry {
             let text = String::from_utf8_lossy(&raw);
             let index = parse_packages_gz(&text)?;
             debug!("{} index: {} packages (cached)", cache_key, index.len());
-            return Ok(CranRegistry {
-                index,
-                src_base: src_base.to_string(),
-                source,
-            });
+            return Ok(Self::new(index, src_base, source));
         }
 
         // No cache or force refresh — full download
@@ -557,26 +659,39 @@ impl CranRegistry {
         }
 
         debug!("{} index: {} packages", cache_key, index.len());
-        Ok(CranRegistry {
-            index,
-            src_base: src_base.to_string(),
-            source,
-        })
+        Ok(Self::new(index, src_base, source))
     }
 
     /// Build a tarball URL for a package entry using this registry's base URL.
+    /// CRAN keeps every release but the current one under `Archive/<name>/`.
     fn tarball_url(&self, entry: &CranPackageEntry) -> String {
-        format!(
-            "{}/{}_{}.tar.gz",
-            self.src_base, entry.name, entry.raw_version
-        )
+        let archived = self.source == PackageSource::Cran
+            && self
+                .index
+                .newest(&entry.name)
+                .is_some_and(|current| current.version != entry.version);
+        if archived {
+            // An older release's MD5 (from crandb) is that of CRAN's own
+            // tarball. PPM repackages the tarballs it serves, so under a
+            // snapshot the release still downloads from CRAN's Archive.
+            let base = match self.snapshot {
+                Some(_) => CRAN_SRC_BASE,
+                None => &self.src_base,
+            };
+            format!(
+                "{base}/Archive/{}/{}_{}.tar.gz",
+                entry.name, entry.name, entry.raw_version
+            )
+        } else {
+            format!(
+                "{}/{}_{}.tar.gz",
+                self.src_base, entry.name, entry.raw_version
+            )
+        }
     }
-}
 
-impl PackageRegistry for CranRegistry {
-    fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
-        let entry = self.index.get_best(name, constraint)?;
-        Ok(PackageInfo {
+    fn package_info(&self, entry: &CranPackageEntry) -> PackageInfo {
+        PackageInfo {
             name: entry.name.clone(),
             version: entry.version.clone(),
             source: self.source.clone(),
@@ -590,7 +705,101 @@ impl PackageRegistry for CranRegistry {
             raw_version: Some(entry.raw_version.clone()),
             system_requirements: entry.system_requirements.clone(),
             subdirectory: None,
-        })
+        }
+    }
+
+    /// Take the packages that lowest-version lookups asked for before their
+    /// release history was loaded. Empty once every package the resolver
+    /// looked at has its history.
+    pub fn take_wanted_history(&self) -> BTreeSet<String> {
+        std::mem::take(
+            &mut *self
+                .history_wanted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
+    /// Fetch the older CRAN releases of `names` and merge them into the index,
+    /// so lowest-version lookups can pick them (#193).
+    pub async fn load_history(
+        &mut self,
+        client: &reqwest::Client,
+        names: BTreeSet<String>,
+    ) -> Result<()> {
+        let jobs: Vec<(String, Version)> = names
+            .into_iter()
+            .filter_map(|name| {
+                let current = self.index.newest(&name)?.version.clone();
+                Some((name, current))
+            })
+            .collect();
+        let cache_dir = super::cran_history::cache_dir();
+        // ponytail: fixed batches of 8 bound the concurrent requests to crandb.
+        for batch in jobs.chunks(8) {
+            let mut set = tokio::task::JoinSet::new();
+            for (name, current) in batch.iter().cloned() {
+                let client = client.clone();
+                let cache_dir = cache_dir.clone();
+                set.spawn(async move {
+                    let fetched = super::cran_history::fetch(
+                        &client,
+                        super::cran_history::CRANDB_URL,
+                        &cache_dir,
+                        &name,
+                        &current,
+                    )
+                    .await;
+                    (name, fetched)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                let (name, fetched) = joined.map_err(|e| UvrError::Other(e.to_string()))?;
+                self.merge_history(&name, fetched?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge the releases of `name` that are older than its current index
+    /// entry. Newer ones are skipped: the index is authoritative for what is
+    /// current, and a newer crandb release would get a wrong Archive URL.
+    /// For a snapshot index this is also the date cap (#194): CRAN version
+    /// numbers only increase, so nothing older than the snapshot's current
+    /// release was published after it.
+    fn merge_history(&mut self, name: &str, entries: Vec<CranPackageEntry>) {
+        if let Some(current) = self.index.newest(name).map(|e| e.version.clone()) {
+            for entry in entries {
+                if entry.name == name && entry.version < current {
+                    self.index.insert(entry);
+                }
+            }
+        }
+        self.history_loaded.insert(name.to_string());
+    }
+}
+
+impl PackageRegistry for CranRegistry {
+    fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+        let entry = self.index.get_best(name, constraint)?;
+        Ok(self.package_info(entry))
+    }
+
+    fn resolve_package_lowest(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+        // The PACKAGES index lists current releases only. Record the gap and
+        // answer from what is loaded; the caller loads the history and
+        // resolves again.
+        if self.source == PackageSource::Cran
+            && self.index.packages.contains_key(name)
+            && !self.history_loaded.contains(name)
+        {
+            self.history_wanted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name.to_string());
+        }
+        let entry = self.index.get_lowest(name, constraint)?;
+        Ok(self.package_info(entry))
     }
 }
 
@@ -1314,5 +1523,342 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
                 None => std::env::remove_var(var),
             }
         }
+    }
+
+    // ── lowest-version resolution (#193) ────────────────────────────
+
+    /// A repository listing several releases of `rlang`.
+    const MULTI_VERSION: &str = "Package: rlang
+Version: 1.1.4
+
+Package: rlang
+Version: 0.4.0
+
+Package: rlang
+Version: 1.0-2
+
+";
+
+    #[test]
+    fn get_lowest_picks_the_oldest_satisfying_version() {
+        let index = parse_packages_gz(MULTI_VERSION).unwrap();
+        let v = |e: &CranPackageEntry| e.raw_version.clone();
+        assert_eq!(v(index.get_lowest("rlang", None).unwrap()), "0.4.0");
+        assert_eq!(v(index.get_lowest("rlang", Some("*")).unwrap()), "0.4.0");
+        assert_eq!(
+            v(index.get_lowest("rlang", Some(">=1.0")).unwrap()),
+            "1.0-2"
+        );
+        assert_eq!(
+            v(index.get_lowest("rlang", Some(">1.0.2")).unwrap()),
+            "1.1.4"
+        );
+        // Regression: highest selection is unchanged.
+        assert_eq!(v(index.get_best("rlang", None).unwrap()), "1.1.4");
+        assert_eq!(v(index.get_best("rlang", Some("<1.1")).unwrap()), "1.0-2");
+    }
+
+    #[test]
+    fn get_lowest_without_a_satisfying_version_names_package_and_bound() {
+        let index = parse_packages_gz(MULTI_VERSION).unwrap();
+        let err = index.get_lowest("rlang", Some(">=2.0")).unwrap_err();
+        assert!(matches!(
+            &err,
+            UvrError::NoMatchingVersion { package, constraint }
+                if package == "rlang" && constraint == ">=2.0"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "No version of 'rlang' satisfies constraint '>=2.0'"
+        );
+        assert!(matches!(
+            index.get_lowest("absent", None),
+            Err(UvrError::PackageNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn get_lowest_skips_releases_that_need_packages_gone_from_cran() {
+        let index = parse_packages_gz(
+            "Package: testthat
+Version: 0.1
+Depends: R (>= 2.8), mutatr, digest
+
+Package: testthat
+Version: 0.3
+Imports: digest
+
+Package: digest
+Version: 0.6.0
+
+Package: bioclike
+Version: 1.0
+Imports: Biobase
+
+Package: bioclike
+Version: 2.0
+Imports: Biobase
+
+",
+        )
+        .unwrap();
+        // mutatr is not in the index, so 0.1 cannot be installed.
+        assert_eq!(
+            index.get_lowest("testthat", None).unwrap().raw_version,
+            "0.3"
+        );
+        // An exact request for the skipped release still gets it.
+        assert_eq!(
+            index
+                .get_lowest("testthat", Some("==0.1"))
+                .unwrap()
+                .raw_version,
+            "0.1"
+        );
+        // When every release imports a package from outside the index
+        // (a Bioconductor dependency), the oldest is still chosen.
+        assert_eq!(
+            index.get_lowest("bioclike", None).unwrap().raw_version,
+            "1.0"
+        );
+    }
+
+    fn cran_registry(packages: &str) -> CranRegistry {
+        CranRegistry::new(
+            parse_packages_gz(packages).unwrap(),
+            "https://cran.example/src/contrib",
+            PackageSource::Cran,
+        )
+    }
+
+    fn history(dcf: &str) -> Vec<CranPackageEntry> {
+        parse_packages_gz(dcf)
+            .unwrap()
+            .all_entries()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn lowest_lookup_asks_for_missing_history_once() {
+        let mut reg = cran_registry("Package: glue\nVersion: 1.8.0\nMD5sum: new\n\n");
+
+        // Without history, the current release is the only candidate, and
+        // the gap is reported. A package CRAN does not list is not.
+        let info = reg.resolve_package_lowest("glue", None).unwrap();
+        assert_eq!(info.version.to_string(), "1.8.0");
+        assert!(reg.resolve_package_lowest("absent", None).is_err());
+        assert_eq!(
+            reg.take_wanted_history(),
+            BTreeSet::from(["glue".to_string()])
+        );
+        assert!(reg.take_wanted_history().is_empty(), "take drains");
+
+        // Highest lookups never ask.
+        reg.resolve_package("glue", None).unwrap();
+        assert!(reg.take_wanted_history().is_empty());
+
+        reg.merge_history(
+            "glue",
+            history(
+                "Package: glue\nVersion: 1.0.0\n\n\
+                 Package: glue\nVersion: 1.6.0\nMD5sum: old\n\n\
+                 Package: glue\nVersion: 1.8.0\nMD5sum: dup\n\n\
+                 Package: glue\nVersion: 1.9.0\n\n\
+                 Package: other\nVersion: 0.1\n\n",
+            ),
+        );
+        // Only releases older than the current one are merged: the current
+        // one keeps its index entry, a newer one is ignored, and so is a
+        // document entry for another package.
+        let versions: Vec<String> = reg
+            .index
+            .packages
+            .get("glue")
+            .unwrap()
+            .iter()
+            .map(|e| e.raw_version.clone())
+            .collect();
+        assert_eq!(versions, ["1.8.0", "1.6.0", "1.0.0"]);
+        assert!(!reg.index.packages.contains_key("other"));
+
+        let info = reg.resolve_package_lowest("glue", Some(">=1.5")).unwrap();
+        assert_eq!(info.version.to_string(), "1.6.0");
+        assert_eq!(
+            info.url,
+            "https://cran.example/src/contrib/Archive/glue/glue_1.6.0.tar.gz"
+        );
+        assert_eq!(info.checksum.as_deref(), Some("md5:old"));
+        let info = reg.resolve_package_lowest("glue", None).unwrap();
+        assert_eq!(info.checksum, None, "no MD5sum in the history → none");
+        assert!(reg.take_wanted_history().is_empty(), "history is loaded");
+
+        // The current release keeps its plain URL.
+        let info = reg.resolve_package("glue", None).unwrap();
+        assert_eq!(
+            info.url,
+            "https://cran.example/src/contrib/glue_1.8.0.tar.gz"
+        );
+        assert_eq!(info.checksum.as_deref(), Some("md5:new"));
+    }
+
+    #[test]
+    fn custom_repositories_do_not_load_history_or_use_archive_urls() {
+        let reg = registry_from_packages(MULTI_VERSION, "https://repo.example/src/contrib");
+        let info = reg.resolve_package_lowest("rlang", None).unwrap();
+        assert_eq!(info.version.to_string(), "0.4.0");
+        assert_eq!(
+            info.url,
+            "https://repo.example/src/contrib/rlang_0.4.0.tar.gz"
+        );
+        assert!(reg.take_wanted_history().is_empty());
+    }
+
+    // ── exclude-newer (#194) ────────────────────────────────────────
+
+    #[test]
+    fn snapshot_date_accepts_the_ppm_range_and_normalizes() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+        let ok = |d: &str| snapshot_date_on(d, today).unwrap();
+        assert_eq!(ok("2024-01-01"), "2024-01-01");
+        assert_eq!(ok("2017-10-10"), "2017-10-10", "the first snapshot");
+        assert_eq!(ok("2026-09-16"), "2026-09-16", "today has a snapshot");
+        assert_eq!(ok("2024-1-5"), "2024-01-05");
+        assert_eq!(ok(" 2024-01-01 "), "2024-01-01");
+
+        let err = |d: &str| snapshot_date_on(d, today).unwrap_err().to_string();
+        for bad in [
+            "2024-02-30",
+            "2024/01/01",
+            "01-01-2024",
+            "yesterday",
+            "",
+            "2024-01-01T00:00",
+        ] {
+            assert!(err(bad).contains("expected YYYY-MM-DD"), "{bad}");
+        }
+        assert!(err("2017-10-09").contains("before 2017-10-10"));
+        assert!(err("2026-09-17").contains("in the future"));
+    }
+
+    fn snapshot_registry(packages: &str, date: &str) -> CranRegistry {
+        let mut reg = CranRegistry::new(
+            parse_packages_gz(packages).unwrap(),
+            &snapshot_src_base(date),
+            PackageSource::Cran,
+        );
+        reg.snapshot = Some(date.to_string());
+        reg
+    }
+
+    #[test]
+    fn snapshot_registry_locks_snapshot_urls() {
+        assert_eq!(
+            snapshot_src_base("2024-01-01"),
+            "https://packagemanager.posit.co/cran/2024-01-01/src/contrib"
+        );
+        // A PPM index has no MD5sum field.
+        let reg = snapshot_registry("Package: glue\nVersion: 1.6.2\n\n", "2024-01-10");
+        let info = reg.resolve_package("glue", None).unwrap();
+        assert_eq!(info.source, PackageSource::Cran);
+        assert_eq!(
+            info.url,
+            "https://packagemanager.posit.co/cran/2024-01-10/src/contrib/glue_1.6.2.tar.gz"
+        );
+        assert_eq!(info.checksum, None);
+    }
+
+    #[test]
+    fn snapshot_caps_both_strategies_at_its_current_release() {
+        // PPM's 2024-01-10 snapshot lists glue 1.6.2, although CRAN
+        // published 1.7.0 on 2024-01-09: PPM trails CRAN by a few days.
+        // crandb lists every release; only the older ones are merged.
+        let mut reg = snapshot_registry("Package: glue\nVersion: 1.6.2\n\n", "2024-01-10");
+        assert!(reg.resolve_package_lowest("glue", None).is_ok());
+        assert_eq!(
+            reg.take_wanted_history(),
+            BTreeSet::from(["glue".to_string()]),
+            "a snapshot index still loads history for lowest"
+        );
+        reg.merge_history(
+            "glue",
+            history(
+                "Package: glue\nVersion: 1.6.0\nMD5sum: cran160\n\n\
+                 Package: glue\nVersion: 1.6.1\nMD5sum: cran161\n\n\
+                 Package: glue\nVersion: 1.7.0\nMD5sum: cran170\n\n\
+                 Package: glue\nVersion: 1.8.0\n\n",
+            ),
+        );
+
+        let lowest = |c| reg.resolve_package_lowest("glue", c).unwrap();
+        assert_eq!(lowest(None).version.to_string(), "1.6.0");
+        let info = lowest(Some(">=1.6.1"));
+        assert_eq!(info.version.to_string(), "1.6.1");
+        // An archived release downloads from CRAN, where its MD5 holds.
+        assert_eq!(
+            info.url,
+            "https://cran.r-project.org/src/contrib/Archive/glue/glue_1.6.1.tar.gz"
+        );
+        assert_eq!(info.checksum.as_deref(), Some("md5:cran161"));
+
+        let best = reg.resolve_package("glue", None).unwrap();
+        assert_eq!(best.version.to_string(), "1.6.2");
+        assert!(best.url.contains("/cran/2024-01-10/src/contrib/"));
+
+        // A release after the snapshot is a candidate for neither strategy.
+        for result in [
+            reg.resolve_package_lowest("glue", Some(">=1.7.0")),
+            reg.resolve_package("glue", Some(">=1.7.0")),
+        ] {
+            assert!(matches!(result, Err(UvrError::NoMatchingVersion { .. })));
+        }
+    }
+
+    #[test]
+    fn lowest_resolution_converges_as_history_loads() {
+        // The loop `uvr lock` runs: resolve, load the history the pass asked
+        // for, and resolve again until a pass asks for nothing.
+        use crate::manifest::{DependencySpec, Manifest, ResolutionStrategy};
+        use crate::resolver::Resolver;
+
+        let mut reg = cran_registry(
+            "Package: app\nVersion: 2.0\nImports: helper (>= 1.0)\n\n\
+             Package: helper\nVersion: 1.5\n\n\
+             Package: extra\nVersion: 3.0\n\n",
+        );
+        let histories = [
+            (
+                "app",
+                "Package: app\nVersion: 0.5\nImports: legacy\n\n\
+                 Package: app\nVersion: 1.0\nImports: extra\n\n",
+            ),
+            ("helper", "Package: helper\nVersion: 0.9\n\n"),
+        ];
+        let mut manifest = Manifest::new("t", None);
+        manifest.add_dep("app".into(), DependencySpec::Version("*".into()), false);
+
+        let mut passes = 0;
+        let lock = loop {
+            passes += 1;
+            let result = Resolver::new(&reg)
+                .with_strategy(ResolutionStrategy::Lowest)
+                .resolve(&manifest, None, None, HashMap::new());
+            let wanted = reg.take_wanted_history();
+            if wanted.is_empty() {
+                break result.unwrap();
+            }
+            for name in wanted {
+                let dcf = histories.iter().find(|(n, _)| *n == name).map(|(_, d)| *d);
+                reg.merge_history(&name, dcf.map(history).unwrap_or_default());
+            }
+        };
+        // Pass 1 sees only current releases and asks for app and helper.
+        // Pass 2 picks app 1.0 (0.5 needs `legacy`, which left CRAN), which
+        // brings in extra, so it asks for extra. Pass 3 asks for nothing.
+        assert_eq!(passes, 3);
+        let version = |n: &str| lock.get_package(n).map(|p| p.version.clone());
+        assert_eq!(version("app").as_deref(), Some("1.0.0"));
+        assert_eq!(version("extra").as_deref(), Some("3.0.0"));
+        assert_eq!(lock.packages.len(), 2, "helper is no longer needed");
     }
 }

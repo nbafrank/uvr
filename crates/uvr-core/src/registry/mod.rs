@@ -1,5 +1,6 @@
 pub mod bioconductor;
 pub mod cran;
+pub mod cran_history;
 pub mod forgejo;
 pub mod git_generic;
 pub mod github;
@@ -47,13 +48,15 @@ impl<'a> RegistryChain<'a> {
     pub fn new(registries: Vec<&'a dyn PackageRegistry>) -> Self {
         RegistryChain { registries }
     }
-}
 
-impl<'a> PackageRegistry for RegistryChain<'a> {
-    fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+    fn first_found(
+        &self,
+        name: &str,
+        resolve: impl Fn(&dyn PackageRegistry) -> Result<PackageInfo>,
+    ) -> Result<PackageInfo> {
         let mut last_err = None;
         for registry in &self.registries {
-            match registry.resolve_package(name, constraint) {
+            match resolve(*registry) {
                 Ok(info) => return Ok(info),
                 Err(UvrError::PackageNotFound(_)) => {
                     last_err = Some(UvrError::PackageNotFound(name.to_string()));
@@ -62,6 +65,16 @@ impl<'a> PackageRegistry for RegistryChain<'a> {
             }
         }
         Err(last_err.unwrap_or_else(|| UvrError::PackageNotFound(name.to_string())))
+    }
+}
+
+impl<'a> PackageRegistry for RegistryChain<'a> {
+    fn resolve_package(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+        self.first_found(name, |r| r.resolve_package(name, constraint))
+    }
+
+    fn resolve_package_lowest(&self, name: &str, constraint: Option<&str>) -> Result<PackageInfo> {
+        self.first_found(name, |r| r.resolve_package_lowest(name, constraint))
     }
 }
 

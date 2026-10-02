@@ -26,6 +26,12 @@ pub struct RVersionPin {
     /// Only present when the lockfile includes Bioconductor packages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bioc_version: Option<String>,
+
+    /// The `exclude-newer` date (`YYYY-MM-DD`) CRAN was resolved at, from
+    /// Posit Package Manager's snapshot of that day (#194). `uvr sync`
+    /// takes P3M binaries from the same snapshot. Absent for a live resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_as_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -277,6 +283,27 @@ url = "https://bioconductor.org/packages/3.18/bioc/src/contrib/DESeq2_1.42.0.tar
         // Old lockfiles without bioc_version should still parse fine.
         let lf: Lockfile = SAMPLE.parse().expect("parse");
         assert!(lf.r.bioc_version.is_none());
+    }
+
+    #[test]
+    fn lockfile_without_resolved_as_of_round_trips_byte_for_byte() {
+        // #194 regression: a live-resolved lock gains no `resolved_as_of`.
+        let lf: Lockfile = SAMPLE.parse().expect("parse");
+        assert!(lf.r.resolved_as_of.is_none());
+        let canonical = lf.to_toml_string().unwrap();
+        assert!(!canonical.contains("resolved_as_of"));
+        let reparsed: Lockfile = canonical.parse().unwrap();
+        assert_eq!(reparsed.to_toml_string().unwrap(), canonical);
+    }
+
+    #[test]
+    fn round_trip_with_resolved_as_of() {
+        let input = "[r]\nversion = \"4.5.1\"\nresolved_as_of = \"2024-01-01\"\n\n\
+                     [[package]]\nname = \"glue\"\nversion = \"1.6.2\"\nsource = \"cran\"\n\
+                     url = \"https://packagemanager.posit.co/cran/2024-01-01/src/contrib/glue_1.6.2.tar.gz\"\n";
+        let lf: Lockfile = input.parse().expect("parse");
+        assert_eq!(lf.r.resolved_as_of.as_deref(), Some("2024-01-01"));
+        assert_eq!(lf.to_toml_string().unwrap(), input);
     }
 
     #[test]

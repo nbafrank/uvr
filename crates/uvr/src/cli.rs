@@ -4,9 +4,18 @@ use clap::builder::styling;
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
+use uvr_core::manifest::ResolutionStrategy;
+
 use crate::commands::activate::ActivateShell;
 use crate::commands::export::ExportFormat;
 use crate::ide::Ide;
+
+/// `--resolution` values, listed in `--help` and completions.
+fn resolution_parser() -> impl clap::builder::TypedValueParser<Value = ResolutionStrategy> {
+    use clap::builder::TypedValueParser;
+    clap::builder::PossibleValuesParser::new(["highest", "lowest", "lowest-direct"])
+        .map(|s| s.parse().expect("clap accepts only the listed values"))
+}
 
 /// Match the runtime palette: cyan accents for headers/usage, magenta for
 /// literal flag names, yellow for placeholders. Keeps `--help` visually of
@@ -186,6 +195,13 @@ pub struct AddArgs {
     #[arg(long)]
     pub no_install: bool,
 
+    /// Version to pick from each allowed range: `highest` (default),
+    /// `lowest`, or `lowest-direct` (lowest for this project's own
+    /// dependencies only). Overrides `[resolution] strategy` in uvr.toml
+    /// for this run.
+    #[arg(long, value_name = "STRATEGY", value_parser = resolution_parser())]
+    pub resolution: Option<ResolutionStrategy>,
+
     /// When missing system libraries are detected, run the platform's
     /// package manager (`apk add` / `apt-get install` / `dnf install`)
     /// to install them automatically (#30). Also enabled by setting
@@ -323,6 +339,23 @@ pub struct LockArgs {
     /// Re-resolve and upgrade all packages to their latest allowed versions
     #[arg(long)]
     pub upgrade: bool,
+
+    /// Version to pick from each allowed range: `highest` (default),
+    /// `lowest`, or `lowest-direct` (lowest for this project's own
+    /// dependencies only). Overrides `[resolution] strategy` in uvr.toml
+    /// for this run.
+    #[arg(long, value_name = "STRATEGY", value_parser = resolution_parser())]
+    pub resolution: Option<ResolutionStrategy>,
+
+    /// Resolve CRAN packages as they stood on DATE (YYYY-MM-DD), from
+    /// Posit Package Manager's CRAN snapshot of that day. Overrides
+    /// `[resolution] exclude-newer` in uvr.toml for this run.
+    #[arg(long, value_name = "DATE", value_parser = parse_exclude_newer)]
+    pub exclude_newer: Option<String>,
+}
+
+fn parse_exclude_newer(s: &str) -> Result<String, String> {
+    uvr_core::registry::cran::snapshot_date(s).map_err(|e| e.to_string())
 }
 
 // ────────────────────────────────────────────────────────────
@@ -341,6 +374,13 @@ pub struct UpdateArgs {
     /// Number of parallel download jobs
     #[arg(short, long, default_value = "50", value_name = "N")]
     pub jobs: usize,
+
+    /// Version to pick from each allowed range: `highest` (default),
+    /// `lowest`, or `lowest-direct` (lowest for this project's own
+    /// dependencies only). Overrides `[resolution] strategy` in uvr.toml
+    /// for this run.
+    #[arg(long, value_name = "STRATEGY", value_parser = resolution_parser())]
+    pub resolution: Option<ResolutionStrategy>,
 }
 
 // ────────────────────────────────────────────────────────────

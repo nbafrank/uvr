@@ -435,6 +435,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![
                 LockedPackage {
@@ -490,6 +491,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: Some("3.18".to_string()),
+                resolved_as_of: None,
             },
             packages: vec![
                 LockedPackage {
@@ -561,6 +563,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: Some("3.18".to_string()),
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "jsonlite".to_string(),
@@ -594,6 +597,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "mypkg".to_string(),
@@ -644,6 +648,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![pkg],
         }
@@ -756,6 +761,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "mypkg".to_string(),
@@ -834,6 +840,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "mypkg".to_string(),
@@ -881,6 +888,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "anypkg".to_string(),
@@ -937,6 +945,7 @@ mod tests {
             r: RVersionPin {
                 version: "4.4.2".to_string(),
                 bioc_version: None,
+                resolved_as_of: None,
             },
             packages: vec![LockedPackage {
                 name: "scales".to_string(),

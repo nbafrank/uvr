@@ -39,12 +39,16 @@ impl P3MBinaryIndex {
     /// pre-compiled binaries instead of requiring local compilation (which needs
     /// gfortran etc. on macOS). Returns an empty index on any error so callers fall
     /// back to source.
+    ///
+    /// `snapshot` is the lock's `resolved_as_of` date: CRAN binaries then come
+    /// from P3M's snapshot of that day instead of `latest` (#194).
     pub async fn fetch(
         client: &reqwest::Client,
         r_minor: &str,
         platform: Platform,
         bioc_release: Option<&str>,
         posit_distro_slug: Option<&str>,
+        snapshot: Option<&str>,
     ) -> Self {
         // Ask Posit which repo actually has builds for this distro *and* this
         // architecture before falling back to the compiled-in table (#211).
@@ -57,7 +61,8 @@ impl P3MBinaryIndex {
             return Self::empty();
         };
 
-        let cran_fut = fetch_repo_index(client, r_minor, &info, P3MRepo::Cran);
+        let cran = P3MRepo::Cran(snapshot.unwrap_or("latest"));
+        let cran_fut = fetch_repo_index(client, r_minor, &info, cran);
         let bioc_fut = async {
             match bioc_release {
                 // BLOCK fix: Bioconductor doesn't serve Linux binaries — its
@@ -112,22 +117,22 @@ impl P3MBinaryIndex {
 /// Bioc binaries come directly from bioconductor.org — P3M does not mirror them.
 #[derive(Clone, Copy)]
 enum P3MRepo<'a> {
-    Cran,
+    Cran(&'a str), // snapshot: "latest" or a date (e.g. "2024-01-01")
     Bioc(&'a str), // Bioc release (e.g. "3.21")
 }
 
 impl<'a> P3MRepo<'a> {
     /// Build the repo prefix. On Linux for the CRAN repo we inject the
     /// `__linux__/<codename>` segment that triggers PPM's binary-aware
-    /// routing. macOS/Windows use the plain `cran/latest` prefix and pick
+    /// routing. macOS/Windows use the plain `cran/<snapshot>` prefix and pick
     /// up binaries through `bin/<arch>/contrib/<r_minor>/`.
     fn url_prefix(&self, info: &PlatformInfo) -> String {
         match self {
-            P3MRepo::Cran => match &info.linux_codename {
+            P3MRepo::Cran(snapshot) => match &info.linux_codename {
                 Some(codename) => {
-                    format!("https://packagemanager.posit.co/cran/__linux__/{codename}/latest")
+                    format!("https://packagemanager.posit.co/cran/__linux__/{codename}/{snapshot}")
                 }
-                None => "https://packagemanager.posit.co/cran/latest".to_string(),
+                None => format!("https://packagemanager.posit.co/cran/{snapshot}"),
             },
             P3MRepo::Bioc(release) => {
                 format!("https://bioconductor.org/packages/{release}/bioc")
@@ -136,13 +141,15 @@ impl<'a> P3MRepo<'a> {
     }
     fn cache_tag(&self) -> String {
         match self {
-            P3MRepo::Cran => "cran".to_string(),
+            P3MRepo::Cran("latest") => "cran".to_string(),
+            P3MRepo::Cran(snapshot) => format!("cran-{snapshot}"),
             P3MRepo::Bioc(release) => format!("bioc-{release}"),
         }
     }
     fn label(&self) -> String {
         match self {
-            P3MRepo::Cran => "CRAN".to_string(),
+            P3MRepo::Cran("latest") => "CRAN".to_string(),
+            P3MRepo::Cran(snapshot) => format!("CRAN {snapshot}"),
             P3MRepo::Bioc(release) => format!("Bioc {release}"),
         }
     }
@@ -565,7 +572,7 @@ Version: 1.1.4
 
 ";
         let info = macos_arm64_info();
-        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran("latest"));
         assert_eq!(index.packages.len(), 2);
 
         let url = index.binary_url("ggplot2", "3.5.1").unwrap();
@@ -581,7 +588,7 @@ Version: 1.1.4
     fn parse_index_windows() {
         let text = "Package: jsonlite\nVersion: 1.8.8\n\n";
         let info = windows_info();
-        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran("latest"));
         let url = index.binary_url("jsonlite", "1.8.8").unwrap();
         assert!(url.contains("jsonlite_1.8.8.zip"));
         assert!(url.contains("/windows/"));
@@ -590,7 +597,7 @@ Version: 1.1.4
     #[test]
     fn parse_index_empty() {
         let info = macos_arm64_info();
-        let index = parse_index("", "4.4", &info, &P3MRepo::Cran);
+        let index = parse_index("", "4.4", &info, &P3MRepo::Cran("latest"));
         assert_eq!(index.packages.len(), 0);
     }
 
@@ -608,7 +615,7 @@ Version: 1.1.4
     fn binary_url_version_mismatch() {
         let text = "Package: ggplot2\nVersion: 3.5.1\n\n";
         let info = macos_arm64_info();
-        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran("latest"));
         // Wrong version → None
         assert!(index.binary_url("ggplot2", "3.4.0").is_none());
         // Wrong name → None
@@ -620,7 +627,7 @@ Version: 1.1.4
         // P3M may have versions like "4.6.0-1" which normalize to "4.6.0.1"
         let text = "Package: RcppArmadillo\nVersion: 14.2.2-1\n\n";
         let info = macos_arm64_info();
-        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran);
+        let index = parse_index(text, "4.4", &info, &P3MRepo::Cran("latest"));
         let normalized = crate::resolver::normalize_version("14.2.2-1");
         assert!(index.binary_url("RcppArmadillo", &normalized).is_some());
     }
@@ -775,7 +782,7 @@ Version: 1.1.4
         // #55: PPM Linux URLs put the codename in the prefix and serve
         // PACKAGES from `src/contrib/`, not `bin/<arch>/contrib/<minor>/`.
         let info = linux_info("jammy");
-        let url = index_url(&P3MRepo::Cran, &info, "4.5");
+        let url = index_url(&P3MRepo::Cran("latest"), &info, "4.5");
         assert_eq!(
             url,
             "https://packagemanager.posit.co/cran/__linux__/jammy/latest/src/contrib/PACKAGES.gz"
@@ -785,7 +792,7 @@ Version: 1.1.4
     #[test]
     fn linux_package_url_drops_r_minor_segment() {
         let info = linux_info("bookworm");
-        let url = package_url(&P3MRepo::Cran, &info, "4.5", "ggplot2", "3.5.1");
+        let url = package_url(&P3MRepo::Cran("latest"), &info, "4.5", "ggplot2", "3.5.1");
         assert_eq!(
             url,
             "https://packagemanager.posit.co/cran/__linux__/bookworm/latest/src/contrib/ggplot2_3.5.1.tar.gz"
@@ -793,10 +800,32 @@ Version: 1.1.4
     }
 
     #[test]
+    fn snapshot_urls_replace_latest_with_the_date() {
+        // #194: a dated lock takes binaries from the same day's snapshot.
+        // These shapes answered 200 from packagemanager.posit.co on 2026-09-16.
+        let snap = P3MRepo::Cran("2024-01-01");
+        assert_eq!(
+            index_url(&snap, &linux_info("jammy"), "4.5"),
+            "https://packagemanager.posit.co/cran/__linux__/jammy/2024-01-01/src/contrib/PACKAGES.gz"
+        );
+        assert_eq!(
+            index_url(&snap, &macos_arm64_info(), "4.6"),
+            "https://packagemanager.posit.co/cran/2024-01-01/bin/macosx/sonoma-arm64/contrib/4.6/PACKAGES.gz"
+        );
+        assert_eq!(
+            package_url(&snap, &windows_info(), "4.5", "glue", "1.6.2"),
+            "https://packagemanager.posit.co/cran/2024-01-01/bin/windows/contrib/4.5/glue_1.6.2.zip"
+        );
+        // A dated index gets its own cache entry; `latest` keeps its name.
+        assert_eq!(snap.cache_tag(), "cran-2024-01-01");
+        assert_eq!(P3MRepo::Cran("latest").cache_tag(), "cran");
+    }
+
+    #[test]
     fn parse_index_linux_yields_linux_url() {
         let text = "Package: jsonlite\nVersion: 1.8.8\n\n";
         let info = linux_info("jammy");
-        let index = parse_index(text, "4.5", &info, &P3MRepo::Cran);
+        let index = parse_index(text, "4.5", &info, &P3MRepo::Cran("latest"));
         let url = index.binary_url("jsonlite", "1.8.8").unwrap();
         assert!(url.contains("/__linux__/jammy/"));
         assert!(url.ends_with("jsonlite_1.8.8.tar.gz"));
