@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use uvr_core::lockfile::{Lockfile, PackageSource};
 use uvr_core::manifest::DependencySpec;
 use uvr_core::project::Project;
-use uvr_core::r_version::detector::{find_r_binary, query_r_version};
+use uvr_core::r_version::detector::{find_r_binary, query_r_base_packages, query_r_version};
 use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
 use uvr_core::registry::forgejo::{
@@ -101,6 +101,12 @@ async fn resolve_lockfile(
     let r_constraint = project.manifest.project.r_version.as_deref();
     let r_binary_opt = find_r_binary(r_constraint).ok();
     let actual_r_version = r_binary_opt.as_deref().and_then(query_r_version);
+    // The active R's base packages extend the resolver's hardcoded list, so a
+    // base package that a newer R adds is not looked up in a registry (#169).
+    let r_base_packages = r_binary_opt
+        .as_deref()
+        .and_then(query_r_base_packages)
+        .unwrap_or_default();
 
     let spinner = make_spinner("Resolving dependencies...");
 
@@ -254,6 +260,7 @@ async fn resolve_lockfile(
         .map(|chain| chain as &dyn PackageRegistry)
         .unwrap_or(&cran);
     let lockfile = Resolver::new(registry)
+        .with_base_packages(r_base_packages)
         .resolve(
             &project.manifest,
             actual_r_version.as_deref(),

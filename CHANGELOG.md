@@ -96,6 +96,12 @@ Pure tracking section — fixes and small features land here between tags.
   substitutes a same-name registry binary for a GitHub, GitLab, or Forgejo
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
+- **`uvr lock` gets the base packages from the active R** (#169). The resolver
+  adds the names that `installed.packages(priority = "base")` gives to its
+  hardcoded list. Thus a base package that a new R release adds is not sent
+  to CRAN, where it fails with `PackageNotFound`. This costs one more R
+  start-up per lock, and only when lock finds R. Without R, the hardcoded list
+  (the R 4.6 set) applies as before.
 
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
