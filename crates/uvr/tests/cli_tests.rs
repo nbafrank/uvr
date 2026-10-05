@@ -1754,7 +1754,7 @@ fn test_sync_url_dependency_verifies_checksum_then_installs() {
         .stderr(predicate::str::contains(&url))
         .stderr(predicate::str::contains(&stale))
         .stderr(predicate::str::contains(sha256(&bytes)))
-        .stderr(predicate::str::contains("run `uvr lock`"));
+        .stderr(predicate::str::contains("run `uvr lock --upgrade`"));
     let installed = dir.path().join(".uvr/library/urlpkg/DESCRIPTION");
     assert!(!installed.exists());
 
