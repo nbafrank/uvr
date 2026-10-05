@@ -243,6 +243,12 @@ pub fn user_profile() -> bool {
 /// and [`user_profile`] swaps in the user's *global* profile by explicit
 /// path: their own `R_PROFILE_USER` if set (R expands `~` in it), else
 /// `.Rprofile` in R's home directory, else still the null device.
+///
+/// A relative `R_PROFILE_USER` is made absolute against uvr's working
+/// directory (#261). R resolves it against its *own* working directory, and
+/// the child sessions of `R CMD INSTALL` run from the unpacked package, so a
+/// relative value would load the `.Rprofile` that the tarball ships, or no
+/// profile.
 pub fn r_profile_user() -> PathBuf {
     // R for Windows takes `~` from R_USER, then HOME, then Documents — not
     // the profile directory `dirs::home_dir()` returns there.
@@ -265,7 +271,14 @@ fn r_profile_user_in(r_home_dir: Option<PathBuf>) -> PathBuf {
         return null_device;
     }
     if let Some(own) = read_env_var("R_PROFILE_USER") {
-        return PathBuf::from(own);
+        let tilde = own.starts_with('~');
+        let own = PathBuf::from(own);
+        if tilde || own.is_absolute() {
+            return own;
+        }
+        return std::env::current_dir()
+            .map(|cwd| cwd.join(&own))
+            .unwrap_or(own);
     }
     r_home_dir
         .map(|h| h.join(".Rprofile"))
@@ -526,6 +539,12 @@ mod tests {
         env::set_var("UVR_USER_PROFILE", "1");
         env::set_var("R_PROFILE_USER", "~/.config/R/Rprofile");
         assert_eq!(resolve(), PathBuf::from("~/.config/R/Rprofile"));
+        env::set_var("R_PROFILE_USER", profile.to_str().unwrap());
+        assert_eq!(resolve(), profile);
+        // #261: a relative value is anchored to uvr's working directory, not
+        // left for each R child to resolve against its own.
+        env::set_var("R_PROFILE_USER", "omp.Rprofile");
+        assert_eq!(resolve(), env::current_dir().unwrap().join("omp.Rprofile"));
         env::remove_var("R_PROFILE_USER");
 
         // Opted in, but no profile to load: still the null device, never

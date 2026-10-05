@@ -425,6 +425,21 @@ shell, put `UVR_USER_PROFILE=1` in `~/.Renviron`.
 With the switch on, a `~/.Rprofile` that changes `.libPaths()` also changes
 the library a headered script sees. That is the trade the switch makes.
 
+Installs stay reproducible by default: without the switch, `R CMD INSTALL`
+reads no user or project profile. With the switch, the profile runs in every
+R session of the install, including the lazy-load and byte-compile sessions.
+You can use this for a startup fix that a package build needs, for example a
+libomp preload (#261). Put the fix in `~/.Rprofile`, or in its own file:
+
+```sh
+export UVR_USER_PROFILE=1
+export R_PROFILE_USER=~/.config/R/install-fix.Rprofile
+```
+
+uvr makes a relative `R_PROFILE_USER` absolute against the directory where
+you run uvr. Do not point it at the project's `.Rprofile`: that file is uvr's
+block, and the install sessions run it from a temporary directory.
+
 ---
 
 ## Shell completions

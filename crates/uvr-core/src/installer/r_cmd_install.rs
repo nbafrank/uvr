@@ -354,6 +354,15 @@ impl RCmdInstall {
         // `.libPaths()` call has no install-side effect. `UVR_USER_PROFILE=1`
         // points it at the user's global profile instead (#249), still never
         // the project's.
+        //
+        // Leaving the variable unset is not an option either way (#261): no
+        // R CMD INSTALL phase runs with `--vanilla` or `--no-init-file`. The
+        // top-level R inherits uvr's working directory and reads the project
+        // `./.Rprofile`; the lazy-load and byte-compile children run from the
+        // unpacked package and read any `.Rprofile` the tarball ships, else
+        // `~/.Rprofile`. An explicit path reaches every phase alike, which is
+        // also why an opted-in profile can preload a runtime (e.g. libomp)
+        // where the children need it.
         // (We deliberately leave R_ENVIRON_USER alone — ~/.Renviron often
         // holds load-bearing TZ / locale settings.)
         cmd.env("R_PROFILE_USER", crate::env_vars::r_profile_user());
@@ -590,6 +599,64 @@ mod tests {
             removed,
             "the credential must be removed from R's environment"
         );
+    }
+
+    /// The `R_PROFILE_USER` value the install command sets: `None` if it
+    /// leaves the variable alone or removes it, which must never happen.
+    fn install_profile_env() -> Option<std::ffi::OsString> {
+        let cmd = RCmdInstall::new("R").build_cmd(Path::new("a.tar.gz"), Path::new("lib"));
+        cmd.get_envs()
+            .find(|(k, _)| *k == "R_PROFILE_USER")
+            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+    }
+
+    // #261: by default every install gets the null device as its user
+    // profile — even over the user's own R_PROFILE_USER — so that no project,
+    // user or tarball `.Rprofile` can change it.
+    #[test]
+    fn build_cmd_blanks_user_profile_by_default() {
+        let _env = crate::env_vars::env_lock();
+        let saved: Vec<_> = ["UVR_USER_PROFILE", "R_PROFILE_USER"]
+            .map(|k| (k, std::env::var_os(k)))
+            .into();
+        std::env::remove_var("UVR_USER_PROFILE");
+        std::env::set_var("R_PROFILE_USER", "/mine/Rprofile");
+        let got = install_profile_env();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        assert_eq!(got.as_deref(), Some(std::ffi::OsStr::new(null_device)));
+    }
+
+    // #261: with the opt-in, the install gets the user's profile by absolute
+    // path. A relative one is anchored to uvr's working directory, because the
+    // install's child sessions run from the unpacked package.
+    #[test]
+    fn build_cmd_passes_user_profile_on_opt_in() {
+        let _env = crate::env_vars::env_lock();
+        let saved: Vec<_> = ["UVR_USER_PROFILE", "R_PROFILE_USER"]
+            .map(|k| (k, std::env::var_os(k)))
+            .into();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let own = tmp.path().join("omp.Rprofile");
+        std::env::set_var("UVR_USER_PROFILE", "1");
+        std::env::set_var("R_PROFILE_USER", &own);
+        let absolute = install_profile_env();
+        std::env::set_var("R_PROFILE_USER", "omp.Rprofile");
+        let relative = install_profile_env();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        assert_eq!(absolute, Some(own.into_os_string()));
+        let anchored = std::env::current_dir().unwrap().join("omp.Rprofile");
+        assert_eq!(relative, Some(anchored.into_os_string()));
     }
 
     #[test]
