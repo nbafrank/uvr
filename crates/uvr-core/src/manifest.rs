@@ -1018,6 +1018,18 @@ fn parse_github_remote(
     }))
 }
 
+/// Parse one GitHub target in the `Remotes:` grammar: `owner/repo[@ref]`,
+/// `owner/repo/subdir[@ref]` or `owner/repo:subdir[@ref]`. The ref goes
+/// last and can contain `/`. `uvr add` uses this so that the CLI and
+/// DESCRIPTION `Remotes:` accept the same package-directory forms (#312).
+pub fn parse_github_remote_target(target: &str) -> std::result::Result<RemoteSource, String> {
+    match parse_github_remote(target, target, None) {
+        Some(RemoteEntry::Source(source)) => Ok(source),
+        Some(RemoteEntry::Unsupported { reason, .. }) => Err(reason),
+        None => Err("expected a GitHub owner/repository path".to_string()),
+    }
+}
+
 fn non_github_remote_is_bound(provider: RemoteProvider, explicit_name: bool, target: &str) -> bool {
     if explicit_name {
         return true;

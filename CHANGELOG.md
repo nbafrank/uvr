@@ -96,6 +96,9 @@ Pure tracking section — fixes and small features land here between tags.
   substitutes a same-name registry binary for a GitHub, GitLab, or Forgejo
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
+- **`uvr add` accepts `owner/repo/subdir[@ref]` and `owner/repo:subdir[@ref]`**
+  (#312). These are the GitHub package-directory forms of DESCRIPTION
+  `Remotes:`. They give the same dependency as `owner/repo[@ref]#subdirectory=subdir`.
 
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption

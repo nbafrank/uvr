@@ -30,7 +30,8 @@ fn split_subdirectory_fragment(raw: &str) -> Result<(&str, Option<&str>)> {
     Ok((base, Some(path)))
 }
 
-/// Parse `"pkg@>=1.0.0"`, `"user/repo@ref"`, or `"user/repo@ref#subdirectory=path"` into (name, spec).
+/// Parse `"pkg@>=1.0.0"`, `"user/repo@ref"`, `"user/repo@ref#subdirectory=path"`,
+/// `"user/repo/path@ref"` or `"user/repo:path@ref"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     // Any git host: `git::<clone URL>[@ref]` (#190). The URL can contain `/`,
     // so this comes before the GitHub heuristic too. The name is the
@@ -121,6 +122,34 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     // GitHub: contains '/'
     if raw.contains('/') {
         let (base, subdirectory) = split_subdirectory_fragment(raw)?;
+
+        // `owner/repo/subdir[@ref]` and `owner/repo:subdir[@ref]` use the
+        // DESCRIPTION `Remotes:` grammar, so both places accept the same
+        // forms (#312). A first segment with a `.` is a host, not a GitHub
+        // owner: it continues to the "Unsupported git host" error below.
+        let path = base.split('@').next().unwrap_or(base);
+        let host_like = path.split('/').next().is_some_and(|s| s.contains('.'));
+        let path_has_subdirectory = path
+            .split_once('/')
+            .is_some_and(|(_, tail)| tail.contains('/') || tail.contains(':'));
+        if subdirectory.is_none() && !host_like && path_has_subdirectory {
+            let source =
+                uvr_core::manifest::parse_github_remote_target(base).map_err(|reason| {
+                    anyhow::anyhow!(
+                        "Invalid GitHub spec '{raw}': {reason}. Expected: owner/repo[@ref], \
+                         owner/repo/subdir[@ref], owner/repo:subdir[@ref], or \
+                         owner/repo[@ref]#subdirectory=path"
+                    )
+                })?;
+            let spec = DependencySpec::Detailed(DetailedDep {
+                git: Some(source.repository),
+                rev: source.requested_ref,
+                subdirectory: source.subdirectory,
+                ..Default::default()
+            });
+            return Ok((source.name, spec));
+        }
+
         let (repo, git_ref) = if let Some(at) = base.rfind('@') {
             (base[..at].to_string(), Some(base[at + 1..].to_string()))
         } else {
@@ -907,6 +936,88 @@ mod tests {
         }
     }
 
+    fn detailed(spec: DependencySpec) -> DetailedDep {
+        match spec {
+            DependencySpec::Detailed(d) => d,
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_remotes_style_subdirectory_specs_match_the_fragment_form() {
+        // #312: the slash and colon forms of DESCRIPTION `Remotes:` give
+        // the same dependency as `#subdirectory=`.
+        for (raw, fragment, want_name) in [
+            (
+                "REditorSupport/vscode-R:sess@main",
+                "REditorSupport/vscode-R@main#subdirectory=sess",
+                "sess",
+            ),
+            (
+                "REditorSupport/vscode-R/sess@main",
+                "REditorSupport/vscode-R@main#subdirectory=sess",
+                "sess",
+            ),
+            (
+                "owner/repo/pkgs/nested",
+                "owner/repo#subdirectory=pkgs/nested",
+                "nested",
+            ),
+            (
+                "owner/repo:pkgs/nested@v1.0",
+                "owner/repo@v1.0#subdirectory=pkgs/nested",
+                "nested",
+            ),
+        ] {
+            let (name, spec) =
+                parse_add_spec(raw, false).unwrap_or_else(|e| panic!("should accept {raw}: {e}"));
+            let (fragment_name, fragment_spec) = parse_add_spec(fragment, false).unwrap();
+            assert_eq!(name, want_name, "{raw}");
+            assert_eq!(name, fragment_name, "{raw}");
+            assert_eq!(detailed(spec), detailed(fragment_spec), "{raw}");
+        }
+    }
+
+    #[test]
+    fn parse_ref_goes_last_and_can_contain_a_slash() {
+        // Same rule as `Remotes:`: the ref follows the first `@`, so
+        // `owner/repo@ref/sub` is a branch named `ref/sub`, not a directory.
+        let d = detailed(parse_add_spec("owner/repo@feature/x", false).unwrap().1);
+        assert_eq!(d.git.as_deref(), Some("owner/repo"));
+        assert_eq!(d.rev.as_deref(), Some("feature/x"));
+        assert_eq!(d.subdirectory, None);
+    }
+
+    #[test]
+    fn parse_rejects_bad_remotes_style_subdirectories() {
+        for bad in [
+            "owner/repo/",
+            "owner/repo:",
+            "owner/repo/a:b",
+            "owner/repo/../escape",
+            "owner/repo:sub@",
+            "owner/repo:sub#subdirectory=other",
+            "owner/repo/sub#subdirectory=other",
+        ] {
+            assert!(parse_add_spec(bad, false).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn parse_keeps_the_host_error_for_host_like_first_segments() {
+        // #145: a first segment with a `.` is a host, also when the rest
+        // looks like a GitHub subdirectory spec.
+        for raw in [
+            "gitlab.com/user/repo",
+            "gitlab.com/user/repo:sub",
+            "gitlab.com/user/repo/sub@main",
+            "git.local:3000/u/r",
+        ] {
+            let err = parse_add_spec(raw, false).unwrap_err().to_string();
+            assert!(err.contains("Unsupported git host"), "{raw}: {err}");
+        }
+    }
+
     #[test]
     fn parse_rejects_subdirectory_on_non_github_hosts() {
         for bad in [
@@ -948,7 +1059,8 @@ mod tests {
     fn parse_invalid_github() {
         assert!(parse_add_spec("/", false).is_err());
         assert!(parse_add_spec("a//b", false).is_err());
-        assert!(parse_add_spec("user/repo/extra", false).is_err());
+        // `user/repo/extra` is now the package directory `extra` (#312).
+        assert!(parse_add_spec("user//extra", false).is_err());
     }
 
     #[test]
@@ -1025,10 +1137,10 @@ mod tests {
     #[test]
     fn parse_non_host_bad_spec_keeps_github_error() {
         // No dot in the first segment → still the plain GitHub-spec error.
-        let msg = parse_add_spec("user/repo/extra", false)
-            .unwrap_err()
-            .to_string();
-        assert!(msg.contains("Invalid GitHub spec"), "unexpected: {msg}");
+        for raw in ["user//extra", "user/repo/", "user/repo:"] {
+            let msg = parse_add_spec(raw, false).unwrap_err().to_string();
+            assert!(msg.contains("Invalid GitHub spec"), "{raw}: {msg}");
+        }
     }
 
     #[test]
