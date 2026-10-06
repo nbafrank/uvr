@@ -94,6 +94,8 @@ pub fn install_timeout() -> Option<String> {
 /// Distro IDs are normalized as in host detection: `rhel`/`ol` become `redhat`,
 /// `rocky`/`almalinux` become `rockylinux`, and RHEL-family releases use the major
 /// version. `opensuse-leap-15.6` becomes `opensuse-15.6`, retaining the minor.
+/// Rules target fixed releases; rolling-release snapshot versions must match exactly
+/// and need updating when the host's `VERSION_ID` changes.
 /// The alternative must be installed; optional `pkg_config` and
 /// `minimum_version` fields additionally verify its SDK. A minimum requires
 /// a module. Failed checks retain the catalog requirement, including runtime
