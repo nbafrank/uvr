@@ -169,6 +169,12 @@ fn copy_document_key(
             .and_then(|table| table.get(key))
             .map(|old| edited_item_preserving_comments(old, item))
             .unwrap_or_else(|| item.clone());
+        // Indexing a missing section creates an inline table at the top of
+        // the document (`dependencies = { … }` above `[project]`); give it a
+        // standard `[section]` table at the end instead.
+        if !doc.contains_key(section) {
+            doc.insert(section, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
         doc[section][key] = item;
     } else if let Some(table) = doc
         .get_mut(section)
@@ -557,7 +563,13 @@ impl Manifest {
         if previous.activate != self.activate {
             copy_document_key(&mut doc, &desired, "activate", "prompt");
         }
-        Ok(doc.to_string())
+        let edited = doc.to_string();
+        // toml_edit writes `\n`; keep a CRLF file CRLF so an edit does not
+        // show every line as changed.
+        if original.contains("\r\n") {
+            return Ok(edited.replace("\r\n", "\n").replace('\n', "\r\n"));
+        }
+        Ok(edited)
     }
 
     /// Add or update a dependency. Returns `true` if a new dep was added.
@@ -1620,6 +1632,42 @@ bioc = true
         manifest.write(&path).unwrap();
         let removed = std::fs::read_to_string(&path).unwrap();
         assert_eq!(removed, original);
+    }
+
+    #[test]
+    fn first_dependency_gets_a_standard_table_after_project() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("uvr.toml");
+        std::fs::write(&path, "[project]\nname = \"example\"\n").unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        manifest.add_dep("cli".into(), DependencySpec::Version("*".into()), false);
+        manifest.add_dep("testthat".into(), DependencySpec::Version("*".into()), true);
+        manifest.write(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with("[project]\n"), "{written}");
+        assert!(written.contains("[dependencies]\ncli = \"*\""), "{written}");
+        assert!(
+            written.contains("[dev-dependencies]\ntestthat = \"*\""),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn crlf_manifest_stays_crlf() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("uvr.toml");
+        let original =
+            "# note\r\n[project]\r\nname = \"example\"\r\n\r\n[dependencies]\r\nrlang = \"*\"\r\n";
+        std::fs::write(&path, original).unwrap();
+        let mut manifest = Manifest::from_file(&path).unwrap();
+        manifest.add_dep("cli".into(), DependencySpec::Version("*".into()), false);
+        manifest.write(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("cli"));
+        assert!(!written.replace("\r\n", "").contains('\n'), "{written:?}");
+        manifest.remove_dep("cli");
+        manifest.write(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

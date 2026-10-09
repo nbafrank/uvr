@@ -123,13 +123,42 @@ pub fn resolve(name: &str, url: &str) -> Option<Credential> {
     if has_userinfo(url) {
         return None;
     }
-    env_credential(&env_key(name)).or_else(|| {
+    let credential = env_credential(&env_key(name)).or_else(|| {
         let entry = netrc_entry(&url_host(url)?)?;
         Some(Credential::Basic {
             username: entry.login,
             password: entry.password,
         })
-    })
+    })?;
+    if !credential_transport_ok(url) {
+        tracing::warn!(
+            "Not sending the credential for repository `{name}` to {}: it is not https. \
+             Use an https:// URL for a private repository.",
+            redact_url(url)
+        );
+        return None;
+    }
+    Some(credential)
+}
+
+/// Whether a credential may go to `url`: https, or plain http to a loopback
+/// host (a local proxy or test server), where nothing crosses the network.
+fn credential_transport_ok(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }),
+        _ => false,
+    }
 }
 
 fn env_credential(key: &str) -> Option<Credential> {
@@ -687,7 +716,9 @@ impl NetrcLexer<'_> {
     }
 }
 
-/// Whether env var `name` holds a repository or `git::` host credential.
+/// Whether env var `name` holds a repository, `git::`, GitLab or Forgejo
+/// host credential (the global `UVR_GITLAB_TOKEN` / `UVR_FORGEJO_TOKEN`
+/// included), so it is kept from package build scripts.
 pub fn is_credential_var(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     [
@@ -696,6 +727,8 @@ pub fn is_credential_var(name: &str) -> bool {
         PASSWORD_PREFIX,
         GIT_TOKEN_PREFIX,
         GIT_USER_PREFIX,
+        "UVR_GITLAB_TOKEN",
+        "UVR_FORGEJO_TOKEN",
     ]
     .iter()
     .any(|p| upper.starts_with(p))
@@ -1601,12 +1634,28 @@ mod tests {
     }
 
     #[test]
+    fn credentials_need_https_or_loopback() {
+        assert!(credential_transport_ok("https://ppm.corp.example/cran"));
+        assert!(credential_transport_ok("http://localhost:8080/cran"));
+        assert!(credential_transport_ok("http://127.0.0.1/cran"));
+        assert!(credential_transport_ok("http://[::1]:9000/cran"));
+        assert!(!credential_transport_ok("http://ppm.corp.example/cran"));
+        assert!(!credential_transport_ok(
+            "http://localhost.evil.example/cran"
+        ));
+        assert!(!credential_transport_ok("ftp://ppm.corp.example/cran"));
+    }
+
+    #[test]
     fn credential_vars_are_recognized() {
         assert!(is_credential_var("UVR_REPO_TOKEN_X"));
         assert!(is_credential_var("UVR_REPO_USER_X"));
         assert!(is_credential_var("uvr_repo_password_x"));
         assert!(is_credential_var("UVR_GIT_TOKEN_GIT_CORP"));
         assert!(is_credential_var("UVR_GIT_USER_GIT_CORP"));
+        assert!(is_credential_var("UVR_GITLAB_TOKEN"));
+        assert!(is_credential_var("UVR_GITLAB_TOKEN_GITLAB_CORP"));
+        assert!(is_credential_var("UVR_FORGEJO_TOKEN_CODEBERG_ORG"));
         assert!(!is_credential_var("UVR_REPOS"));
         assert!(!is_credential_var("GITHUB_PAT"));
     }

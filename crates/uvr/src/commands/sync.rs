@@ -1806,8 +1806,8 @@ fn validate_locked_manifest(project: &Project, lockfile: &Lockfile) -> Result<()
     }
     if let Some(req) = manifest.project.r_version.as_deref() {
         if looks_like_version(&lockfile.r.version) {
-            let version = semver::Version::parse(&normalize_version(&lockfile.r.version))?;
-            if !version_matches_req(&version, &parse_version_req(req)?) {
+            // Same reading of a bare version as R selection (#320).
+            if !uvr_core::r_version::detector::r_version_satisfies(req, &lockfile.r.version)? {
                 anyhow::bail!(
                     "Locked R {} does not satisfy {req}; run `uvr lock`",
                     lockfile.r.version
@@ -1852,8 +1852,13 @@ fn validate_locked_manifest(project: &Project, lockfile: &Lockfile) -> Result<()
             anyhow::bail!("Locked URL source for {name} is not declared in the manifest");
         }
         if let Some(git) = spec.git() {
-            let matching_provider = if let Some(url) = git.strip_prefix("git::") {
-                matches!(&pkg.source, uvr_core::lockfile::PackageSource::Git { url: locked } if locked == url)
+            let matching_provider = if git.starts_with("git::") {
+                // The lock records the clone URL without the `@ref` that
+                // `git = "git::<url>@<ref>"` may carry inline.
+                let url = uvr_core::registry::git_generic::manifest_spec(git, None)
+                    .map_err(|e| anyhow::anyhow!("Invalid git dependency for {name}: {e}"))?
+                    .url;
+                matches!(&pkg.source, uvr_core::lockfile::PackageSource::Git { url: locked } if *locked == url)
             } else if git.starts_with("forgejo::") {
                 matches!(
                     pkg.source,
@@ -2723,6 +2728,45 @@ mod tests {
         lock.packages[0].dev = false;
         lock.packages.push(lock.packages[0].clone());
         assert!(validate_frozen_lock(&project, &lock).is_err());
+    }
+
+    #[test]
+    fn frozen_lock_accepts_an_inline_git_ref() {
+        // The lock records the clone URL without the `@ref` that
+        // `git = "git::<url>@<ref>"` carries inline.
+        for (git, rev) in [
+            ("git::https://example.org/demo.git@v1", None),
+            ("git::https://example.org/demo.git", Some("v1")),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let mut manifest = uvr_core::manifest::Manifest::new("test", None);
+            manifest.add_dep(
+                "demo".into(),
+                uvr_core::manifest::DependencySpec::Detailed(uvr_core::manifest::DetailedDep {
+                    git: Some(git.into()),
+                    rev: rev.map(Into::into),
+                    ..Default::default()
+                }),
+                false,
+            );
+            manifest.write(&temp.path().join("uvr.toml")).unwrap();
+            let project = Project::find(temp.path()).unwrap();
+            let mut pkg = locked_pkg("demo", "1.0.0", "https://example.org/demo.git");
+            pkg.url = None;
+            pkg.source = PackageSource::Git {
+                url: "https://example.org/demo.git".into(),
+            };
+            pkg.checksum = Some(format!("git:{}", "a".repeat(40)));
+            let lock = Lockfile {
+                manifest_fingerprint: Some(manifest.lock_fingerprint().unwrap()),
+                r: RVersionPin {
+                    version: "*".into(),
+                    bioc_version: None,
+                },
+                packages: vec![pkg],
+            };
+            validate_frozen_lock(&project, &lock).unwrap_or_else(|e| panic!("{git}: {e}"));
+        }
     }
 
     #[test]

@@ -15,7 +15,27 @@ Pure tracking section — fixes and small features land here between tags.
   to install a version that was already installed. A bare version now
   means what it means in `.r-version` and `uvr r use`: `"4.5.3"` is exactly
   R 4.5.3, and `"4.5"` is the newest installed 4.5.x. Write `">=4.5"` or
-  `"^4.5"` for a range. `uvr run --r-version 4.5.3` follows the same rule.
+  `"^4.5"` for a range. `uvr run --r-version 4.5.3` follows the same rule,
+  and so does the `--frozen` check of the locked R. `uvr import` now writes
+  the R from `renv.lock` as a floor (`">=4.2.1"`), because renv records the
+  R a lock was made with, not one the project requires.
+
+- **Pre-release review fixes.**
+  - `uvr lock` without `--upgrade`, and `uvr add` of another package, now
+    refuse a URL tarball whose file changed since `uvr.lock` was written,
+    instead of quietly recording the new checksum. Only `uvr lock --upgrade`
+    accepts it.
+  - `uvr sync --frozen` accepts `git = "git::<url>@<ref>"` written inline. It
+    used to reject every such lock as not matching its Git dependency.
+  - A `url =` dependency with a `user:password@` part is rejected, because
+    the secret would be written into `uvr.toml` and `uvr.lock`.
+  - A `[[sources]]` credential is no longer sent over plain `http://`, except
+    to `localhost`; uvr warns instead.
+  - `UVR_GITLAB_TOKEN*` and `UVR_FORGEJO_TOKEN*` are kept out of
+    `R CMD INSTALL`, like the other uvr credentials.
+  - The first `uvr add` in a project writes a standard `[dependencies]`
+    table, not an inline `dependencies = { … }` above `[project]`.
+  - A CRLF `uvr.toml` stays CRLF when `uvr add` or `uvr remove` edits it.
 
 - **Positron settings name the project's R** (#321). `uvr init`, `sync` and
   `import` now bind `.vscode/settings.json` to the R that `uvr run` resolves

@@ -19,6 +19,10 @@ pub fn is_source_tarball_url(spec: &str) -> bool {
     reqwest::Url::parse(spec).is_ok_and(|url| {
         matches!(url.scheme(), "http" | "https")
             && url.host().is_some()
+            // A `user:password@` part would be written into uvr.toml and
+            // uvr.lock, and reqwest would send it as basic auth.
+            && url.username().is_empty()
+            && url.password().is_none()
             && (url.path().ends_with(".tar.gz") || url.path().ends_with(".tgz"))
     })
 }
@@ -232,6 +236,8 @@ mod tests {
             "https://example.org/download?file=tpkg.tar.gz",
             "ftp://example.org/tpkg_1.2.0.tar.gz",
             "file:///tmp/tpkg_1.2.0.tar.gz",
+            "https://user:secret@example.org/tpkg_1.2.0.tar.gz",
+            "https://token@example.org/tpkg_1.2.0.tar.gz",
             "tpkg_1.2.0.tar.gz",
             "user/repo",
         ] {

@@ -63,7 +63,7 @@ pub async fn resolve_and_lock(project: &Project, upgrade: bool) -> Result<Lockfi
     let client = build_client()?;
     let lockfile =
         resolve_lockfile(project, &client, upgrade, existing.as_ref(), HashMap::new()).await?;
-    warn_changed_url_tarballs(existing.as_ref(), &lockfile);
+    check_changed_url_tarballs(existing.as_ref(), &lockfile, upgrade)?;
     project
         .save_lockfile(&lockfile)
         .context("Failed to write uvr.lock")?;
@@ -659,12 +659,18 @@ fn check_url_package_name(key: &str, url: &str, actual: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-locking accepts a URL tarball whose bytes changed, which `uvr sync`
-/// refuses as a checksum mismatch. Say so, so the change is never silent.
-/// Only for resolutions that are written to disk.
-fn warn_changed_url_tarballs(existing: Option<&Lockfile>, fresh: &Lockfile) {
+/// A URL tarball whose bytes changed since uvr.lock was written is accepted
+/// only by `uvr lock --upgrade`, which says so. Any other re-lock (`uvr lock`
+/// on a stale lock, `uvr add` of another package) refuses: it would
+/// otherwise adopt the new bytes as a side effect, the change `uvr sync`
+/// refuses as a checksum mismatch. Only for resolutions written to disk.
+fn check_changed_url_tarballs(
+    existing: Option<&Lockfile>,
+    fresh: &Lockfile,
+    upgrade: bool,
+) -> Result<()> {
     let Some(existing) = existing else {
-        return;
+        return Ok(());
     };
     for pkg in fresh
         .packages
@@ -675,6 +681,15 @@ fn warn_changed_url_tarballs(existing: Option<&Lockfile>, fresh: &Lockfile) {
             continue;
         };
         if old.url == pkg.url && old.checksum != pkg.checksum {
+            if !upgrade {
+                anyhow::bail!(
+                    "The file at {} changed since uvr.lock was written ({} -> {}). \
+                     Run `uvr lock --upgrade` to accept the new file.",
+                    pkg.url.as_deref().unwrap_or_default(),
+                    old.checksum.as_deref().unwrap_or("no checksum"),
+                    pkg.checksum.as_deref().unwrap_or("no checksum"),
+                );
+            }
             tracing::warn!(
                 "The file at {} changed since uvr.lock was written ({} -> {}); uvr.lock now \
                  records the new checksum.",
@@ -684,6 +699,7 @@ fn warn_changed_url_tarballs(existing: Option<&Lockfile>, fresh: &Lockfile) {
             );
         }
     }
+    Ok(())
 }
 
 /// Resolve source-chained git dependencies. Bound requests are required and
