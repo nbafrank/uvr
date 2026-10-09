@@ -5,9 +5,33 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 ## Unreleased
 
-- Verify installed and cached generic Git package provenance before reuse, including same-version content or origin changes. Frozen sync validates manifest inputs locally and restores the locked commit without following remote branch changes.
-
 Pure tracking section — fixes and small features land here between tags.
+
+## v0.4.7 (2026-10-08)
+
+Private and non-CRAN code becomes a first-class dependency: packages from
+authenticated repositories, from any git host, and from a tarball URL, with
+one credential resolver (environment variables, then `~/.netrc`) behind all
+of them. Lockfiles get stricter in the useful direction: `uvr sync --frozen`
+no longer breaks when CRAN publishes something new, git dependencies install
+from their locked commit, and `uvr add`/`uvr remove` stop rewriting your
+`uvr.toml`. IDE setup is now opt-in, with an explicit unattended mode for CI.
+
+Three adversarial reviews ran before this tag. They found that a git host's
+token could reach a lookalike host (and that the all-hosts GitLab/Forgejo
+tokens went to any host a project named), that re-locking could silently
+accept a changed URL tarball, and that `--frozen` rejected inline git refs.
+All are fixed here.
+
+Two changes may need action:
+- **Self-hosted GitLab/Forgejo:** use the per-host token variable. The
+  all-hosts `UVR_GITLAB_TOKEN` / `UVR_FORGEJO_TOKEN` now go only to
+  `gitlab.com` / `codeberg.org`, and a `-` in a host name is now `__` in the
+  variable name. uvr warns and prints the variable to set.
+- **`r_version = "4.5"` (no operator) now pins R 4.5.x**, as `.r-version`
+  and `uvr r use` always did. Write `">=4.5"` for a floor.
+
+- Verify installed and cached generic Git package provenance before reuse, including same-version content or origin changes. Frozen sync validates manifest inputs locally and restores the locked commit without following remote branch changes.
 
 - **A bare `r_version` pins R** (#320). `r_version = "4.5.3"` in `uvr.toml`
   used to be read as the semver caret `^4.5.3`, so `uvr run` picked the
