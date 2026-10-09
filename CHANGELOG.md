@@ -165,6 +165,30 @@ Two changes may need action:
   dependency, and it checks installed and cached packages against the commit.
 - **Distro suite maintenance:** refreshed the Alpine 3.21/3.22 image versions.
 
+- **`UVR_USER_PROFILE=1` loads the user's `~/.Rprofile` in a uvr project,
+  a headered `uvr run` script, and `R CMD INSTALL`** (#249). R reads only
+  one user profile and takes `./.Rprofile` first, so uvr's project block
+  hid a personal profile in every project session, and the null-device
+  `R_PROFILE_USER` hid it from scripts and installs. With the switch on,
+  scripts and installs point `R_PROFILE_USER` at the user's own value or
+  `~/.Rprofile` by explicit path, never at the project file, and the project
+  block sources `~/.Rprofile` before it adds the project library. Run
+  `uvr sync` once to refresh the block. Off by default, and an environment
+  variable rather than a `uvr.toml` key because the profile belongs to the
+  user, not the project. It also gives #261-style `.Rprofile` workarounds a
+  way back into installs. Requested by @AliSajid.
+
+- **A relative `R_PROFILE_USER` now reaches every phase of `R CMD INSTALL`**
+  (#261). With `UVR_USER_PROFILE=1`, uvr passed the user's own
+  `R_PROFILE_USER` through as it was. R resolves a relative path against its
+  own working directory, and the lazy-load and byte-compile sessions of an
+  install run from the unpacked package. So those sessions loaded the
+  `.Rprofile` that the tarball ships, or no profile, and a libomp preload
+  for #261 did not reach the session that needed it. uvr now makes a
+  relative value absolute against its own working directory. A value that
+  starts with `~` stays as it is, because R expands it. Without the switch,
+  installs still get the null device.
+
 - **macOS: the OpenMP shim now reaches CRAN's own R, not just uvr-managed
   installs** (#261). uvr skipped the shim for a system R on the assumption
   that CRAN's framework build links `libomp` itself. It does not: `libR.dylib`
