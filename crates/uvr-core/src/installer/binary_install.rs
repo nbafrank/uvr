@@ -150,6 +150,8 @@ pub fn install_binary_package(
         }
     }
 
+    crate::installer::install_marker::mark(&library.join(package_name));
+
     Ok(())
 }
 
@@ -941,6 +943,9 @@ mod tests {
 
         install_binary_package(&zip_file, &library, "mypkg", None).unwrap();
         assert!(library.join("mypkg").join("DESCRIPTION").exists());
+        assert!(crate::installer::install_marker::is_marked(
+            &library.join("mypkg")
+        ));
     }
 
     #[test]
@@ -977,6 +982,9 @@ mod tests {
 
         install_binary_package(&tarball, &library, "tarpkg", None).unwrap();
         assert!(library.join("tarpkg").join("DESCRIPTION").exists());
+        assert!(crate::installer::install_marker::is_marked(
+            &library.join("tarpkg")
+        ));
     }
 
     #[test]

@@ -7,6 +7,23 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`uvr sync` no longer deletes packages it did not install** (#255). Sync
+  removed every package in `.uvr/library/` that was not in `uvr.lock`. The
+  library is on `R_LIBS_USER` in an activated shell, so a package installed
+  there with `install.packages()`, or by a tool such as carrier, disappeared
+  on the next sync. uvr now writes a marker file,
+  `Meta/uvr-installed`, into each package it installs, whether it comes
+  from a binary, from `R CMD INSTALL`, or from the package cache. Sync
+  removes only unlocked packages that have the marker. It keeps the other
+  unlocked packages and lists them in one line. `uvr sync --prune-all`
+  restores the old behaviour. Existing libraries need no separate
+  migration step: each sync marks the installed packages that `uvr.lock`
+  lists, so after one sync with this version, `uvr remove` followed by
+  `uvr sync` cleans up as before. A package removed from the lockfile
+  before that first sync has no marker, so sync keeps it and lists it. A
+  package that you reinstall with R also loses the marker, because R
+  replaces the whole package directory.
+
 - **Activating a uvr project no longer breaks a Python virtual environment's
   `deactivate`** (#303). A shell has one function namespace, so uvr's
   `deactivate` replaced the venv's, and removing uvr's on the way out left the
