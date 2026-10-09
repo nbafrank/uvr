@@ -264,9 +264,11 @@ fn warn_once(url: &str) {
 /// an `http.<origin>/.extraHeader`, so git sends it only to that origin.
 /// None for a URL that the host does not serve (`http://`, ssh, file), or
 /// when uvr has no credential: git then uses its own credential helpers.
-/// `GIT_CONFIG_*` entries that the user set stay in place.
+/// `user_count` is the `GIT_CONFIG_COUNT` that the user set (see
+/// `user_config_count`); those entries stay in place.
 fn credential_env(
     url: &str,
+    user_count: usize,
     version: impl FnOnce() -> Option<(u32, u32)>,
 ) -> Result<Vec<(String, String)>> {
     let host = GitHost::Git(url);
@@ -294,20 +296,26 @@ fn credential_env(
         .map_err(|e| UvrError::Other(format!("invalid clone URL {url}: {e}")))?
         .origin()
         .ascii_serialization();
-    let index = crate::env_vars::read_env_var("GIT_CONFIG_COUNT")
-        .and_then(|n| n.trim().parse::<usize>().ok())
-        .unwrap_or(0);
     Ok(vec![
-        ("GIT_CONFIG_COUNT".into(), (index + 1).to_string()),
+        ("GIT_CONFIG_COUNT".into(), (user_count + 1).to_string()),
         (
-            format!("GIT_CONFIG_KEY_{index}"),
+            format!("GIT_CONFIG_KEY_{user_count}"),
             format!("http.{origin}/.extraHeader"),
         ),
         (
-            format!("GIT_CONFIG_VALUE_{index}"),
+            format!("GIT_CONFIG_VALUE_{user_count}"),
             format!("Authorization: {}", credential.header_value()),
         ),
     ])
+}
+
+/// The number of `GIT_CONFIG_*` entries that the user set. A parameter of
+/// `credential_env`, so that tests do not set `GIT_CONFIG_COUNT` in the
+/// process environment, which every `git` that other tests start reads.
+fn user_config_count() -> usize {
+    crate::env_vars::read_env_var("GIT_CONFIG_COUNT")
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 /// How uvr runs `git` for one clone URL.
@@ -325,7 +333,7 @@ impl GitCmd {
     fn for_url(url: &str) -> Result<Self> {
         let program = find_git(std::env::var_os("PATH"))?;
         warn_once(url);
-        let env = credential_env(url, || git_version(&program))?;
+        let env = credential_env(url, user_config_count(), || git_version(&program))?;
         Ok(GitCmd {
             program,
             env,
@@ -1090,11 +1098,10 @@ mod tests {
         let _env = GitEnv::new(&[
             "UVR_GIT_TOKEN_GIT_CORP_EXAMPLE",
             "UVR_GIT_USER_GIT_CORP_EXAMPLE",
-            "GIT_CONFIG_COUNT",
         ]);
         let url = "https://git.corp.example/team/repo.git";
         let new = || Some((2, 31));
-        assert!(credential_env(url, new).unwrap().is_empty());
+        assert!(credential_env(url, 0, new).unwrap().is_empty());
 
         std::env::set_var("UVR_GIT_TOKEN_GIT_CORP_EXAMPLE", "s3cret");
         // base64("x-token-auth:s3cret")
@@ -1105,7 +1112,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            pairs(credential_env(url, new).unwrap()),
+            pairs(credential_env(url, 0, new).unwrap()),
             [
                 "GIT_CONFIG_COUNT=1".to_string(),
                 "GIT_CONFIG_KEY_0=http.https://git.corp.example/.extraHeader".into(),
@@ -1114,7 +1121,7 @@ mod tests {
         );
         // The same host on another port has the same variable (as for
         // GitLab), but the header is for that origin only.
-        let env = pairs(credential_env("https://git.corp.example:8443/r.git", new).unwrap());
+        let env = pairs(credential_env("https://git.corp.example:8443/r.git", 0, new).unwrap());
         assert_eq!(
             env[1],
             "GIT_CONFIG_KEY_0=http.https://git.corp.example:8443/.extraHeader"
@@ -1127,13 +1134,12 @@ mod tests {
             "file:///git.corp.example/repo.git",
             "https://other.example/team/repo.git",
         ] {
-            assert!(credential_env(other, new).unwrap().is_empty(), "{other}");
+            assert!(credential_env(other, 0, new).unwrap().is_empty(), "{other}");
         }
 
         // A user name, and GIT_CONFIG_* entries that the user set.
         std::env::set_var("UVR_GIT_USER_GIT_CORP_EXAMPLE", "alice");
-        std::env::set_var("GIT_CONFIG_COUNT", "2");
-        let env = pairs(credential_env(url, new).unwrap());
+        let env = pairs(credential_env(url, 2, new).unwrap());
         // base64("alice:s3cret")
         assert_eq!(
             env,
@@ -1143,10 +1149,9 @@ mod tests {
                 "GIT_CONFIG_VALUE_2=Authorization: Basic YWxpY2U6czNjcmV0".into(),
             ]
         );
-        std::env::remove_var("GIT_CONFIG_COUNT");
 
         // git before 2.31 ignores GIT_CONFIG_*: say so instead of a 401.
-        let err = credential_env(url, || Some((2, 30)))
+        let err = credential_env(url, 0, || Some((2, 30)))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1154,12 +1159,12 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("s3cret"), "{err}");
-        assert!(credential_env(url, || None).is_err());
+        assert!(credential_env(url, 0, || None).is_err());
 
         // A command never carries the credential in its arguments.
         let git = GitCmd {
             program: "git".into(),
-            env: credential_env(url, new).unwrap(),
+            env: credential_env(url, 0, new).unwrap(),
             serves: true,
         };
         let cmd = git.command();
@@ -1176,7 +1181,7 @@ mod tests {
     fn netrc_credential_is_basic_auth_with_its_login() {
         use crate::auth::GitEnv;
 
-        let _env = GitEnv::new(&["UVR_GIT_TOKEN_GIT_CORP_EXAMPLE", "GIT_CONFIG_COUNT"]);
+        let _env = GitEnv::new(&["UVR_GIT_TOKEN_GIT_CORP_EXAMPLE"]);
         let dir = tempfile::tempdir().unwrap();
         let netrc = dir.path().join("netrc");
         std::fs::write(
@@ -1208,7 +1213,7 @@ mod tests {
         assert_eq!(credential("git@git.corp.example:r.git"), None);
         // Too old a git for GIT_CONFIG_*: git reads ~/.netrc on its own.
         assert!(
-            credential_env("https://git.corp.example/r.git", || Some((2, 20)))
+            credential_env("https://git.corp.example/r.git", 0, || Some((2, 20)))
                 .unwrap()
                 .is_empty()
         );
@@ -1225,7 +1230,7 @@ mod tests {
         };
 
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let _env = GitEnv::new(&["UVR_GIT_TOKEN_127_0_0_1", "GIT_CONFIG_COUNT"]);
+        let _env = GitEnv::new(&["UVR_GIT_TOKEN_127_0_0_1"]);
         let git = match find_git(std::env::var_os("PATH")) {
             Ok(git) => git,
             Err(_) => return,
