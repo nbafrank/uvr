@@ -7,6 +7,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **A source build that fails because the compiler rejects R's `-std=` flag
+  now says why** (#231). R's `etc/Makeconf` records the compiler flags of the
+  host that built it, and R 4.5.1's musl build asks for `-std=gnu23`, which
+  gcc 13 (Alpine 3.20) does not know. R installed fine, then every package
+  with C code failed with only gcc's `unrecognized command-line option
+  '-std=gnu23'`. uvr now adds a hint that names the flag, says this R was
+  built for a newer compiler than the host has (gcc >= 14 or clang >= 18 for
+  C23), and suggests a newer compiler or an R build that matches the host.
+  The root cause is upstream in rstudio/r-builds.
+
 - **A source tarball served from a binary URL is now built from source
   instead of failing the install** (#225). P3M's Linux repos serve source
   and binary from the same URL, and fall back to source for any package
