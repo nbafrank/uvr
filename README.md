@@ -388,6 +388,11 @@ R                         # uses the project's R and .uvr/library/
 deactivate                # restore your shell
 ```
 
+If another tool already owns the name `deactivate` — a Python virtual
+environment, for example — uvr leaves that function alone and says so when you
+activate. Use `uvr_deactivate` there; it always works, whichever shell you use,
+and it restores only what uvr changed.
+
 `uvr init` writes these files (`uvr activate --write-shim` recreates them).
 They contain **no paths**: each one asks uvr to recompute the environment as
 it is sourced, so changing the project's R version with `uvr r use` or
