@@ -462,13 +462,6 @@ async fn live_linux_repo(client: &reqwest::Client, platform: Platform) -> Option
         _ => return None,
     };
 
-    // `--distribution X` is the user telling uvr its autodetection is wrong
-    // here (#54). The catalog lookup starts from that same autodetection, so
-    // honouring the override means not running it.
-    if crate::r_version::downloader::distro_override_is_set() {
-        return None;
-    }
-
     let os = crate::os_release::detect()?;
     if os.id.is_empty() || os.version_id.is_empty() {
         return None;

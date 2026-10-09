@@ -329,45 +329,17 @@ fn parse_r_version(version: &str) -> Option<(u32, u32, u32)> {
     Some((maj, min, patch))
 }
 
-/// Process-wide override for the Posit CDN distro slug. Set by
-/// `uvr r install --distribution <slug>` before invoking the downloader,
-/// for users on Linux distros uvr can't autodetect (e.g. PopOS, Manjaro,
-/// other Ubuntu/Arch derivatives — see #54).
-static DISTRO_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// Set the Posit CDN distro slug for the rest of this process. **Write-once**:
-/// subsequent calls are silently ignored (`OnceLock::set` returns `Err`). This
-/// matches the CLI's one-shot model — `uvr r install --distribution X` runs
-/// once per process. Library consumers that need per-call overrides must run
-/// each in a separate process.
-///
-/// Slug examples: `"ubuntu-2204"`, `"debian-12"`, `"rhel-9"`.
-pub fn set_posit_distro_override(slug: String) {
-    let _ = DISTRO_OVERRIDE.set(slug);
-}
-
-/// True when the user pinned the distro with `--distribution`. The live
-/// platform catalog keys off `/etc/os-release`, which is precisely what an
-/// override says not to trust, so the catalog path stands down when this is
-/// set (#54).
-pub fn distro_override_is_set() -> bool {
-    DISTRO_OVERRIDE.get().is_some()
-}
-
-/// Detect the Posit CDN distro slug from `/etc/os-release`, or use the
-/// override set by [`set_posit_distro_override`] if any.
+/// Detect the Posit CDN distro slug from `/etc/os-release`.
 ///
 /// Returns strings like `"ubuntu-2204"`, `"ubuntu-2404"`, `"debian-12"`,
 /// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`.
 ///
 /// A distro Posit doesn't publish for returns its own identity (`"arch"`,
-/// `"cachyos"`, `"nixos-25.05"`), which no PPM codename maps to — so P3M is
-/// skipped and sync compiles from source. See
-/// [`detect_posit_distro_slug_from_os_release`] for why that matters.
+/// `"cachyos"`, `"nixos-25.05"`), which no PPM codename maps to — so sync
+/// uses the portable `manylinux_2_28` repo when glibc allows it, and source
+/// otherwise. See [`detect_posit_distro_slug_from_os_release`] for why that
+/// matters.
 pub fn detect_posit_distro_slug() -> String {
-    if let Some(override_slug) = DISTRO_OVERRIDE.get() {
-        return override_slug.clone();
-    }
     let content = std::fs::read_to_string("/etc/os-release").ok();
     detect_posit_distro_slug_from_os_release(content.as_deref())
 }
@@ -389,16 +361,15 @@ pub fn detect_posit_distro_slug() -> String {
 /// against a system that ships `libxml2.so.16` — the install "succeeded" in
 /// seconds and every affected package failed at `library()` (#175).
 ///
-/// There is no distro-neutral binary to fall back to either: every P3M flavour
-/// that serves a binary (jammy, noble, rhel9) links `libxml2.so.2`. rstudio's
-/// portable-R docs say the same thing — those builds cover the interpreter,
-/// and "users can compile R packages from source on target systems".
+/// Every distro-specific P3M flavour (jammy, noble, rhel9) links the system
+/// `libxml2.so.2`, so none of them is a safe guess.
 ///
 /// So an unrecognized distro returns its own identity, which
-/// [`crate::registry::p3m::ppm_linux_codename`] maps to `None`, P3M is skipped
-/// and sync compiles from source against the libraries actually installed.
-/// Slower, and correct. This mirrors what the `alpine` arm already does
-/// deliberately.
+/// [`crate::registry::p3m::ppm_linux_codename`] maps to `None`. Sync then
+/// takes [`crate::registry::p3m::ppm_linux_repo`]'s fallback: the portable
+/// `manylinux_2_28` repo, whose binaries vendor their libraries, on glibc
+/// 2.28 or newer — and a source build against the libraries actually
+/// installed everywhere else (musl, older glibc).
 pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) -> String {
     // No os-release at all: a scratch container, or not Linux. Nothing to
     // identify, so claim nothing rather than a distro we merely hope for.
