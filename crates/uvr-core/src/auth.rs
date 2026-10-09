@@ -22,6 +22,8 @@ const USER_PREFIX: &str = "UVR_REPO_USER_";
 const PASSWORD_PREFIX: &str = "UVR_REPO_PASSWORD_";
 const GIT_TOKEN_PREFIX: &str = "UVR_GIT_TOKEN_";
 const GIT_USER_PREFIX: &str = "UVR_GIT_USER_";
+const GITLAB_TOKEN_PREFIX: &str = "UVR_GITLAB_TOKEN_";
+const FORGEJO_TOKEN_PREFIX: &str = "UVR_FORGEJO_TOKEN_";
 /// The user name sent with a `UVR_GIT_TOKEN_<HOST>` token. Bitbucket Cloud
 /// access tokens need this name, and GitLab ignores the name.
 const DEFAULT_GIT_USER: &str = "x-token-auth";
@@ -101,6 +103,54 @@ pub fn env_key(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// The `<HOST>` part of a git host's token variables: the host name without
+/// its port, uppercased, with `.` → `_` and `-` → `__` (`git.corp.example`
+/// → `GIT_CORP_EXAMPLE`, `git-corp.example` → `GIT__CORP_EXAMPLE`).
+///
+/// Unlike [`env_key`], one variable names exactly one host. With `-` and
+/// `.` both mapped to `_`, a token set for `git.corp.example` also went to
+/// `git-corp.example`, a host anyone could register, as soon as a cloned
+/// project named it. `None` for a host that is not a plain DNS name or
+/// IPv4 address (IPv6, `_`, non-ASCII, empty or hyphen-edged labels): such
+/// a host gets no variable, only its `~/.netrc` entry.
+pub fn host_env_key(host: &str) -> Option<String> {
+    let name = host.split_once(':').map_or(host, |(n, _port)| n);
+    let labels_ok = !name.is_empty()
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+    labels_ok.then(|| {
+        name.to_ascii_uppercase()
+            .replace('-', "__")
+            .replace('.', "_")
+    })
+}
+
+/// Print `message` once per run: credentials are looked up for every
+/// request to a host.
+fn warn_once(message: String) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut warned = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !warned.contains(&message) {
+        tracing::warn!("{message}");
+        warned.push(message);
+    }
+}
+
+/// The name this host's variable had before [`host_env_key`] (v0.4.6), when
+/// that differs, so a variable under the old name gets a pointer to the new
+/// one instead of being ignored without a word.
+fn legacy_host_var(prefix: &str, host: &str) -> Option<String> {
+    let new = host_env_key(host)?;
+    let old = env_key(host);
+    (old != new).then(|| format!("{prefix}{old}"))
 }
 
 fn read_var(prefix: &str, key: &str) -> Option<String> {
@@ -292,18 +342,73 @@ impl<'a> GitHost<'a> {
     /// the host (`git.local:3000` → `GIT_LOCAL`). Any other git host: only
     /// its own variable. A variable for all such hosts would send one token
     /// to every host that a dependency names.
+    ///
+    /// The variable for all hosts goes only to the public instance,
+    /// `gitlab.com` or `codeberg.org`: any other host is named by the
+    /// dependency, so a cloned project could otherwise collect the token by
+    /// naming a host of its own. A self-hosted instance uses its own variable.
     fn token_vars(&self) -> Vec<String> {
+        let (prefix, global, public) = match self {
+            GitHost::GitHub => return vec!["GITHUB_PAT".into(), "GITHUB_TOKEN".into()],
+            GitHost::GitLab(_) => (GITLAB_TOKEN_PREFIX, Some("UVR_GITLAB_TOKEN"), "gitlab.com"),
+            GitHost::Forgejo(_) => (
+                FORGEJO_TOKEN_PREFIX,
+                Some("UVR_FORGEJO_TOKEN"),
+                "codeberg.org",
+            ),
+            GitHost::Git(_) => (GIT_TOKEN_PREFIX, None, ""),
+        };
+        let per_host = host_env_key(self.host()).map(|key| format!("{prefix}{key}"));
+        let global = global
+            .filter(|_| self.machine().eq_ignore_ascii_case(public))
+            .map(String::from);
+        per_host.into_iter().chain(global).collect()
+    }
+
+    /// The prefix of this host's per-host token variable.
+    fn token_prefix(&self) -> Option<&'static str> {
         match self {
-            GitHost::GitHub => vec!["GITHUB_PAT".into(), "GITHUB_TOKEN".into()],
-            GitHost::GitLab(host) => vec![
-                format!("UVR_GITLAB_TOKEN_{}", env_key(host)),
-                "UVR_GITLAB_TOKEN".into(),
-            ],
-            GitHost::Forgejo(host) => vec![
-                format!("UVR_FORGEJO_TOKEN_{}", env_key(host)),
-                "UVR_FORGEJO_TOKEN".into(),
-            ],
-            GitHost::Git(_) => vec![format!("{GIT_TOKEN_PREFIX}{}", env_key(self.host()))],
+            GitHost::GitHub => None,
+            GitHost::GitLab(_) => Some(GITLAB_TOKEN_PREFIX),
+            GitHost::Forgejo(_) => Some(FORGEJO_TOKEN_PREFIX),
+            GitHost::Git(_) => Some(GIT_TOKEN_PREFIX),
+        }
+    }
+
+    /// Warn about token variables that no longer reach this host: one under
+    /// its v0.4.6 name, and the all-hosts variable for a self-hosted
+    /// instance. The token itself is never printed.
+    fn warn_unused_token_vars(&self) {
+        let Some(prefix) = self.token_prefix() else {
+            return;
+        };
+        let want = self
+            .token_vars()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "a `~/.netrc` entry".into());
+        if let Some(old) = legacy_host_var(prefix, self.host()) {
+            if crate::env_vars::read_env_var(&old).is_some() {
+                warn_once(format!(
+                    "{old} is no longer used for {}: a `-` in a host name is now `__` in the \
+                     variable name, so one variable cannot match two hosts. Rename it to {want}.",
+                    self.label()
+                ));
+            }
+        }
+        let global = match self {
+            GitHost::GitLab(_) => "UVR_GITLAB_TOKEN",
+            GitHost::Forgejo(_) => "UVR_FORGEJO_TOKEN",
+            _ => return,
+        };
+        if crate::env_vars::read_env_var(global).is_some()
+            && !self.token_vars().iter().any(|v| v == global)
+        {
+            warn_once(format!(
+                "{global} is not sent to {}: it goes only to the public instance, so a project \
+                 cannot collect it by naming another host. Set {want} for this host.",
+                self.label()
+            ));
         }
     }
 
@@ -340,6 +445,7 @@ impl<'a> GitHost<'a> {
 
     /// The first token variable that is set, as (name, value).
     pub(crate) fn env_token(&self) -> Option<(String, String)> {
+        self.warn_unused_token_vars();
         self.token_vars().into_iter().find_map(|var| {
             let token = crate::env_vars::read_env_var(&var)?.trim().to_string();
             Some((var, token))
@@ -379,7 +485,8 @@ impl<'a> GitHost<'a> {
     fn git_credential(&self, url: &str) -> Option<Credential> {
         let host = http_authority(url)?;
         if let Some((_, password)) = self.env_token() {
-            let username = read_var(GIT_USER_PREFIX, &env_key(host))
+            let username = host_env_key(host)
+                .and_then(|key| read_var(GIT_USER_PREFIX, &key))
                 .unwrap_or_else(|| DEFAULT_GIT_USER.into());
             return Some(Credential::Basic { username, password });
         }
@@ -471,7 +578,10 @@ impl<'a> GitHost<'a> {
                 self.label(),
                 self.machine(),
                 netrc_display(),
-                self.token_vars()[0]
+                self.token_vars()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| "no variable for this host".into())
             );
         }
         Ok(if retry.status().is_success() {
@@ -485,7 +595,15 @@ impl<'a> GitHost<'a> {
     /// contains the credential.
     pub fn denied_advice(&self) -> String {
         let vars = self.token_vars();
-        let first = &vars[0];
+        let Some(first) = vars.first() else {
+            return format!(
+                "if the repository is private, add a `machine {}` entry with your login and \
+                 an access token as its password to {}. This host's name has no token \
+                 variable.",
+                self.machine(),
+                netrc_display()
+            );
+        };
         let machine = self.machine();
         let netrc = netrc_display();
         if let Some((var, _)) = self.env_token() {
@@ -501,7 +619,10 @@ impl<'a> GitHost<'a> {
             );
         }
         if let GitHost::Git(_) = self {
-            let user = format!("{GIT_USER_PREFIX}{}", env_key(self.host()));
+            let user = format!(
+                "{GIT_USER_PREFIX}{}",
+                host_env_key(self.host()).unwrap_or_default()
+            );
             return format!(
                 "if the repository is private, set {first} to an access token (and {user} if \
                  the host needs a user name other than `{DEFAULT_GIT_USER}`), or add a \
@@ -510,9 +631,9 @@ impl<'a> GitHost<'a> {
             );
         }
         format!(
-            "if the repository is private, set {first} (or {}) to an access token, or \
-             add a `machine {machine}` entry with the token as its password to {netrc}.",
-            vars[1]
+            "if the repository is private, set {} to an access token, or add a \
+             `machine {machine}` entry with the token as its password to {netrc}.",
+            vars.join(" (or ") + &")".repeat(vars.len().saturating_sub(1))
         )
     }
 
@@ -1308,47 +1429,62 @@ mod tests {
 
     // The variables and the precedence that each host had before #187
     // (github_token, gitlab_token and forgejo_token), and #186's netrc
-    // fallback: no user has to change their setup.
+    // fallback, except where they let a token reach another host: a `-` in
+    // a host name is `__` in the variable, and the all-hosts variable goes
+    // only to the public instance.
     #[test]
     fn git_hosts_keep_their_token_variables() {
         let _env = GitEnv::new(&[
             "UVR_FORGEJO_TOKEN",
+            "UVR_FORGEJO_TOKEN_LOOKUP__TEST__HOST_EXAMPLE",
             "UVR_FORGEJO_TOKEN_LOOKUP_TEST_HOST_EXAMPLE",
             "UVR_FORGEJO_TOKEN_GIT_LOCAL",
             "UVR_GITLAB_TOKEN",
+            "UVR_GITLAB_TOKEN_LOOKUP__TEST__HOST_EXAMPLE",
             "UVR_GITLAB_TOKEN_LOOKUP_TEST_HOST_EXAMPLE",
             "UVR_GITLAB_TOKEN_GIT_LOCAL",
         ]);
         let host = "lookup-test-host.example";
-        for (kind, forgejo) in [
-            (GitHost::Forgejo(host), true),
-            (GitHost::GitLab(host), false),
+        for (kind, public, forgejo) in [
+            (
+                GitHost::Forgejo(host),
+                GitHost::Forgejo("codeberg.org"),
+                true,
+            ),
+            (GitHost::GitLab(host), GitHost::GitLab("GitLab.com"), false),
         ] {
-            let (per_host, global) = if forgejo {
+            let (per_host, legacy, global) = if forgejo {
                 (
+                    "UVR_FORGEJO_TOKEN_LOOKUP__TEST__HOST_EXAMPLE",
                     "UVR_FORGEJO_TOKEN_LOOKUP_TEST_HOST_EXAMPLE",
                     "UVR_FORGEJO_TOKEN",
                 )
             } else {
                 (
+                    "UVR_GITLAB_TOKEN_LOOKUP__TEST__HOST_EXAMPLE",
                     "UVR_GITLAB_TOKEN_LOOKUP_TEST_HOST_EXAMPLE",
                     "UVR_GITLAB_TOKEN",
                 )
             };
-            // The per-host variable beats the global one.
             std::env::set_var(per_host, "host-specific");
             std::env::set_var(global, "global");
             assert_eq!(token(kind).as_deref(), Some("host-specific"));
             std::env::remove_var(per_host);
-            assert_eq!(token(kind).as_deref(), Some("global"));
-            std::env::remove_var(global);
+            // The all-hosts variable reaches the public instance only.
             assert_eq!(token(kind), None);
+            assert_eq!(token(public).as_deref(), Some("global"));
+            std::env::remove_var(global);
+            assert_eq!(token(public), None);
+            // The v0.4.6 name, `-` as `_`, no longer matches this host.
+            std::env::set_var(legacy, "old-name");
+            assert_eq!(token(kind), None);
+            std::env::remove_var(legacy);
             // Whitespace-only values count as unset; values are trimmed.
-            std::env::set_var(global, "   ");
+            std::env::set_var(per_host, "   ");
             assert_eq!(token(kind), None);
-            std::env::set_var(global, " tok\n");
+            std::env::set_var(per_host, " tok\n");
             assert_eq!(token(kind).as_deref(), Some("tok"));
-            std::env::remove_var(global);
+            std::env::remove_var(per_host);
         }
         // A port is not part of the variable name.
         std::env::set_var("UVR_FORGEJO_TOKEN_GIT_LOCAL", "f");
@@ -1420,8 +1556,13 @@ mod tests {
         assert_eq!(token(GitHost::Forgejo("other.local")), None);
         assert_eq!(token(GitHost::GitLab("nopass.local")), None);
 
-        // An env token, per host or global, beats netrc.
+        // An env token beats netrc. The all-hosts one is not for git.local.
         std::env::set_var("UVR_FORGEJO_TOKEN", "env-forgejo");
+        assert_eq!(
+            token(GitHost::Forgejo("git.local")).as_deref(),
+            Some("pat-local")
+        );
+        std::env::set_var("UVR_FORGEJO_TOKEN_GIT_LOCAL", "env-forgejo");
         std::env::set_var("UVR_GITLAB_TOKEN_GIT_LOCAL", "env-gitlab");
         std::env::set_var("GITHUB_TOKEN", "env-github");
         assert_eq!(
@@ -1574,23 +1715,23 @@ mod tests {
             .to_string();
         assert!(msg.contains("Forgejo host git.local:3000"), "{msg}");
         assert!(
-            msg.contains("set UVR_FORGEJO_TOKEN_GIT_LOCAL (or UVR_FORGEJO_TOKEN)"),
+            msg.contains("set UVR_FORGEJO_TOKEN_GIT_LOCAL to an access token"),
             "{msg}"
         );
         assert!(msg.contains("`machine git.local` entry"), "{msg}");
         assert!(!msg.contains("UVR_REPO_"), "{msg}");
 
-        std::env::set_var("UVR_FORGEJO_TOKEN", "s3cret-tok");
+        std::env::set_var("UVR_FORGEJO_TOKEN_GIT_LOCAL", "s3cret-tok");
         let msg = host
             .denied_error(StatusCode::FORBIDDEN, url)
             .unwrap()
             .to_string();
         assert!(
-            msg.contains("refused the token in UVR_FORGEJO_TOKEN."),
+            msg.contains("refused the token in UVR_FORGEJO_TOKEN_GIT_LOCAL."),
             "{msg}"
         );
         assert!(!msg.contains("s3cret-tok"), "{msg}");
-        std::env::remove_var("UVR_FORGEJO_TOKEN");
+        std::env::remove_var("UVR_FORGEJO_TOKEN_GIT_LOCAL");
 
         let dir = tempfile::tempdir().unwrap();
         let netrc = write_netrc(
@@ -1631,6 +1772,46 @@ mod tests {
             assert_eq!(netrc_password("ppm.corp.example"), None);
         }
         std::env::remove_var("NETRC");
+    }
+
+    #[test]
+    fn host_env_key_names_one_host() {
+        assert_eq!(
+            host_env_key("git.corp.com").as_deref(),
+            Some("GIT_CORP_COM")
+        );
+        assert_eq!(
+            host_env_key("git-corp.com").as_deref(),
+            Some("GIT__CORP_COM")
+        );
+        assert_eq!(host_env_key("Git.Local:3000").as_deref(), Some("GIT_LOCAL"));
+        assert_eq!(host_env_key("127.0.0.1:8443").as_deref(), Some("127_0_0_1"));
+        assert_eq!(
+            host_env_key("xn--bcher-kva.example").as_deref(),
+            Some("XN____BCHER__KVA_EXAMPLE")
+        );
+        // No variable for names that are not plain DNS names.
+        for bad in [
+            "",
+            "git_corp.com",
+            "a..b",
+            "-a.b",
+            "a-.b",
+            "[::1]:8443",
+            "gıt.corp.com",
+        ] {
+            assert_eq!(host_env_key(bad), None, "{bad}");
+        }
+        // A token for one host never reaches its lookalike.
+        let _env = GitEnv::new(&["UVR_GIT_TOKEN_GIT_CORP_COM"]);
+        std::env::set_var("UVR_GIT_TOKEN_GIT_CORP_COM", "s3cret");
+        assert!(GitHost::Git("https://git.corp.com/r.git")
+            .credential()
+            .is_some());
+        assert!(GitHost::Git("https://git-corp.com/r.git")
+            .credential()
+            .is_none());
+        std::env::remove_var("UVR_GIT_TOKEN_GIT_CORP_COM");
     }
 
     #[test]

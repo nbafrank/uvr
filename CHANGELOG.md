@@ -33,6 +33,15 @@ Pure tracking section — fixes and small features land here between tags.
     to `localhost`; uvr warns instead.
   - `UVR_GITLAB_TOKEN*` and `UVR_FORGEJO_TOKEN*` are kept out of
     `R CMD INSTALL`, like the other uvr credentials.
+  - **Breaking, for self-hosted GitLab and Forgejo.** A git host's token can
+    no longer reach a different host. A `-` in a host name is now `__` in
+    its token variable (`my-gitlab.example` → `UVR_GITLAB_TOKEN_MY__GITLAB_EXAMPLE`).
+    Before, `-` and `.` were both `_`, so a project that named
+    `git-corp.com` received the token set for `git.corp.com`. The all-hosts
+    `UVR_GITLAB_TOKEN` and `UVR_FORGEJO_TOKEN` now go only to `gitlab.com`
+    and `codeberg.org`; before, they went to any host a dependency named. A
+    variable under its old name, or an all-hosts token that a host no
+    longer gets, produces a warning with the variable to set instead.
   - The first `uvr add` in a project writes a standard `[dependencies]`
     table, not an inline `dependencies = { … }` above `[project]`.
   - A CRLF `uvr.toml` stays CRLF when `uvr add` or `uvr remove` edits it.

@@ -199,7 +199,10 @@ pub fn validate_url(url: &str) -> std::result::Result<(), String> {
 }
 
 fn token_var_for(host: &str) -> String {
-    format!("UVR_GIT_TOKEN_{}", crate::auth::env_key(host))
+    match crate::auth::host_env_key(host) {
+        Some(key) => format!("UVR_GIT_TOKEN_{key}"),
+        None => "a `~/.netrc` entry for the host".into(),
+    }
 }
 
 /// The repository name in a clone URL: its last path segment without

@@ -617,10 +617,10 @@ mod tests {
         std::env::remove_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST");
         let err = resolve().unwrap_err().to_string();
         assert!(err.contains("repository not found"), "{err}");
-        std::env::set_var("UVR_FORGEJO_TOKEN", "wrong-tok");
+        std::env::set_var("UVR_FORGEJO_TOKEN_FORGEJO_TEST", "wrong-tok");
         let err = resolve().unwrap_err().to_string();
         assert!(
-            err.contains("refused the token in UVR_FORGEJO_TOKEN."),
+            err.contains("refused the token in UVR_FORGEJO_TOKEN_FORGEJO_TEST."),
             "{err}"
         );
         assert!(!err.contains("wrong-tok"), "{err}");

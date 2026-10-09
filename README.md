@@ -577,11 +577,12 @@ export UVR_REPO_PASSWORD_INTERNAL_PPM=...
 | Host | Variables, in order |
 |---|---|
 | GitHub | `GITHUB_PAT`, `GITHUB_TOKEN` |
-| GitLab | `UVR_GITLAB_TOKEN_<HOST>`, `UVR_GITLAB_TOKEN` |
-| Forgejo | `UVR_FORGEJO_TOKEN_<HOST>`, `UVR_FORGEJO_TOKEN` |
+| GitLab | `UVR_GITLAB_TOKEN_<HOST>`, then `UVR_GITLAB_TOKEN` for `gitlab.com` only |
+| Forgejo | `UVR_FORGEJO_TOKEN_<HOST>`, then `UVR_FORGEJO_TOKEN` for `codeberg.org` only |
 | Any other host (`git::`) | `UVR_GIT_TOKEN_<HOST>` |
 
-- `<HOST>` is the host, changed as `<NAME>` is above (`git.local:3000` → `GIT_LOCAL`).
+- `<HOST>` is the host name without its port, in capitals, with each `.` written as `_` and each `-` written as `__`: `git.local:3000` → `GIT_LOCAL`, `my-gitlab.example` → `MY__GITLAB_EXAMPLE`. One variable name matches exactly one host, so a project that names a lookalike host (`git-corp.com` for `git.corp.com`) cannot get your token. A host name with other characters (an IPv6 address, `_`) has no variable; use `~/.netrc`.
+- `UVR_GITLAB_TOKEN` and `UVR_FORGEJO_TOKEN` go only to `gitlab.com` and `codeberg.org`. Every other host is named by the dependency, so a cloned project could otherwise collect the token by naming a host of its own. For a self-hosted instance, set its own `<HOST>` variable. uvr warns when one of these variables is set but not used for a host.
 - If none of these variables is set, uvr uses the `password` of the `~/.netrc` entry for the host (for GitHub, `machine github.com`). The password must be an access token, not your account password.
 - uvr sends the token with the API requests, the `DESCRIPTION` request and the tarball download (GitHub and GitLab: `Authorization: Bearer`, Forgejo: `Authorization: token`). uvr sends it only to that host: for GitHub, `api.github.com` and `raw.githubusercontent.com`. uvr never sends it to CRAN, P3M, a `[[sources]]` repository, or a different git host.
 - If a host refuses a netrc password (`401`, or `404` from `raw.githubusercontent.com`), uvr shows a warning and does not use that entry again in the same run. uvr then continues without credentials, so public repositories still work. uvr never ignores a token from a variable: if the host refuses it, uvr stops with an error.
