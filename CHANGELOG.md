@@ -7,6 +7,19 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Failures that uvr used to drop silently are now reported** (#168).
+  `uvr cache clean` said "Cache is already empty" when it could not remove
+  anything (a permission error, for example), and it counted the package
+  cache as cleared without checking; it now counts only what it removed,
+  warns for each entry it could not remove, and exits non-zero when nothing
+  could be removed. If `uvr upgrade` cannot install the new binary and then
+  cannot put the old one back, the error now gives the path of the backup
+  and where to move it, instead of leaving no `uvr` and no explanation.
+  Failed cleanup of a broken R install, a failed registry cache-meta write,
+  a missing working directory during `.r-version` lookup, and an unusable
+  `Remotes:` entry (now with the name of the package that declares it) are
+  logged as warnings.
+
 - **A source build that fails because the compiler rejects R's `-std=` flag
   now says why** (#231). R's `etc/Makeconf` records the compiler flags of the
   host that built it, and R 4.5.1's musl build asks for `-std=gnu23`, which

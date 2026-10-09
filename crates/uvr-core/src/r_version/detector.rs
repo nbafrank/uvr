@@ -120,7 +120,16 @@ pub fn find_all() -> Vec<RInstallation> {
 /// 2. `version_constraint` from `uvr.toml` (see [`r_version_satisfies`])
 /// 3. Any managed installation, then system R
 pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    // If the working directory cannot be resolved (deleted, or a parent is
+    // unreadable), `.` still finds a pin in the directory itself, but the
+    // walk cannot go up to its parents. Say so rather than miss it silently.
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        tracing::warn!(
+            "Cannot determine the working directory ({e}); a .r-version pin \
+             in a parent directory will not be found"
+        );
+        PathBuf::from(".")
+    });
     resolve_r_binary(version_constraint, Some(&cwd))
 }
 
