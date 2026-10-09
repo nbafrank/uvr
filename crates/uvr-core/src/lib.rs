@@ -18,4 +18,5 @@ pub mod script_header;
 pub mod signal;
 pub mod subdirectory;
 pub mod sysreqs;
+mod sysreqs_overrides;
 pub mod sysreqs_rules;

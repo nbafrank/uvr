@@ -1104,7 +1104,10 @@ async fn install_from_lockfile_with_r(
                     .collect();
 
                 if !queries.is_empty() {
-                    let check = sysreqs::check_system_deps(&client, &queries, &distro).await;
+                    let check = sysreqs::check_system_deps(&client, &queries, &distro).await?;
+                    for description in &check.overrides_applied {
+                        ui::info_err(format!("System dependency override: {description}"));
+                    }
 
                     // #30 follow-up: only fire the unsupported-distro warning
                     // when at least one package actually declares
