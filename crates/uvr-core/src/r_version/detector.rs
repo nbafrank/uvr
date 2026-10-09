@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Result, UvrError};
@@ -117,10 +117,20 @@ pub fn find_all() -> Vec<RInstallation> {
 ///
 /// Resolution order:
 /// 1. `.r-version` file (exact pin, walked up from cwd)
-/// 2. `version_constraint` from `uvr.toml` (semver requirement)
+/// 2. `version_constraint` from `uvr.toml` (see [`r_version_satisfies`])
 /// 3. Any managed installation, then system R
 pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
-    resolve_r_binary(version_constraint, true)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    resolve_r_binary(version_constraint, Some(&cwd))
+}
+
+/// Like [`find_r_binary`], but walks up from `dir` for the `.r-version` pin
+/// instead of from the working directory. For callers acting on a project
+/// they are not necessarily inside — `uvr init <name>` creates the project
+/// in a subdirectory, and the IDE settings it writes must name the R that
+/// `uvr run` will later pick from inside that project (#321).
+pub fn find_r_binary_for_project(dir: &Path, version_constraint: Option<&str>) -> Result<PathBuf> {
+    resolve_r_binary(version_constraint, Some(dir))
 }
 
 /// Like [`find_r_binary`], but ignores any `.r-version` pin.
@@ -133,10 +143,34 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
 /// the same script would get a different R, and a different set of installed
 /// packages, purely because of where it was run from.
 pub fn find_r_binary_ignoring_pin(version_constraint: Option<&str>) -> Result<PathBuf> {
-    resolve_r_binary(version_constraint, false)
+    resolve_r_binary(version_constraint, None)
 }
 
-fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result<PathBuf> {
+/// Whether the installed R `version` satisfies a `[project] r_version`
+/// constraint.
+///
+/// A bare version (`4.5.3`, `4.5`) is a pin, matched by component prefix —
+/// the same meaning it has in `.r-version` and in `uvr r use`: `4.5.3`
+/// selects exactly 4.5.3 and `4.5` selects any 4.5.x. Anything with an
+/// operator (`>=4.3`, `^4.5`, `==4.5.3`) is a version requirement. A bare
+/// version used to go straight to semver, which reads it as a caret
+/// requirement, so `r_version = "4.5.3"` selected R 4.6.0 while the
+/// mismatch check called the same string a pin and warned (#320).
+pub fn r_version_satisfies(constraint: &str, version: &str) -> Result<bool> {
+    let constraint = constraint.trim();
+    if is_plausible_r_version(constraint) {
+        return Ok(version_matches_prefix(constraint, version));
+    }
+    let req = crate::resolver::parse_version_req(constraint)?;
+    let norm = normalize_version(version);
+    Ok(semver::Version::parse(&norm)
+        .map(|v| req.matches(&v))
+        .unwrap_or(false))
+}
+
+/// `pin_dir` is where to start walking up for a `.r-version` pin; `None`
+/// ignores pins entirely.
+fn resolve_r_binary(version_constraint: Option<&str>, pin_dir: Option<&Path>) -> Result<PathBuf> {
     let installations = find_all();
 
     if installations.is_empty() {
@@ -144,9 +178,7 @@ fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result
     }
 
     // 1. Honour .r-version exact pin
-    let pin = honor_pin
-        .then(|| read_r_version_pin_from(&std::env::current_dir().unwrap_or_default()))
-        .flatten();
+    let pin = pin_dir.and_then(read_r_version_pin_from);
     if let Some(pinned) = pin {
         let bin = find_exact_version(&installations, &pinned)?;
         // Validate the pinned install — a broken managed R (one whose binary
@@ -175,19 +207,16 @@ fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result
         return Ok(bin);
     }
 
-    // 2. Honour semver constraint from uvr.toml
+    // 2. Honour the constraint from uvr.toml
     if let Some(constraint) = version_constraint {
-        let req = crate::resolver::parse_version_req(constraint)?;
+        // Validate once up front so an unparseable constraint is an error,
+        // not "no installation matches".
+        r_version_satisfies(constraint, "0.0.0")?;
         // Probe matches in version-descending order and skip broken installs,
         // mirroring case (3) below.
         let mut matches: Vec<&RInstallation> = installations
             .iter()
-            .filter(|inst| {
-                let norm = normalize_version(&inst.version);
-                semver::Version::parse(&norm)
-                    .map(|v| req.matches(&v))
-                    .unwrap_or(false)
-            })
+            .filter(|inst| r_version_satisfies(constraint, &inst.version).unwrap_or(false))
             .collect();
         matches.sort_by(|a, b| version_cmp(&b.version, &a.version));
         for inst in matches {
@@ -238,14 +267,13 @@ fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result
 /// the manifest constraint (#137), using the exact same conflict semantics
 /// as the resolution-time drift warning above.
 pub fn pin_conflicts_with_constraint(resolved_version: &str, constraint: &str) -> bool {
-    let Ok(req) = crate::resolver::parse_version_req(constraint) else {
-        return false;
-    };
+    // Unparseable versions never satisfy a requirement, so they would read
+    // as a conflict here; keep the old "only on input we can act on" rule.
     let norm = normalize_version(resolved_version);
-    match semver::Version::parse(&norm) {
-        Ok(v) => !req.matches(&v),
-        Err(_) => false,
+    if semver::Version::parse(&norm).is_err() {
+        return false;
     }
+    matches!(r_version_satisfies(constraint, resolved_version), Ok(false))
 }
 
 /// Compare two version strings with R's semantics: `.` and `-` both separate
@@ -541,6 +569,31 @@ mod tests {
         // Unparseable constraint or version never reports drift.
         assert!(!pin_conflicts_with_constraint("4.5.1", "not-a-constraint"));
         assert!(!pin_conflicts_with_constraint("garbage", "^4.5"));
+        // A bare manifest version is a pin, not a caret requirement (#320).
+        assert!(pin_conflicts_with_constraint("4.6.0", "4.5.3"));
+        assert!(!pin_conflicts_with_constraint("4.5.3", "4.5.3"));
+    }
+
+    #[test]
+    fn r_version_satisfies_reads_bare_versions_as_pins() {
+        // #320: semver read `4.5.3` as `^4.5.3`, so R 4.6.0 satisfied it.
+        assert!(r_version_satisfies("4.5.3", "4.5.3").unwrap());
+        assert!(!r_version_satisfies("4.5.3", "4.6.0").unwrap());
+        assert!(!r_version_satisfies("4.5.3", "4.5.2").unwrap());
+        // A partial pin matches its minor series, as in `.r-version`.
+        assert!(r_version_satisfies("4.5", "4.5.0").unwrap());
+        assert!(r_version_satisfies("4.5", "4.5.3").unwrap());
+        assert!(!r_version_satisfies("4.5", "4.6.0").unwrap());
+        assert!(!r_version_satisfies("4.5", "4.50.1").unwrap());
+        assert!(r_version_satisfies(" 4.5.3 ", "4.5.3").unwrap());
+        // Operator forms keep requirement semantics.
+        assert!(r_version_satisfies("==4.5.3", "4.5.3").unwrap());
+        assert!(!r_version_satisfies("==4.5.3", "4.6.0").unwrap());
+        assert!(r_version_satisfies(">=4.3.0", "4.6.0").unwrap());
+        assert!(r_version_satisfies("^4.5", "4.6.0").unwrap());
+        assert!(r_version_satisfies("*", "4.6.0").unwrap());
+        // Garbage is an error, not "unsatisfied".
+        assert!(r_version_satisfies("not-a-constraint", "4.5.3").is_err());
     }
 
     #[test]

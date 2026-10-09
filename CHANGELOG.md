@@ -9,6 +9,21 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **A bare `r_version` pins R** (#320). `r_version = "4.5.3"` in `uvr.toml`
+  used to be read as the semver caret `^4.5.3`, so `uvr run` picked the
+  newest R (4.6.0) and then warned that it didn't match the pin, telling you
+  to install a version that was already installed. A bare version now
+  means what it means in `.r-version` and `uvr r use`: `"4.5.3"` is exactly
+  R 4.5.3, and `"4.5"` is the newest installed 4.5.x. Write `">=4.5"` or
+  `"^4.5"` for a range. `uvr run --r-version 4.5.3` follows the same rule.
+
+- **Positron settings name the project's R** (#321). `uvr init`, `sync` and
+  `import` now bind `.vscode/settings.json` to the R that `uvr run` resolves
+  (the `.r-version` pin, then the `uvr.toml` `r_version`) instead of the
+  newest installed R. If no installed R satisfies the project, the settings
+  are left alone with a hint, rather than pointing at a different R. The
+  managed-R check also honours `UVR_R_INSTALL_DIR` now.
+
 - **IDE config is now opt-in; CI mode is explicit** (#176, #206).
   `uvr init`/`sync`/`import` no longer assume an RStudio/Positron workflow:
   `.vscode/settings.json` and IDE-oriented hints are only produced when

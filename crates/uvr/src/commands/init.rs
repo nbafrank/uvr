@@ -3,10 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use uvr_core::manifest::Manifest;
-use uvr_core::project::{
-    DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE, R_VERSION_FILE,
-};
-use uvr_core::r_version::detector::find_r_binary;
+use uvr_core::project::{DESCRIPTION_FILE, DOT_UVR_DIR, LIBRARY_DIR, MANIFEST_FILE};
+use uvr_core::r_version::detector::find_r_binary_for_project;
 
 use crate::ide::Ide;
 use crate::ui;
@@ -113,7 +111,8 @@ pub fn run(
 
             // Write .vscode/settings.json only when targeting Positron.
             if ide.is_positron() {
-                ensure_positron_settings(&cwd).context("Failed to write Positron settings")?;
+                ensure_positron_settings(&cwd, manifest.project.r_version.as_deref())
+                    .context("Failed to write Positron settings")?;
             }
         }
     }
@@ -121,7 +120,8 @@ pub fn run(
     // Install the uvr R companion package if R is available. Never in
     // unattended (`--no-companion` implied) or bare mode.
     if !bare && !uvr_core::env_vars::no_companion() {
-        if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
+        if let Ok(r_binary) = find_r_binary_for_project(&cwd, manifest.project.r_version.as_deref())
+        {
             if let Some(r_ver) = uvr_core::r_version::detector::query_r_version(&r_binary) {
                 crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
             }
@@ -259,12 +259,12 @@ fn refresh_uvr_block(existing: &str, snippet: &str) -> Option<String> {
 /// - `r.rterm.<os>` / `r.rpath.<os>` — vanilla VSCode R extension keys
 ///   for the integrated terminal and LSP (#50).
 ///
-/// Resolves the project R binary by reading `.r-version` first, then
-/// falling back to whatever `find_r_binary(None)` resolves to. This means
-/// projects with a system R and no pin still get IDE config, instead of
-/// silently leaving the file unwritten (#50).
-pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
-    let Some(r_binary) = resolve_project_r_binary(dir) else {
+/// Binds the R that `uvr run` resolves for the project: `.r-version`, then
+/// the `r_constraint` from uvr.toml, then whatever R is available. Projects
+/// with a system R and no pin still get IDE config, instead of silently
+/// leaving the file unwritten (#50).
+pub fn ensure_positron_settings(dir: &Path, r_constraint: Option<&str>) -> std::io::Result<()> {
+    let Some(r_binary) = resolve_project_r_binary(dir, r_constraint) else {
         return Ok(()); // No R available — nothing to bind to.
     };
     let r_binary_str = r_binary.to_string_lossy().into_owned();
@@ -372,58 +372,47 @@ fn merge_string_into_array(
     }
 }
 
-/// Resolve the R binary uvr would use for this project. Reads `.r-version`
-/// and the [project] r_version constraint; falls back to whatever R is
-/// available system-wide.
-fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
-    use uvr_core::r_version::detector::find_r_binary;
-
-    // Prefer the explicit pin in `dir/.r-version` if it points at a
-    // uvr-managed install we can verify on disk.
-    let mut has_pin = false;
-    if let Ok(pin) = std::fs::read_to_string(dir.join(R_VERSION_FILE)) {
-        let pin = pin.trim();
-        if !pin.is_empty() {
-            has_pin = true;
-            if let Some(home) = dirs::home_dir() {
-                let candidate = home
-                    .join(".uvr")
-                    .join("r-versions")
-                    .join(pin)
-                    .join("bin")
-                    .join(if cfg!(target_os = "windows") {
-                        "R.exe"
-                    } else {
-                        "R"
-                    });
-                if candidate.exists() {
-                    return Some(candidate);
-                }
+/// Resolve the R binary uvr would use for this project: the same resolver
+/// `uvr run` uses, with the `.r-version` pin walked up from `dir` and the
+/// [project] r_version constraint. With neither, falls back to whatever R is
+/// available. The IDE used to get the `.r-version` pin or else the newest R,
+/// ignoring the uvr.toml constraint, so `uvr init --r-version "==4.5.3"`
+/// bound Positron to R 4.6.0 while `uvr run` used 4.5.3 (#321).
+fn resolve_project_r_binary(dir: &Path, r_constraint: Option<&str>) -> Option<std::path::PathBuf> {
+    let pin = uvr_core::project::read_r_version_pin_from(dir);
+    let resolved = match find_r_binary_for_project(dir, r_constraint) {
+        Ok(bin) => bin,
+        Err(e) => {
+            // A pin or constraint that no installed R satisfies: binding the
+            // IDE to some other R is exactly the silent drift to avoid.
+            // Leave the settings alone; the next `uvr sync` writes them once
+            // the right R is installed.
+            if pin.is_some() || r_constraint.is_some() {
+                ui::bullet_dim(format!(
+                    "IDE settings not written: {e}. Install the project's R \
+                     (`uvr r install`) and re-run `uvr sync`."
+                ));
             }
+            return None;
         }
-    }
+    };
 
-    // No managed pin — fall through to whatever uvr would find on the
-    // system. Surface the fallback ONLY when it resolves to a non-uvr-
-    // managed R (e.g. system R on PATH) AND there is genuinely no pin —
-    // that's the case worth nagging about, since system R can be removed
-    // or upgraded out from under the IDE config. When the fallback is a
-    // uvr-managed install the binding is sound (#75); and when a
-    // `.r-version` pin exists — even one satisfied by the system R, a
-    // valid, intentional setup in CI — saying "No .r-version pin" is
+    // Surface the binding ONLY when it resolves to a non-uvr-managed R (e.g.
+    // system R on PATH) AND there is genuinely no pin — that's the case worth
+    // nagging about, since system R can be removed or upgraded out from under
+    // the IDE config. When the R is uvr-managed the binding is sound (#75);
+    // and when a `.r-version` pin exists — even one satisfied by the system
+    // R, a valid, intentional setup in CI — saying "No .r-version pin" is
     // simply false (#204).
-    let fallback = find_r_binary(None).ok()?;
-    let managed_root = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
-    let is_managed = managed_root
-        .as_ref()
-        .is_some_and(|root| fallback.starts_with(root));
-    if should_hint_unpinned(has_pin, is_managed) {
+    let is_managed =
+        uvr_core::env_vars::r_install_dir().is_some_and(|root| resolved.starts_with(root));
+    if should_hint_unpinned(pin.is_some(), is_managed) {
         ui::bullet_dim(format!(
             "No .r-version pin — IDE config bound to system R at {}. Run `uvr r install <ver>` then `uvr r pin <ver>` for project-pinned R.",
-            fallback.display()
+            resolved.display()
         ));
     }
-    Some(fallback)
+    Some(resolved)
 }
 
 /// Whether to print the "No .r-version pin" hint: only when there is truly

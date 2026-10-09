@@ -503,6 +503,10 @@ tarPkg = { url = "https://example.org/builds/tarPkg_1.2.0.tar.gz" }
 testthat = "*"
 ```
 
+`r_version` takes a requirement (`">=4.3.0"`, `"^4.5"`, `"==4.5.3"`) or a bare
+version, which pins R like `.r-version` does: `"4.5.3"` selects exactly R
+4.5.3, and `"4.5"` selects the newest installed 4.5.x.
+
 A `url` dependency is a source package tarball (`.tar.gz` or `.tgz`) at a fixed
 URL, such as an internal build artifact or an archived release. `uvr lock`
 downloads it, checks that it is an R source package (not a built binary), and

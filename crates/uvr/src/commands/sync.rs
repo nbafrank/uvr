@@ -269,8 +269,11 @@ pub async fn run_inner(
 
         // Write .vscode/settings.json only when targeting Positron.
         if ide.is_positron() {
-            crate::commands::init::ensure_positron_settings(&project.root)
-                .context("Failed to write Positron settings")?;
+            crate::commands::init::ensure_positron_settings(
+                &project.root,
+                project.manifest.project.r_version.as_deref(),
+            )
+            .context("Failed to write Positron settings")?;
         }
 
         // Add uvr entries to .Rbuildignore only when DESCRIPTION has `Package:`

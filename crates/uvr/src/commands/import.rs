@@ -237,7 +237,7 @@ pub async fn run(
             }
             init::ensure_rprofile(&cwd).context("Failed to write .Rprofile")?;
             if ide.is_positron() {
-                init::ensure_positron_settings(&cwd)
+                init::ensure_positron_settings(&cwd, manifest.project.r_version.as_deref())
                     .context("Failed to write Positron settings")?;
             }
         }
