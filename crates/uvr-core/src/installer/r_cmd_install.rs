@@ -132,7 +132,7 @@ impl RCmdInstall {
             let mut cmd = self.build_cmd(tarball, library);
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-            let output = cmd.output()?;
+            let output = crate::process::retry_text_file_busy(|| cmd.output())?;
 
             if !output.status.success() {
                 let code = output.status.code().unwrap_or(-1);
@@ -205,7 +205,7 @@ impl RCmdInstall {
             cmd.process_group(0);
         }
 
-        let mut child = cmd.spawn()?;
+        let mut child = crate::process::retry_text_file_busy(|| cmd.spawn())?;
         let pid = child.id();
 
         // Register this install so the SIGINT handler can kill the child + clean

@@ -8,6 +8,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod os_release;
 pub mod package_name;
+pub mod process;
 pub mod project;
 pub mod r_env;
 pub mod r_version;
