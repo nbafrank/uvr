@@ -7,6 +7,10 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`uvr add` accepts `owner/repo/subdir[@ref]` and `owner/repo:subdir[@ref]`**
+  (#312). These are the GitHub package-directory forms of DESCRIPTION
+  `Remotes:`. They give the same dependency as `owner/repo[@ref]#subdirectory=subdir`.
+
 ## v0.4.7 (2026-10-08)
 
 Private and non-CRAN code becomes a first-class dependency: packages from
@@ -140,7 +144,6 @@ Two changes may need action:
   Credentials never show in output, `-v` included, and `user:pass@` URLs are
   redacted. `uvr add --source` now refuses a URL that has credentials in it.
 - Verify installed and cached URL tarball package provenance before reuse, including same-version content or origin changes. Downloads are verified against the locked checksum; frozen sync checks the declared URL locally.
-
 
 - **Depend on a source tarball by URL** (#189). `uvr add
   https://…/pkg_1.2.0.tar.gz` records `pkg = { url = "…" }` in `uvr.toml`;

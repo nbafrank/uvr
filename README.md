@@ -221,6 +221,7 @@ uvr add DESeq2 --bioc
 uvr add tidymodels@>=1.0.0
 uvr add user/repo@main
 uvr add 'user/monorepo@main#subdirectory=packages/nestedPkg'
+uvr add user/monorepo/packages/nestedPkg@main   # same as the line above
 uvr add git::https://git.example.com/team/anyPkg.git@v1.0   # any git host
 uvr add https://example.org/builds/mypkg_1.2.0.tar.gz
 
@@ -234,9 +235,12 @@ uvr run analysis.R -- --input data.csv
 uvr tree
 ```
 
-GitHub package directories also propagate through supported DESCRIPTION
-`Remotes:` entries, including `owner/repo/subdir@ref` and
-`owner/repo:subdir@ref`. This traversal follows the source chain: only a
+`uvr add` accepts a GitHub package directory in three forms:
+`owner/repo[@ref]#subdirectory=subdir`, `owner/repo/subdir[@ref]` and
+`owner/repo:subdir[@ref]`. The ref always goes last, so `owner/repo@feat/x` is
+the branch `feat/x`, not a directory. GitHub package directories also propagate
+through supported DESCRIPTION `Remotes:` entries, including
+`owner/repo/subdir@ref` and `owner/repo:subdir@ref`. This traversal follows the source chain: only a
 package already selected from a manifest Git source can introduce another
 remote source; ordinary registry packages cannot inject remote URLs. Bound
 aliases and subdirectory targets fail rather than falling back to a registry

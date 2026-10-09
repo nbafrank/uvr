@@ -319,6 +319,24 @@ fn test_add_no_lock_writes_github_subdirectory_dependency() {
 }
 
 #[test]
+fn test_add_no_lock_accepts_remotes_style_subdirectory_spec() {
+    // #312: `owner/repo:subdir@ref` from the issue report.
+    let dir = init_project("subdir-colon-add");
+    uvr_cmd()
+        .args(["add", "--no-lock", "REditorSupport/vscode-R:sess@main"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let m: uvr_core::manifest::Manifest = content.parse().unwrap();
+    let dep = m.dependencies.get("sess").expect("sess dependency");
+    assert_eq!(dep.git(), Some("REditorSupport/vscode-R"));
+    assert_eq!(dep.subdirectory(), Some("sess"));
+    assert!(content.contains(r#"rev = "main""#), "{content}");
+}
+
+#[test]
 fn test_add_rejects_an_unsafe_subdirectory_fragment() {
     let dir = init_project("subdir-reject");
     uvr_cmd()
