@@ -284,7 +284,9 @@ jobs:
           - name: rocky 10 (rhel10)
             image: rockylinux/rockylinux:10
             expect: rhel10
-            setup: dnf -y install gcc gcc-c++ make pkgconf-pkg-config which fontconfig ca-certificates libxml2-devel
+            # --nobest: some Rocky 10 mirrors lag appstream, so the newest
+            # libxml2-devel needs a libxml2 that mirror lacks (#267).
+            setup: dnf -y --nobest install gcc gcc-c++ make pkgconf-pkg-config which fontconfig ca-certificates libxml2-devel
     steps:
       # The C/C++ toolchain, pkg-config and libxml2 headers are needed only by
       # the `--no-binary` step; the binary path below needs none of them.
