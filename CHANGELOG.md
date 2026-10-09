@@ -7,6 +7,13 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`uvr lock` gets the base packages from the active R** (#169). The resolver
+  adds the names that `installed.packages(priority = "base")` gives to its
+  hardcoded list. Thus a base package that a new R release adds is not sent
+  to CRAN, where it fails with `PackageNotFound`. This costs one more R
+  start-up per lock, and only when lock finds R. Without R, the hardcoded list
+  (the R 4.6 set) applies as before.
+
 - **Failures that uvr used to drop silently are now reported** (#168).
   `uvr cache clean` said "Cache is already empty" when it could not remove
   anything (a permission error, for example), and it counted the package

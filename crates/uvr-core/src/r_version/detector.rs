@@ -455,9 +455,92 @@ fn query_r_version_uncached(binary: &std::path::Path) -> Option<String> {
     })
 }
 
+#[allow(clippy::type_complexity)]
+static R_BASE_PACKAGES_MEMO: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<RBinaryIdentity, Option<Vec<String>>>>,
+> = std::sync::OnceLock::new();
+
+/// Marks the line of the base-package query's output that holds the names,
+/// so R start-up warnings on stdout are not read as package names.
+const BASE_PACKAGES_SENTINEL: &str = "UVR_BASE_PACKAGES:";
+
+/// Ask an R binary for the names of its base packages, memoized per process
+/// like [`query_r_version`].
+///
+/// The resolver's hardcoded list goes stale when R adds a base package; the
+/// resolver then sends that name to the registry and fails with
+/// `PackageNotFound` (#169). Only the system library (`.Library`) is read,
+/// because base packages are always there.
+pub fn query_r_base_packages(binary: &std::path::Path) -> Option<Vec<String>> {
+    let key = r_binary_identity(binary);
+    let memo = R_BASE_PACKAGES_MEMO.get_or_init(Default::default);
+    if let Ok(cache) = memo.lock() {
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    let answer = query_r_base_packages_uncached(binary);
+    if let Ok(mut cache) = memo.lock() {
+        cache.insert(key, answer.clone());
+    }
+    answer
+}
+
+fn query_r_base_packages_uncached(binary: &std::path::Path) -> Option<Vec<String>> {
+    let script = format!(
+        "cat('{BASE_PACKAGES_SENTINEL}', \
+         rownames(installed.packages(lib.loc = .Library, priority = 'base')), '\\n')"
+    );
+    let output = Command::new(binary)
+        // Same isolation as `query_r_version_uncached` (#128, #99).
+        .env_remove("R_HOME")
+        .env_remove("R_LIBS")
+        .env_remove("R_LIBS_USER")
+        .env_remove("R_LIBS_SITE")
+        .args(["--vanilla", "--slave", "-e", &script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_base_packages_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Read the package names from the sentinel line. `None` when the line is
+/// missing or holds no names, so a broken R adds nothing to the base set.
+fn parse_base_packages_output(stdout: &str) -> Option<Vec<String>> {
+    let line = stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix(BASE_PACKAGES_SENTINEL))?;
+    let names: Vec<String> = line
+        .split_whitespace()
+        .filter(|n| crate::package_name::is_valid(n))
+        .map(str::to_string)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_base_packages_output_skips_startup_noise() {
+        let out = "WARNING: ignoring environment value of R_HOME\n\
+                   UVR_BASE_PACKAGES: base compiler newbase utils \n";
+        assert_eq!(
+            parse_base_packages_output(out).unwrap(),
+            vec!["base", "compiler", "newbase", "utils"]
+        );
+    }
+
+    #[test]
+    fn parse_base_packages_output_rejects_missing_or_empty() {
+        assert!(parse_base_packages_output("").is_none());
+        assert!(parse_base_packages_output("base utils\n").is_none());
+        assert!(parse_base_packages_output("UVR_BASE_PACKAGES: \n").is_none());
+    }
 
     fn fake_installation(version: &str, managed: bool) -> RInstallation {
         RInstallation {

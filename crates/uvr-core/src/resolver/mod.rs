@@ -34,11 +34,43 @@ pub trait PackageRegistry {
 
 pub struct Resolver<'a> {
     registry: &'a dyn PackageRegistry,
+    /// Base package names reported by the active R, lowercased. They are
+    /// skipped in addition to `BASE_PACKAGES`, so a base package that a newer
+    /// R adds is not sent to the registry (#169).
+    extra_base: HashSet<String>,
 }
 
 impl<'a> Resolver<'a> {
     pub fn new(registry: &'a dyn PackageRegistry) -> Self {
-        Resolver { registry }
+        Resolver {
+            registry,
+            extra_base: HashSet::new(),
+        }
+    }
+
+    /// Also treat these names as base packages (usually the active R's
+    /// `installed.packages(priority = "base")`). The hardcoded list stays the
+    /// floor: this set can only add names, so a resolve without R behaves as
+    /// before.
+    pub fn with_base_packages(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.extra_base
+            .extend(names.into_iter().map(|n| n.to_ascii_lowercase()));
+        self
+    }
+
+    fn is_base(&self, name: &str) -> bool {
+        is_base_package(name) || self.extra_base.contains(&name.to_ascii_lowercase())
+    }
+
+    /// Dependency names for the lockfile `requires` field, without base
+    /// packages. Registries already drop the hardcoded ones, but not the names
+    /// that only the active R knows, and a `requires` entry with no locked
+    /// package fails `--frozen` validation.
+    fn non_base_requires(&self, deps: &[Dep]) -> Vec<String> {
+        deps.iter()
+            .filter(|d| !self.is_base(&d.name))
+            .map(|d| d.name.clone())
+            .collect()
     }
 
     /// Resolve all manifest dependencies into a `Lockfile`.
@@ -113,7 +145,7 @@ impl<'a> Resolver<'a> {
         }
 
         while let Some((name, constraint)) = pending.pop_front() {
-            if is_base_package(&name) {
+            if self.is_base(&name) {
                 continue;
             }
 
@@ -176,11 +208,7 @@ impl<'a> Resolver<'a> {
                                             version: new_info.version,
                                             source: new_info.source,
                                             checksum: new_info.checksum,
-                                            requires: new_info
-                                                .requires
-                                                .iter()
-                                                .map(|d| d.name.clone())
-                                                .collect(),
+                                            requires: self.non_base_requires(&new_info.requires),
                                             raw_version: new_info.raw_version,
                                             url: new_info.url,
                                             system_requirements: new_info.system_requirements,
@@ -190,7 +218,7 @@ impl<'a> Resolver<'a> {
                                     // Rebuild graph edges for the re-resolved package.
                                     graph.add_node(&name);
                                     for dep in &new_info.requires {
-                                        if is_base_package(&dep.name) {
+                                        if self.is_base(&dep.name) {
                                             continue;
                                         }
                                         graph.add_edge(&name, &dep.name);
@@ -252,7 +280,7 @@ impl<'a> Resolver<'a> {
 
             graph.add_node(&name);
             for dep in &info.requires {
-                if is_base_package(&dep.name) {
+                if self.is_base(&dep.name) {
                     continue;
                 }
                 graph.add_edge(&name, &dep.name);
@@ -282,7 +310,7 @@ impl<'a> Resolver<'a> {
                     version: info.version,
                     source: info.source,
                     checksum: info.checksum,
-                    requires: info.requires.iter().map(|d| d.name.clone()).collect(),
+                    requires: self.non_base_requires(&info.requires),
                     url: info.url,
                     raw_version: info.raw_version,
                     system_requirements: info.system_requirements,
@@ -412,6 +440,9 @@ fn find_dev_only_packages<'a>(
         .collect()
 }
 
+/// The base packages of R 4.6, plus `R` itself (for `Depends: R (>= …)`).
+/// Commands that do not start R use only this list. `uvr lock` adds the names
+/// that the active R reports (`Resolver::with_base_packages`).
 const BASE_PACKAGES: &[&str] = &[
     "R",
     "base",
@@ -722,6 +753,62 @@ mod tests {
         assert!(lockfile.get_package("rlang").is_some());
         // URL is stored
         assert!(lockfile.get_package("ggplot2").unwrap().url.is_some());
+    }
+
+    fn newbase_registry() -> MockRegistry {
+        // `newbase` stands for a base package that a newer R adds: CRAN
+        // packages import it, but no registry serves it.
+        let mut packages = HashMap::new();
+        packages.extend([
+            make_pkg("pkga", "1.0.0", vec![("newbase", None), ("rlang", None)]),
+            make_pkg("rlang", "1.1.4", vec![]),
+        ]);
+        MockRegistry { packages }
+    }
+
+    #[test]
+    fn unknown_base_package_without_r_goes_to_registry() {
+        // #169: without the active R's list, the hardcoded list decides.
+        let registry = newbase_registry();
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("pkga".into(), DependencySpec::Version("*".into()), false);
+        let result = Resolver::new(&registry).resolve(&manifest, None, None, HashMap::new());
+        assert!(matches!(result, Err(UvrError::PackageNotFound(n)) if n == "newbase"));
+    }
+
+    #[test]
+    fn base_packages_from_r_are_skipped_and_kept_out_of_requires() {
+        let registry = newbase_registry();
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("pkga".into(), DependencySpec::Version("*".into()), false);
+        // Mixed case: R package names compare case-insensitively here, as in
+        // `is_base_package`.
+        let lockfile = Resolver::new(&registry)
+            .with_base_packages(["NewBase".to_string()])
+            .resolve(&manifest, None, None, HashMap::new())
+            .unwrap();
+        assert!(lockfile.get_package("newbase").is_none());
+        // A `requires` entry with no locked package would fail `--frozen`.
+        assert_eq!(
+            lockfile.get_package("pkga").unwrap().requires,
+            vec!["rlang"]
+        );
+    }
+
+    #[test]
+    fn base_packages_from_r_keep_hardcoded_floor() {
+        // The R list only adds names: one that lacks `stats` must not send
+        // `stats` to the registry.
+        let mut packages = HashMap::new();
+        packages.extend([make_pkg("pkga", "1.0.0", vec![("stats", None)])]);
+        let registry = MockRegistry { packages };
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep("pkga".into(), DependencySpec::Version("*".into()), false);
+        let lockfile = Resolver::new(&registry)
+            .with_base_packages(["base".to_string()])
+            .resolve(&manifest, None, None, HashMap::new())
+            .unwrap();
+        assert_eq!(lockfile.packages.len(), 1);
     }
 
     #[test]
