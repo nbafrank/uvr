@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use uvr_core::r_version::downloader::Platform;
@@ -11,8 +13,6 @@ pub async fn run(
     distribution: Option<String>,
     install_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let platform = Platform::detect().context("Unsupported platform")?;
-
     // `--distribution` is deprecated: portable R builds are selected purely by
     // libc (glibc -> manylinux, musl -> musllinux) and architecture, so the
     // per-distro Posit CDN slug no longer affects R installation.
@@ -28,11 +28,25 @@ pub async fn run(
         );
     }
 
-    ui::info(format!(
-        "Installing R {} for {:?}",
-        palette::info(&version),
-        platform
-    ));
+    install(&version, install_dir.as_deref(), false).await?;
+    Ok(())
+}
+
+/// Install R `version`, reporting progress as `uvr r install` does, and
+/// return the full version installed.
+///
+/// Also the backend `uvr run` uses to provision the R a script header asks
+/// for (#183). It passes `to_stderr`, so the script's stdout carries only
+/// what the script itself prints.
+pub async fn install(version: &str, install_dir: Option<&Path>, to_stderr: bool) -> Result<String> {
+    let platform = Platform::detect().context("Unsupported platform")?;
+
+    let headline = format!("Installing R {} for {platform:?}", palette::info(version));
+    if to_stderr {
+        ui::info_err(headline);
+    } else {
+        ui::info(headline);
+    }
 
     // A channel is a moving target: the build behind `devel` today is not the
     // one behind it tomorrow, so a project that pins it is not reproducible.
@@ -42,7 +56,7 @@ pub async fn run(
     // Careful about the wording: an install already present short-circuits, so
     // running this again does *not* fetch a newer build. What moves is what the
     // name means, not what is on disk.
-    if uvr_core::r_version::downloader::is_rolling_channel(&version) {
+    if uvr_core::r_version::downloader::is_rolling_channel(version) {
         ui::warn(format!(
             "{version} is a rolling channel, not a release: it names whatever was \
              built most recently, so this install is a snapshot of today's {version}."
@@ -69,13 +83,16 @@ pub async fn run(
     // May differ from the requested version: a partial `4.5` resolves to the
     // newest published `4.5.x` (#170).
     let resolved = manager
-        .install(&version, install_dir.as_deref())
+        .install(version, install_dir)
         .await
         .context("R installation failed")?;
 
-    ui::summary(
-        format!("R {} installed", palette::info(&resolved)),
-        format!("in {}", palette::format_duration(start.elapsed())),
-    );
-    Ok(())
+    let headline = format!("R {} installed", palette::info(&resolved));
+    let sub = format!("in {}", palette::format_duration(start.elapsed()));
+    if to_stderr {
+        ui::summary_err(headline, sub);
+    } else {
+        ui::summary(headline, sub);
+    }
+    Ok(resolved)
 }

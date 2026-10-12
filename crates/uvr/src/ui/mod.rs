@@ -18,8 +18,8 @@ pub mod progress;
 #[allow(unused_imports)]
 pub use print::{
     bullet, bullet_dim, bullet_err, check, error_block, fail, hint, info, info_err, note_err, row,
-    row_added, row_removed, row_upgrade, section, sub_err, success, summary, warn, warn_block,
-    welcome, welcome_group,
+    row_added, row_removed, row_upgrade, section, sub_err, success, summary, summary_err, warn,
+    warn_block, welcome, welcome_group,
 };
 #[allow(unused_imports)]
 pub use progress::{make_aggregate_bar, make_spinner};

@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 
+use uvr_core::error::UvrError;
 use uvr_core::manifest::{DependencySpec, Manifest};
 use uvr_core::project::{ManifestSource, Project};
 use uvr_core::r_env::REnv;
 use uvr_core::r_version::detector::{find_r_binary, find_r_binary_ignoring_pin, query_r_version};
+use uvr_core::r_version::downloader::{fetch_available_versions, newest_satisfying, Platform};
 use uvr_core::script_header::{self, ScriptHeader};
 
 pub async fn run(
@@ -24,19 +26,7 @@ pub async fn run(
         None => None,
     };
     let script_mode = header.is_some();
-
-    if let Some(constraint) = header.as_ref().and_then(|h| h.r.as_deref()) {
-        // Parsed, but #183 is what makes it select an R. Saying so beats
-        // running against whichever interpreter happens to be around and
-        // letting the script fail somewhere less obvious. The constraint is
-        // free text from the header — control-escape it, or a crafted `r`
-        // value could smuggle ANSI sequences into uvr's own diagnostics.
-        crate::ui::warn(format!(
-            "script header pins R `{}`, which uvr does not honour yet (#183) — \
-             running against the R resolved as usual",
-            script_header::sanitize_for_display(constraint)
-        ));
-    }
+    let header_constraint = header.as_ref().and_then(|h| h.r.as_deref());
 
     // Resolve project (optional — uvr run works outside a project too).
     // Skipped in script mode, so a headered script neither inherits the
@@ -56,9 +46,11 @@ pub async fn run(
         }
     };
 
-    // --r-version flag takes priority over the project constraint.
+    // --r-version flag takes priority over the header's `r`, and both over
+    // the project constraint (which script mode never reads anyway).
     let effective_constraint = r_version_override
         .as_deref()
+        .or(header_constraint)
         .or(project_r_constraint.as_deref());
 
     // In script mode a `.r-version` pin is ignored along with the rest of the
@@ -66,12 +58,20 @@ pub async fn run(
     // one, and the pin outranks every other signal — so honouring it would
     // let the directory a script happens to sit in choose its interpreter,
     // and with it the ephemeral environment's cache key.
-    let r_binary = if script_mode {
+    let found = if script_mode {
         find_r_binary_ignoring_pin(effective_constraint)
     } else {
         find_r_binary(effective_constraint)
-    }
-    .context("R not found. Install R or use `uvr r install <version>`")?;
+    };
+    // Only the header's own `r` may download an R (#183): `--r-version` is
+    // an explicit choice, and fails as it always has when nothing matches.
+    let provisionable = header_constraint.filter(|_| r_version_override.is_none());
+    let r_binary = match (found, provisionable) {
+        (Err(UvrError::RNotFound | UvrError::RVersionUnsatisfied { .. }), Some(constraint)) => {
+            provision_r(constraint, script.as_deref().unwrap_or_default()).await?
+        }
+        (found, _) => found.context("R not found. Install R or use `uvr r install <version>`")?,
+    };
 
     // A headered script's dependencies join any `--with` packages in a single
     // ephemeral environment.
@@ -197,6 +197,46 @@ fn read_header(path: &str) -> Result<Option<ScriptHeader>> {
         return Ok(None);
     };
     script_header::parse(&source).map_err(|e| anyhow!("Invalid script header in {path}: {e}"))
+}
+
+/// Install the newest R that satisfies a script header's `r` constraint —
+/// called when no installed R does — and return its binary (#183).
+///
+/// `UVR_R_DOWNLOADS=never` turns this into an error that names the
+/// constraint, for machines where uvr must not fetch an interpreter.
+async fn provision_r(constraint: &str, script: &str) -> Result<PathBuf> {
+    // Validated when the header was parsed, but still text from a file that
+    // may have come from anyone.
+    let shown = script_header::sanitize_for_display(constraint);
+    if !uvr_core::env_vars::r_downloads_allowed()? {
+        bail!(
+            "No R satisfies \"{shown}\" for {script}; install one \
+             (`uvr r install <version>`) or set UVR_R_DOWNLOADS=auto."
+        );
+    }
+
+    // Said before any network access, so an offline failure below still
+    // explains why uvr went looking.
+    crate::ui::info_err(format!("No installed R satisfies \"{shown}\" for {script}"));
+
+    // `.stable` holds only what this platform publishes, so the pick below
+    // never lands on a version the CDN would refuse (#215).
+    let client = crate::commands::util::build_client()?;
+    let platform = Platform::detect().context("Unsupported platform")?;
+    let available = fetch_available_versions(&client, platform)
+        .await
+        .context("Failed to fetch available R versions")?;
+    let Some(version) = newest_satisfying(&available.stable, constraint)? else {
+        bail!(
+            "No R satisfies \"{shown}\" for {script}, and no R published for this \
+             platform does either. See `uvr r list --all`."
+        );
+    };
+    crate::commands::r_cmd::install::install(&version, None, true).await?;
+
+    // Looked up again rather than built from the install path, so the new R
+    // passes the same checks as any installed one before it is used.
+    Ok(find_r_binary_ignoring_pin(Some(constraint))?)
 }
 
 /// Library used when `uvr run` is invoked outside a project.
