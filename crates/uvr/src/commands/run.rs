@@ -145,14 +145,13 @@ pub async fn run(
         // exists to provide; `~/.Rprofile` can do the same for the machine at
         // large. Pointing `R_PROFILE_USER` at the null device skips both, the
         // same way the installer does (`installer/r_cmd_install.rs`).
+        // `UVR_USER_PROFILE=1` restores `~/.Rprofile` by explicit path (#249)
+        // and accepts that it may edit `.libPaths()` too.
         //
         // `R_PROFILE` (the *site* profile) is not touched here: `REnv::vars()`
         // owns it, pointing it at uvr's OpenMP shim profile when the R needs
         // one (#261).
-        cmd.env(
-            "R_PROFILE_USER",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        );
+        cmd.env("R_PROFILE_USER", uvr_core::env_vars::r_profile_user());
     }
 
     if let Some(script_path) = &script {
