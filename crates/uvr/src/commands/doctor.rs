@@ -57,6 +57,20 @@ fn check_platform() {
 
     match Platform::detect() {
         Ok(p) => {
+            // #155: an x86_64 uvr under Rosetta installs arm64 R. Say so,
+            // since the row above only shows uvr's own build.
+            if p.arch() != arch {
+                ui::check(
+                    true,
+                    "R install architecture",
+                    format!(
+                        "{} {}",
+                        p.arch(),
+                        palette::dim(format!("(uvr itself is {arch}; set UVR_R_ARCH to change)"))
+                    ),
+                    LABEL_W,
+                );
+            }
             // macOS and Windows always have P3M binaries. Linux has them
             // when the distro is one PPM publishes (#55) — translate the
             // slug to a PPM codename to know.
