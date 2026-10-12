@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use uvr_core::lockfile::Lockfile;
 use uvr_core::project::Project;
 
-use crate::commands::lock::{resolve_and_lock, resolve_only_upgraded};
+use crate::commands::lock::{resolve_and_lock, resolve_only_upgraded, targeted_upgrade_pins};
 use crate::commands::sync::install_from_lockfile;
 use crate::ui;
 use crate::ui::palette;
@@ -34,18 +34,6 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-
-        // Verify requested packages are actually dependencies
-        for pkg in &packages {
-            if !project.manifest.dependencies.contains_key(pkg)
-                && !project.manifest.dev_dependencies.contains_key(pkg)
-            {
-                anyhow::bail!(
-                    "Package '{}' is not in the manifest. Use `uvr add {0}` to add it.",
-                    pkg
-                );
-            }
-        }
     }
 
     // Re-resolve with upgrade=true (fetches fresh index, ignores locked versions).
@@ -59,17 +47,8 @@ pub async fn run(packages: Vec<String>, dry_run: bool, jobs: usize) -> Result<()
     // installing fine but failing at library() time. Now that combination is
     // an explicit resolution error instead.
     let effective_lockfile: Lockfile = if !packages.is_empty() {
-        let mut pins = std::collections::HashMap::new();
-        if let Some(old_lf) = &old_lockfile {
-            for pkg in &old_lf.packages {
-                if !packages.contains(&pkg.name) {
-                    pins.insert(
-                        pkg.name.clone(),
-                        uvr_core::resolver::locked_to_package_info(pkg)?,
-                    );
-                }
-            }
-        }
+        // Also verifies each requested package is a manifest dependency.
+        let pins = targeted_upgrade_pins(&project.manifest, old_lockfile.as_ref(), &packages)?;
         let resolved = resolve_only_upgraded(&project, pins)
             .await
             .with_context(|| {
