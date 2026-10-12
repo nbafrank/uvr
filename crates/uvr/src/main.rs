@@ -177,7 +177,7 @@ async fn run() -> Result<()> {
                 .await?;
         }
         Commands::Scan(args) => {
-            commands::scan::run(args.all)?;
+            commands::scan::run(args.all, args.add).await?;
         }
         Commands::Completions(args) => {
             commands::completions::run(args.shell)?;
