@@ -123,7 +123,7 @@ pub fn run(
         if let Ok(r_binary) = find_r_binary_for_project(&cwd, manifest.project.r_version.as_deref())
         {
             if let Some(r_ver) = uvr_core::r_version::detector::query_r_version(&r_binary) {
-                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary)?;
             }
         }
     }
