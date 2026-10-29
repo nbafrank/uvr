@@ -6,6 +6,7 @@
 //! design extends to parallel installs without changes here.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::installer::r_cmd_install::cleanup_lock_dir;
@@ -91,9 +92,65 @@ fn kill_pid(pid: u32) {
     }
 }
 
+/// Number of live [`ChildOwnsInterrupts`] guards.
+static CHILD_OWNS_INTERRUPTS: AtomicUsize = AtomicUsize::new(0);
+
+/// While alive, Ctrl+C belongs to a foreground child (`uvr run`'s R) rather
+/// than to uvr (#327).
+///
+/// The terminal delivers SIGINT to the whole foreground process group, so R
+/// already sees every Ctrl+C: an interactive session interrupts the running
+/// computation and returns to the prompt, and a script aborts on its own.
+/// If uvr exited on the same signal, R would be left running in the
+/// background, still holding the terminal (no echo until `reset`). The
+/// handler in `main` checks [`child_owns_interrupts`] and keeps waiting for
+/// the child instead, like `uv run` does.
+#[must_use = "interrupts go back to uvr as soon as the guard is dropped"]
+pub struct ChildOwnsInterrupts(());
+
+impl ChildOwnsInterrupts {
+    pub fn new() -> Self {
+        CHILD_OWNS_INTERRUPTS.fetch_add(1, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Default for ChildOwnsInterrupts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ChildOwnsInterrupts {
+    fn drop(&mut self) {
+        CHILD_OWNS_INTERRUPTS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// True while a [`ChildOwnsInterrupts`] guard is alive: the Ctrl+C handler
+/// should leave the signal to the child and not exit.
+pub fn child_owns_interrupts() -> bool {
+    CHILD_OWNS_INTERRUPTS.load(Ordering::SeqCst) > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_owns_interrupts_only_while_the_guard_lives() {
+        assert!(!child_owns_interrupts());
+        {
+            let _outer = ChildOwnsInterrupts::new();
+            assert!(child_owns_interrupts());
+            {
+                let _inner = ChildOwnsInterrupts::new();
+                assert!(child_owns_interrupts());
+            }
+            assert!(child_owns_interrupts(), "the outer guard is still alive");
+        }
+        assert!(!child_owns_interrupts());
+    }
 
     #[test]
     fn register_and_unregister_roundtrip() {

@@ -3293,6 +3293,70 @@ fn fake_r_installs(versions: &[&str]) -> TempDir {
 
 #[cfg(unix)]
 #[test]
+fn test_ctrl_c_during_uvr_run_is_left_to_r() {
+    // #327: the terminal sends Ctrl+C to the whole foreground process group.
+    // R handles it (an interactive session goes back to its prompt), so uvr
+    // must keep waiting for R instead of exiting and leaving R orphaned on
+    // the terminal. The fake R traps SIGINT, then exits 0 on its own.
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    let installs = TempDir::new().unwrap();
+    let bin = installs.path().join("3.0.2").join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let ready = installs.path().join("ready");
+    let r = bin.join("R");
+    fs::write(
+        &r,
+        format!(
+            "#!/bin/sh\n\
+             case \"$1\" in --vanilla) echo 3.0.2; exit 0;; esac\n\
+             trap 'sleep 0.3; echo R-HANDLED-INT; exit 0' INT\n\
+             touch '{}'\n\
+             while :; do sleep 0.05; done\n",
+            ready.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&r, fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# r = \"~3.0\"\n# dependencies = []\n# ///\n");
+
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("uvr"))
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_R_INSTALL_DIR", installs.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .env("UVR_R_DOWNLOADS", "never")
+        .env_remove("UVR_UNATTENDED")
+        .stdout(std::process::Stdio::piped())
+        // Its own process group, standing in for the terminal's foreground
+        // group, so the SIGINT below does not reach the test harness.
+        .process_group(0)
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "fake R never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGINT);
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "uvr should exit with R's status after R handles Ctrl+C, got {:?} (stdout: {stdout})",
+        output.status
+    );
+    assert!(stdout.contains("R-HANDLED-INT"), "stdout: {stdout}");
+}
+
+#[cfg(unix)]
+#[test]
 fn test_a_header_r_constraint_selects_a_matching_installed_r() {
     // #183: the newest installed R that satisfies `r` wins — not whichever R
     // uvr would otherwise have picked (here, the real one on PATH).

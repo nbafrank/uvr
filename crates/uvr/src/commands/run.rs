@@ -191,13 +191,31 @@ pub async fn run(
         cmd.arg("--no-save");
     }
 
-    let status = cmd.status().context("Failed to spawn R")?;
+    // R gets Ctrl+C straight from the terminal; uvr must not exit on it
+    // while R is still running (#327).
+    let status = {
+        let _r_owns_ctrl_c = uvr_core::signal::ChildOwnsInterrupts::new();
+        cmd.status().context("Failed to spawn R")?
+    };
     if !status.success() {
-        let code = status.code().unwrap_or(1);
+        let code = exit_code(&status);
         return Err(ScriptExitError(code).into());
     }
 
     Ok(())
+}
+
+/// The exit code to report for R's exit status. A signal death maps to the
+/// shell convention `128 + signal` (130 for SIGINT), not a generic 1.
+fn exit_code(status: &std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    status.code().unwrap_or(1)
 }
 
 /// Read a script's inline dependency header (see [`script_header::parse`]).

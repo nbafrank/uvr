@@ -7,6 +7,12 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Ctrl+C inside `uvr run` goes to R instead of killing uvr** (#327). The
+  terminal sends SIGINT to the whole foreground group; uvr's handler exited
+  with 130 while R kept running in the background, holding the terminal with
+  echo turned off. While R runs, uvr now leaves the interrupt to R (an
+  interactive session returns to its prompt, a script aborts) and exits with
+  R's status, like `uv run`. A child killed by a signal now maps to `128+N`.
 - **Linux: `uvr r install` points the wrapper's first `R_HOME_DIR` at
   `lib/R`** (#271). The v0.4.7 rewrite used the install root, which is
   R_HOME on macOS but not on Linux, so Positron still failed to start a

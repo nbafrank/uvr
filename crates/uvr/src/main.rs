@@ -32,8 +32,15 @@ async fn run() -> Result<()> {
     // remove its 00LOCK-<pkg>/ dir, then exit 130 so the shell sees a
     // standard interrupt code. Without this, the child keeps running and
     // the next sync trips over a stale lock dir.
+    //
+    // While `uvr run` waits on R, Ctrl+C is R's (#327): the terminal already
+    // sent it to R, which interrupts the computation (or ends a script), so
+    // uvr keeps waiting instead of exiting and orphaning R on the terminal.
     tokio::spawn(async {
-        if tokio::signal::ctrl_c().await.is_ok() {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if uvr_core::signal::child_owns_interrupts() {
+                continue;
+            }
             uvr_core::signal::kill_and_cleanup_all();
             // 128 + SIGINT(2) = 130, the shell convention for Ctrl+C exit.
             std::process::exit(130);
