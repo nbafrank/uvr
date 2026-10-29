@@ -405,6 +405,10 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
                     package_name, e
                 ))
             })?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                apply_execute_bits(&outpath, mode, Path::new(&entry_name), package_name);
+            }
         }
     }
 
@@ -488,6 +492,10 @@ fn extract_entry<R: std::io::Read>(
                     e.kind()
                 ))
             })?;
+            #[cfg(unix)]
+            if let Ok(mode) = entry.header().mode() {
+                apply_execute_bits(dest, mode, archive_path, package_name);
+            }
         }
         // Symlinks: P3M Linux binaries bundle vendored shared libraries with
         // SONAME symlinks (RcppParallel's libtbb.so -> libtbb.so.2, #203).
@@ -539,6 +547,44 @@ fn extract_entry<R: std::io::Read>(
     Ok(())
 }
 
+/// Give an extracted file the execute bits its archive entry had.
+///
+/// Extraction creates files by hand, so they get the default `0o666 & !umask`
+/// mode and lose the archive's execute bits. Packages that ship executables
+/// need them: processx's `bin/supervisor` and friends must be runnable, or
+/// callr, chromote and pak fail with "Permission denied" (#323).
+///
+/// Only the execute bits are taken from the archive, and only for the
+/// classes that can already read the file, so the umask still applies.
+/// Failing to set the mode (unusual filesystems) warns instead of failing
+/// the install.
+#[cfg(unix)]
+fn apply_execute_bits(dest: &Path, archive_mode: u32, archive_path: &Path, package_name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exec_bits = archive_mode & 0o111;
+    if exec_bits == 0 {
+        return;
+    }
+    let result = std::fs::metadata(dest).and_then(|meta| {
+        let mode = meta.permissions().mode();
+        let new_mode = mode | (exec_bits & ((mode & 0o444) >> 2));
+        if new_mode == mode {
+            return Ok(());
+        }
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(new_mode))
+    });
+    if let Err(e) = result {
+        tracing::warn!(
+            "Could not make '{}' from '{}' executable: {} ({:?})",
+            archive_path.display(),
+            package_name,
+            e,
+            e.kind()
+        );
+    }
+}
+
 /// Validate that an extracted package is actually a *built* (installed)
 /// package before it reaches the library. Every properly built R package —
 /// binary tarball or zip — contains `Meta/package.rds`; a source tree never
@@ -571,8 +617,8 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
     // that many phantom bytes and fail mid-archive (#203).
     let mut archive = tar::Archive::new(super::tar_compat::LinkSizeFix::new(decoder));
     // NOTE: archive metadata-preservation settings are unused because
-    // extract_entry does manual file creation. R packages have no
-    // meaningful mtime/permissions to preserve.
+    // extract_entry does manual file creation. Only execute bits are carried
+    // over (see apply_execute_bits); mtimes are not meaningful for R packages.
 
     // Extract into a staging directory, then atomically rename on success.
     let staging = tempfile::TempDir::new_in(library).map_err(|e| {
@@ -633,8 +679,9 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
         //   already exists for any reason
         // - fs::remove_file followed by create dance that overlayfs/FUSE
         //   handles unevenly
-        // - mtime/permission preservation, which fails opaquely on some CI
-        //   filesystems and isn't meaningful for R packages anyway
+        // - full mtime/permission preservation, which fails opaquely on some
+        //   CI filesystems. Execute bits are applied separately, and a failure
+        //   there only warns (#323).
         // - Symlink validation, which is unnecessary inside a fresh tempdir
         //   we already path-traversal-checked above
         extract_entry(&mut entry, &dest, &path, package_name)?;
@@ -1288,6 +1335,103 @@ mod tests {
         );
         let content = std::fs::read_to_string(&extracted).unwrap();
         assert!(content.starts_with("Package: t17pkg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_tgz_keeps_execute_bits() {
+        // processx ships bin/supervisor etc. as executables; extracting them
+        // without the execute bit breaks callr, chromote and pak (#323).
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tarball = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut enc = GzEncoder::new(
+                std::fs::File::create(tarball.path()).unwrap(),
+                Compression::default(),
+            );
+            {
+                let mut builder = tar::Builder::new(&mut enc);
+                for (path, mode) in [
+                    ("xpkg/DESCRIPTION", 0o644),
+                    ("xpkg/bin/supervisor", 0o775),
+                    ("xpkg/exec/owner-only", 0o744),
+                ] {
+                    let body = b"content";
+                    let mut header = tar::Header::new_gnu();
+                    header.set_path(path).unwrap();
+                    header.set_size(body.len() as u64);
+                    header.set_mode(mode);
+                    header.set_cksum();
+                    builder.append(&header, &body[..]).unwrap();
+                }
+                append_meta_rds(&mut builder, "xpkg");
+                builder.finish().unwrap();
+            }
+            enc.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        extract_tgz(tarball.path(), library.path(), "xpkg").unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(library.path().join("xpkg").join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+        };
+        assert_eq!(
+            mode("DESCRIPTION") & 0o111,
+            0,
+            "data files stay non-executable"
+        );
+        assert_ne!(
+            mode("bin/supervisor") & 0o100,
+            0,
+            "bin/supervisor must be executable"
+        );
+        let owner_only = mode("exec/owner-only");
+        assert_ne!(owner_only & 0o100, 0);
+        assert_eq!(
+            owner_only & 0o011,
+            0,
+            "only the archive's execute bits are added"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_keeps_execute_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let zip_path = dir.path().join("xpkg.zip");
+        {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("xpkg/DESCRIPTION", options.unix_permissions(0o644))
+                .unwrap();
+            zip.write_all(b"Package: xpkg\n").unwrap();
+            zip.start_file("xpkg/bin/px", options.unix_permissions(0o755))
+                .unwrap();
+            zip.write_all(b"binary").unwrap();
+            zip.start_file("xpkg/Meta/package.rds", options).unwrap();
+            zip.write_all(b"fake rds").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        extract_zip(&zip_path, library.path(), "xpkg").unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(library.path().join("xpkg").join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+        };
+        assert_eq!(mode("DESCRIPTION") & 0o111, 0);
+        assert_ne!(mode("bin/px") & 0o100, 0, "bin/px must be executable");
     }
 
     #[test]

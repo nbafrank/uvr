@@ -7,6 +7,14 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Binary installs keep the execute bit on files that ship it** (#323).
+  Extraction created every file with the default mode, so processx's
+  `bin/px`, `bin/sock` and `bin/supervisor` landed `-rw-r--r--` and callr,
+  chromote/webshot2 and pak failed with "Permission denied". The archive
+  entry's execute bits are now applied (within the umask) for `.tgz` and
+  `.zip` binaries; if a filesystem refuses the mode change, uvr warns instead
+  of failing the install. Already-installed packages need a reinstall, e.g.
+  `uvr sync --ignore-cache`.
 - **Linux: `uvr r install` points the wrapper's first `R_HOME_DIR` at
   `lib/R`** (#271). The v0.4.7 rewrite used the install root, which is
   R_HOME on macOS but not on Linux, so Positron still failed to start a
