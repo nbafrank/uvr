@@ -61,8 +61,10 @@ Here is how existing tools compare and where the gaps are:
 - **rig** — excellent R version manager. No package management or lockfile. Per its own FAQ it cannot install R without admin permissions.
 - **pixi** — conda-based multi-language environment manager. Supports R via conda-forge, but packages come from conda-forge rather than CRAN/Bioconductor/P3M natively. Language-agnostic by design; not R-first.
 - **rix** — Nix-based, with extreme reproducibility including system-level dependencies. Right tool if you need bit-for-bit reproducibility across machines. Requires Nix; a different philosophy than a fast pragmatic workflow.
+- **ir** (`r-lib/ir`) — runs self-describing R scripts: packages, R version and an `exclude-newer` date go in the script's frontmatter. It also renders Quarto documents. Per its own README (October 2026), it needs `rig` to select R by version and it does not ask you to manage a project directory. The closest overlap is `uvr`'s standalone scripts, not its projects.
+- **rpx** (`rrepo-org/rpx`) — Rust-based package manager that keeps dependencies in `DESCRIPTION` and locks them in `rpx.lock`. It reads version metadata from the rrepo repository API, which hosts a CRAN mirror, and also supports other repositories and Git sources. Per its own README (October 2026), R version management is planned and it uses the R on `PATH` for now.
 
-`uvr` is the combination of all of the above in one tool, with a single config file (`uvr.toml`) and a single lockfile (`uvr.lock`). The design goals are:
+`uvr` brings the slices that `renv`, `pak`, `rv` and `rig` solve into one tool, with a single config file (`uvr.toml`) and a single lockfile (`uvr.lock`). The design goals are:
 
 1. **One tool, one config** — no juggling renv + rig + pak. `uvr.toml` declares both the R version and package dependencies.
 2. **Lockfile-first** — `uvr.lock` is the source of truth. `uvr sync` is always reproducible and idempotent.
