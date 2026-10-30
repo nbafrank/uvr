@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use uvr_core::project::Project;
-use uvr_core::r_version::detector::{find_all, find_r_binary, query_r_version};
+use uvr_core::r_version::detector::{find_all, find_r_binary_with_source, query_r_version};
 use uvr_core::r_version::downloader::Platform;
 
 use crate::ui;
@@ -138,15 +138,17 @@ fn check_r_installations(issues: &mut Vec<String>) {
     let r_constraint = Project::find_cwd()
         .ok()
         .and_then(|p| p.manifest.project.r_version.clone());
-    match find_r_binary(r_constraint.as_deref()) {
-        Ok(ref binary) => {
+    match find_r_binary_with_source(r_constraint.as_deref()) {
+        Ok((ref binary, source)) => {
             if let Some(v) = query_r_version(binary) {
                 println!(
-                    "  {} {:<LABEL_W$} {} {}",
+                    "  {} {:<LABEL_W$} {} {} {} {}",
                     palette::info(ui::glyph::arrow()),
                     "active",
                     palette::info(&v),
                     palette::dim(binary.display().to_string()),
+                    palette::dim(ui::glyph::bullet()),
+                    palette::dim(source.to_string()),
                 );
             } else {
                 ui::check(

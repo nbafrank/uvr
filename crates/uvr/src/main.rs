@@ -93,10 +93,23 @@ async fn run() -> Result<()> {
             | Commands::Doctor
     ) {
         commands::util::warn_r_pin_mismatch();
+        // Many of these commands treat "no R" as "carry on without R". That is
+        // wrong if the user named an R that is not there. `uvr run` and
+        // `uvr doctor` report this failure themselves, and `--r-version`
+        // outranks the variable.
+        if !matches!(command, Commands::Run(_) | Commands::Doctor) {
+            commands::util::require_r_version_override()?;
+        }
     }
 
     match command {
         Commands::Init(args) => {
+            // `init` skips the companion and the IDE settings if it finds no R.
+            // That is wrong if the user named an R that is not there. Check
+            // before it writes a file. A bare project selects no R.
+            if !args.bare {
+                commands::util::require_r_version_override()?;
+            }
             let ide = ide::Ide::resolve(args.ide, args.no_ide);
             commands::init::run(args.name, args.here, args.r_version, ide, args.bare)?;
         }
@@ -230,7 +243,7 @@ async fn run() -> Result<()> {
                 commands::r_cmd::use_version::run(args.version)?;
             }
             Some(RCommands::Pin(args)) => {
-                commands::r_cmd::pin::run(args.version)?;
+                commands::r_cmd::pin::run(args.version, args.global, args.unset)?;
             }
             Some(RCommands::Javareconf) => {
                 commands::r_cmd::javareconf::run()?;
@@ -251,6 +264,10 @@ async fn run() -> Result<()> {
                         ("uvr r list", "List installed R versions"),
                         ("uvr r use <ver>", "Set the R version constraint"),
                         ("uvr r pin <ver>", "Write an exact R version to .r-version"),
+                        (
+                            "uvr r pin --global <ver>",
+                            "Set the per-user default R version",
+                        ),
                         ("uvr r dir", "Print the managed R install directory"),
                         ("uvr r find [constraint]", "Print the path to a matching R"),
                     ],

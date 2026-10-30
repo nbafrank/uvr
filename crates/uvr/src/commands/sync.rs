@@ -392,10 +392,20 @@ pub async fn run_inner(
             {
                 let from = r_minor(&lockfile.r.version);
                 let to = r_minor(cur);
+                // A pin cannot undo UVR_R_VERSION, so do not suggest one.
+                let advice = if uvr_core::env_vars::r_version().is_some() {
+                    "UVR_R_VERSION selects this R. If this switch is unintended, unset it \
+                     and re-run `uvr sync`."
+                        .to_string()
+                } else {
+                    format!(
+                        "If this switch is unintended, pin the old version with \
+                         `uvr r pin {from}` and re-run `uvr sync`."
+                    )
+                };
                 ui::warn(format!(
                     "uvr.lock was resolved for R {} but the active R is {} — re-resolving \
-                     the lockfile for R {}. If this switch is unintended, pin the old \
-                     version with `uvr r pin {from}` and re-run `uvr sync`.",
+                     the lockfile for R {}. {advice}",
                     palette::dim(&from),
                     palette::info(&to),
                     palette::info(&to),
@@ -488,6 +498,28 @@ pub async fn install_from_lockfile(
         library_override,
         timeout,
         r_info,
+        Prune::Off,
+    )
+    .await
+}
+
+/// [`install_from_lockfile`] for an R the caller has already selected. See
+/// [`crate::commands::lock::resolve_and_lock_for_r`] for why it may have to.
+pub async fn install_from_lockfile_for_r(
+    project: &Project,
+    lockfile: &Lockfile,
+    jobs: usize,
+    library_override: Option<&std::path::Path>,
+    r_binary: &std::path::Path,
+    r_version: &str,
+) -> Result<()> {
+    install_from_lockfile_with_r(
+        project,
+        lockfile,
+        jobs,
+        library_override,
+        None,
+        Some((r_binary.to_path_buf(), r_version.to_string())),
         Prune::Off,
     )
     .await
@@ -1959,6 +1991,17 @@ fn installed_version(name: &str, library: &std::path::Path) -> Option<String> {
 /// Frozen sync checks the recorded resolution inputs without consulting live
 /// registries. A new CRAN release must not invalidate an existing lock (#305).
 pub(super) fn validate_frozen_lock(project: &Project, lockfile: &Lockfile) -> Result<()> {
+    let r_binary = find_r_binary(project.manifest.project.r_version.as_deref()).ok();
+    validate_frozen_lock_for_r(project, lockfile, r_binary.as_deref())
+}
+
+/// [`validate_frozen_lock`] against the given active R. With `None`, the lock's
+/// R is not checked.
+pub(super) fn validate_frozen_lock_for_r(
+    project: &Project,
+    lockfile: &Lockfile,
+    r_binary: Option<&std::path::Path>,
+) -> Result<()> {
     validate_lock_identity(lockfile)?;
     let stale = || {
         anyhow::anyhow!(
@@ -2021,8 +2064,8 @@ pub(super) fn validate_frozen_lock(project: &Project, lockfile: &Lockfile) -> Re
 
     // The manifest fingerprint covers the R constraint, while the lock also
     // records the concrete R minor used to resolve binary/Bioc packages.
-    if let Ok(r_binary) = find_r_binary(project.manifest.project.r_version.as_deref()) {
-        if let Some(active) = query_r_version(&r_binary) {
+    if let Some(r_binary) = r_binary {
+        if let Some(active) = query_r_version(r_binary) {
             if looks_like_version(&lockfile.r.version)
                 && r_minor(&active) != r_minor(&lockfile.r.version)
             {

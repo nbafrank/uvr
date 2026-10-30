@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -35,7 +36,8 @@ pub async fn run(
 ) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     let start = ui::now();
-    let lockfile = lock_and_write(&project, upgrade, strategy, exclude_newer.as_deref()).await?;
+    let lockfile =
+        lock_and_write(&project, upgrade, strategy, exclude_newer.as_deref(), None).await?;
     let as_of = match &lockfile.r.resolved_as_of {
         Some(date) => format!(", CRAN as of {date}"),
         None => String::new(),
@@ -63,16 +65,28 @@ pub async fn resolve_and_lock_with(
     upgrade: bool,
     strategy: Option<ResolutionStrategy>,
 ) -> Result<Lockfile> {
-    lock_and_write(project, upgrade, strategy, None).await
+    lock_and_write(project, upgrade, strategy, None, None).await
+}
+
+/// [`resolve_and_lock`] for an R the caller has already selected.
+///
+/// `project`'s manifest may not say which R that is: the `__with__` manifest of
+/// an ephemeral environment has no constraint, and `find_r_binary` would answer
+/// with the global pin or `UVR_R_VERSION`, whatever the script or flag asked
+/// for.
+pub async fn resolve_and_lock_for_r(project: &Project, r_binary: &Path) -> Result<Lockfile> {
+    lock_and_write(project, false, None, None, Some(r_binary)).await
 }
 
 /// `resolve_and_lock_with` plus an `--exclude-newer` override; `None` uses
-/// the manifest's `[resolution] exclude-newer`.
+/// the manifest's `[resolution] exclude-newer`. `r_binary` is the R to resolve
+/// for; `None` selects it from the project.
 async fn lock_and_write(
     project: &Project,
     upgrade: bool,
     strategy: Option<ResolutionStrategy>,
     exclude_newer: Option<&str>,
+    r_binary: Option<&Path>,
 ) -> Result<Lockfile> {
     let existing = load_existing_lockfile(project);
     // A `--resolution` or `--exclude-newer` override asks for a different
@@ -88,7 +102,13 @@ async fn lock_and_write(
                 .packages
                 .iter()
                 .any(|p| matches!(p.source, uvr_core::lockfile::PackageSource::Local { .. }));
-            if !has_local && super::sync::validate_frozen_lock(project, &locked).is_ok() {
+            let current = match r_binary {
+                Some(r_binary) => {
+                    super::sync::validate_frozen_lock_for_r(project, &locked, Some(r_binary))
+                }
+                None => super::sync::validate_frozen_lock(project, &locked),
+            };
+            if !has_local && current.is_ok() {
                 locked.manifest_fingerprint = Some(project.manifest.lock_fingerprint()?);
                 project
                     .save_lockfile(&locked)
@@ -106,6 +126,7 @@ async fn lock_and_write(
         HashMap::new(),
         strategy,
         exclude_newer,
+        r_binary,
     )
     .await?;
     check_changed_url_tarballs(existing.as_ref(), &lockfile, upgrade)?;
@@ -145,6 +166,7 @@ pub async fn resolve_only_upgraded(
         pins,
         strategy,
         date.as_deref(),
+        None,
     )
     .await
 }
@@ -153,7 +175,9 @@ pub async fn resolve_only_upgraded(
 /// `existing` is the current lockfile on disk, used to preserve the locked
 /// Bioconductor version across re-resolves (unless `upgrade` is true).
 /// `strategy` and `exclude_newer` override the manifest's `[resolution]`
-/// settings.
+/// settings. `r_binary` is the R to resolve for; `None` selects it from the
+/// project.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_lockfile(
     project: &Project,
     client: &reqwest::Client,
@@ -162,6 +186,7 @@ async fn resolve_lockfile(
     pins: HashMap<String, PackageInfo>,
     strategy: Option<ResolutionStrategy>,
     exclude_newer: Option<&str>,
+    r_binary: Option<&Path>,
 ) -> Result<Lockfile> {
     let strategy = strategy.unwrap_or_else(|| project.manifest.resolution_strategy());
     // A date from `--exclude-newer` lives only in the lock. It stays there
@@ -185,7 +210,10 @@ async fn resolve_lockfile(
     }
     // Query the actual running R version to pin in the lockfile.
     let r_constraint = project.manifest.project.r_version.as_deref();
-    let r_binary_opt = find_r_binary(r_constraint).ok();
+    let r_binary_opt = match r_binary {
+        Some(r_binary) => Some(r_binary.to_path_buf()),
+        None => find_r_binary(r_constraint).ok(),
+    };
     let actual_r_version = r_binary_opt.as_deref().and_then(query_r_version);
     // The active R's base packages extend the resolver's hardcoded list, so a
     // base package that a newer R adds is not looked up in a registry (#169).

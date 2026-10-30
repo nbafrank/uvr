@@ -611,6 +611,15 @@ pub struct RPinArgs {
     /// Exact R version to pin in .r-version (e.g. "4.3.2").
     /// If omitted, uses the currently active R version.
     pub version: Option<String>,
+
+    /// Write the per-user default R, which applies where no project pin does.
+    /// Works outside a project.
+    #[arg(long)]
+    pub global: bool,
+
+    /// With --global: remove the per-user default R.
+    #[arg(long, requires = "global", conflicts_with = "version")]
+    pub unset: bool,
 }
 
 // ────────────────────────────────────────────────────────────

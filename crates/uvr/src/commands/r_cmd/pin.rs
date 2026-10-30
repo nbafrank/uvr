@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use uvr_core::project::Project;
+use uvr_core::project::{remove_global_r_version_pin, write_global_r_version_pin, Project};
 use uvr_core::r_version::detector::{
     find_all, find_r_binary, is_plausible_r_version, pin_conflicts_with_constraint,
     query_r_version, version_matches_prefix,
@@ -12,29 +12,22 @@ use crate::ui::palette;
 /// `uvr r pin [version]` — write an exact version to `.r-version`.
 ///
 /// If no version is given, queries the currently active R binary.
-pub fn run(version: Option<String>) -> Result<()> {
+///
+/// With `global`, writes the per-user default R instead, which needs no
+/// project (#329). `unset` removes that default.
+pub fn run(version: Option<String>, global: bool, unset: bool) -> Result<()> {
+    if unset {
+        return unset_global();
+    }
+    if global {
+        return pin_global(version);
+    }
+
     let project = Project::find_cwd().context("Not inside a uvr project")?;
 
     let pinned = match version {
         Some(v) => {
-            // Validate before writing: the pin used to accept any string,
-            // and garbage (`--`, `4-5-2`) produced a `.r-version` that could
-            // never match an install (#171).
-            if !is_plausible_r_version(&v) {
-                bail!(
-                    "`{v}` is not a valid R version to pin. Expected `X.Y.Z` (e.g. 4.5.1) \
-                     or a partial `X.Y` (e.g. 4.5)."
-                );
-            }
-            let installed = find_all();
-            if !installed
-                .iter()
-                .any(|i| i.version == v || version_matches_prefix(&v, &i.version))
-            {
-                ui::warn(format!(
-                    "R {v} is not installed yet — run `uvr r install {v}` to use this pin."
-                ));
-            }
+            check_requested_version(&v)?;
             v
         }
         None => {
@@ -65,6 +58,69 @@ pub fn run(version: Option<String>) -> Result<()> {
         palette::dim(".r-version"),
     ));
 
+    Ok(())
+}
+
+fn pin_global(version: Option<String>) -> Result<()> {
+    let pinned = match version {
+        Some(v) => {
+            check_requested_version(&v)?;
+            v
+        }
+        None => {
+            let constraint = Project::find_cwd()
+                .ok()
+                .and_then(|p| p.manifest.project.r_version);
+            let binary = find_r_binary(constraint.as_deref())
+                .context("R not found. Install R or use `uvr r install <version>`")?;
+            query_r_version(&binary)
+                .context("Could not determine R version from the active R binary")?
+        }
+    };
+
+    let path = write_global_r_version_pin(&pinned).context("Failed to write the global R pin")?;
+
+    ui::success(format!(
+        "Pinned R {} {} {}",
+        palette::info(&pinned),
+        palette::dim(ui::glyph::arrow()),
+        palette::dim(path.display().to_string()),
+    ));
+
+    Ok(())
+}
+
+fn unset_global() -> Result<()> {
+    match remove_global_r_version_pin().context("Failed to remove the global R pin")? {
+        Some(path) => ui::success(format!(
+            "Removed the global R pin {} {}",
+            palette::dim(ui::glyph::arrow()),
+            palette::dim(path.display().to_string()),
+        )),
+        None => ui::info("No global R pin is set"),
+    }
+    Ok(())
+}
+
+/// Validate before writing: the pin used to accept any string, and garbage
+/// (`--`, `4-5-2`) produced a `.r-version` that could never match an install
+/// (#171).
+fn check_requested_version(v: &str) -> Result<()> {
+    if !is_plausible_r_version(v) {
+        bail!(
+            "`{v}` is not a valid R version to pin. Expected `X.Y.Z` (e.g. 4.5.1) \
+             or a partial `X.Y` (e.g. 4.5)."
+        );
+    }
+    let installed = find_all();
+    if !installed
+        .iter()
+        .any(|i| i.version == v || version_matches_prefix(v, &i.version))
+    {
+        ui::warn(format!(
+            "R {v} is not installed yet — run `uvr r install {v}` to use this pin."
+        ));
+    }
     Ok(())
 }
 

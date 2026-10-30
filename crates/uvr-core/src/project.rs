@@ -173,6 +173,45 @@ pub fn read_r_version_pin_from(dir: &Path) -> Option<String> {
     }
 }
 
+/// The global R pin file (#329). Its format is the same as a project's
+/// `.r-version`, one line, but no directory walk reads it: it is machine state
+/// and not directory state.
+pub fn global_r_version_pin_path() -> Option<PathBuf> {
+    crate::env_vars::user_config_dir().map(|dir| dir.join(R_VERSION_FILE))
+}
+
+/// Read the global R pin, if one is set.
+pub fn read_global_r_version_pin() -> Option<String> {
+    let content = std::fs::read_to_string(global_r_version_pin_path()?).ok()?;
+    let version = content.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// Write the global R pin and return the path of the file.
+pub fn write_global_r_version_pin(version: &str) -> Result<PathBuf> {
+    let path = global_r_version_pin_path().ok_or_else(no_config_dir)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::manifest::atomic_write(&path, format!("{version}\n").as_bytes())?;
+    Ok(path)
+}
+
+/// Remove the global R pin. Returns the path of the file it removed, or `None`
+/// if there was no pin.
+pub fn remove_global_r_version_pin() -> Result<Option<PathBuf>> {
+    let path = global_r_version_pin_path().ok_or_else(no_config_dir)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Some(path)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn no_config_dir() -> UvrError {
+    UvrError::Other("Cannot find the user config directory for the global R pin.".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,6 +85,19 @@ pub fn warn_r_pin_mismatch() {
         Err(_) => return,
     };
 
+    // UVR_R_VERSION overrides the pin on purpose, so a difference from the pin
+    // is not a mismatch, and `uvr r install <pin>` would not change anything.
+    if let Some(wanted) = uvr_core::env_vars::r_version() {
+        let active = find_r_binary(project.manifest.project.r_version.as_deref())
+            .ok()
+            .as_deref()
+            .and_then(query_r_version);
+        if let Some(active) = active {
+            warn_calling_r_mismatch(&wanted, "UVR_R_VERSION", &active);
+        }
+        return;
+    }
+
     let r_version_str = project.manifest.project.r_version.clone();
     let pin_source: Option<(&'static str, String)> = project
         .read_r_version_pin()
@@ -157,6 +170,17 @@ pub fn warn_r_pin_mismatch() {
             }
         }
     }
+}
+
+/// Fail if `UVR_R_VERSION` is set and selects no R.
+pub fn require_r_version_override() -> Result<()> {
+    if uvr_core::env_vars::r_version().is_some() {
+        let constraint = uvr_core::project::Project::find_cwd()
+            .ok()
+            .and_then(|p| p.manifest.project.r_version);
+        uvr_core::r_version::detector::find_r_binary(constraint.as_deref())?;
+    }
+    Ok(())
 }
 
 /// Warn when the calling R session (`R_HOME`) doesn't match the pinned/active

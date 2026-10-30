@@ -168,7 +168,7 @@ local({
     length(grep("^\\[\\[package\\]\\]", readLines(path, warn = FALSE)))
   }
   version_ok <- TRUE
-  if (file.exists(rver_file)) {
+  if (file.exists(rver_file) && !nzchar(trimws(Sys.getenv("UVR_R_VERSION")))) {
     pinned <- tryCatch(trimws(readLines(rver_file, warn = FALSE)[1]),
                        error = function(e) "")
     if (nzchar(pinned)) {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -8,7 +8,10 @@ use uvr_core::error::UvrError;
 use uvr_core::manifest::{DependencySpec, Manifest};
 use uvr_core::project::{ManifestSource, Project};
 use uvr_core::r_env::REnv;
-use uvr_core::r_version::detector::{find_r_binary, find_r_binary_ignoring_pin, query_r_version};
+use uvr_core::r_version::detector::{
+    find_r_binary, find_r_binary_for_flag, find_r_binary_ignoring_pin, find_r_binary_satisfying,
+    query_r_version,
+};
 use uvr_core::r_version::downloader::{fetch_available_versions, newest_satisfying, Platform};
 use uvr_core::script_header::{self, ScriptHeader};
 
@@ -62,14 +65,17 @@ pub async fn run(
     // one, and the pin outranks every other signal — so honouring it would
     // let the directory a script happens to sit in choose its interpreter,
     // and with it the ephemeral environment's cache key.
-    let found = if script_mode {
+    let found = if let Some(flag) = r_version_override.as_deref() {
+        find_r_binary_for_flag(flag, !script_mode)
+    } else if script_mode {
         find_r_binary_ignoring_pin(effective_constraint)
     } else {
         find_r_binary(effective_constraint)
     };
-    // Only the header's own `r` may download an R (#183): `--r-version` is
-    // an explicit choice, and fails as it always has when nothing matches.
-    let provisionable = header_constraint.filter(|_| r_version_override.is_none());
+    // Only the header's own `r` may download an R (#183): `--r-version` and
+    // UVR_R_VERSION are explicit choices, and fail when nothing matches.
+    let provisionable = header_constraint
+        .filter(|_| r_version_override.is_none() && uvr_core::env_vars::r_version().is_none());
     let r_binary = match (found, provisionable) {
         (Err(UvrError::RNotFound | UvrError::RVersionUnsatisfied { .. }), Some(constraint)) => {
             provision_r(constraint, script.as_deref().unwrap_or_default()).await?
@@ -104,7 +110,7 @@ pub async fn run(
                 r_binary.display()
             )
         })?;
-        Some(ensure_with_env(&deps, &r_ver).await?)
+        Some(ensure_with_env(&deps, &r_binary, &r_ver).await?)
     };
 
     let (library, with_library) = match with_env {
@@ -249,7 +255,7 @@ async fn provision_r(constraint: &str, script: &str) -> Result<PathBuf> {
 
     // Looked up again rather than built from the install path, so the new R
     // passes the same checks as any installed one before it is used.
-    Ok(find_r_binary_ignoring_pin(Some(constraint))?)
+    Ok(find_r_binary_satisfying(constraint)?)
 }
 
 /// Library used when `uvr run` is invoked outside a project.
@@ -345,7 +351,15 @@ fn with_env_key(packages: &[String], r_version: &str) -> String {
 
 /// Ensure the `--with` and header dependencies are installed in a cached
 /// environment. Returns the path to the cached library directory.
-async fn ensure_with_env(deps: &[(String, DependencySpec)], r_version: &str) -> Result<PathBuf> {
+///
+/// `r_binary` is the R that will run the script, and `r_version` is its
+/// version. The packages must be built by that R, because the cache key promises
+/// it (#160). The temporary manifest below does not say which R that is.
+async fn ensure_with_env(
+    deps: &[(String, DependencySpec)],
+    r_binary: &Path,
+    r_version: &str,
+) -> Result<PathBuf> {
     // Same package from the header and `--with` (or listed twice) is one
     // logical set — without this it would mint a second cache dir and
     // install everything again.
@@ -429,9 +443,16 @@ async fn ensure_with_env(deps: &[(String, DependencySpec)], r_version: &str) -> 
     // instead, and the script then fails because `lib_dir`, which is what
     // R is actually pointed at, stays empty. Nothing prunes the shared
     // library afterwards either, so the stray packages accumulate.
-    let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
-    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4, Some(&lib_dir), None)
-        .await?;
+    let lockfile = crate::commands::lock::resolve_and_lock_for_r(&project, r_binary).await?;
+    crate::commands::sync::install_from_lockfile_for_r(
+        &project,
+        &lockfile,
+        4,
+        Some(&lib_dir),
+        r_binary,
+        r_version,
+    )
+    .await?;
 
     Ok(lib_dir)
 }

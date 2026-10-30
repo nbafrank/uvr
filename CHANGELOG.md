@@ -76,6 +76,17 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **`uvr r pin --global` sets a per-user default R, and `UVR_R_VERSION`
+  overrides the R for every command that selects one** (#329). The closest
+  thing was a
+  `~/.r-version`, which beat project constraints and was not seen outside
+  `$HOME`. The global pin lives in `~/.config/uvr/.r-version` (`XDG_CONFIG_HOME`
+  is honoured; `%APPDATA%\uvr` on Windows), applies where no project pin does,
+  and is used only if it satisfies the project's or script's constraint.
+  `UVR_R_VERSION` goes above the project pin, for a CI matrix that must not edit
+  the committed pin, and the project `.Rprofile` gives no pin mismatch message
+  under it (after the next `uvr sync` refreshes that file). `uvr r find` and
+  `uvr doctor` say which rule selected the R.
 
 ## v0.4.8 (2026-10-22)
 

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Result, UvrError};
-use crate::project::read_r_version_pin_from;
+use crate::project::{read_global_r_version_pin, read_r_version_pin_from};
 use crate::resolver::normalize_version;
 
 /// Discovered R installation.
@@ -11,6 +11,33 @@ pub struct RInstallation {
     pub binary: PathBuf,
     pub version: String,
     pub managed: bool, // true = installed by uvr
+}
+
+/// Which rule selected the R, as `uvr r find` and `uvr doctor` report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RSource {
+    /// `UVR_R_VERSION`.
+    EnvOverride,
+    /// A `.r-version` in the directory or a parent.
+    ProjectPin,
+    /// The global pin that `uvr r pin --global` writes.
+    GlobalPin,
+    /// The newest installed R that satisfies the constraint.
+    Constraint,
+    /// The newest installed R.
+    Newest,
+}
+
+impl std::fmt::Display for RSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RSource::EnvOverride => "UVR_R_VERSION",
+            RSource::ProjectPin => "project pin",
+            RSource::GlobalPin => "global pin",
+            RSource::Constraint => "constraint",
+            RSource::Newest => "newest",
+        })
+    }
 }
 
 /// Find all R installations: managed ones + system R.
@@ -116,21 +143,32 @@ pub fn find_all() -> Vec<RInstallation> {
 /// Get the R binary to use.
 ///
 /// Resolution order:
+/// 0. `UVR_R_VERSION`, which has no fallback
 /// 1. `.r-version` file (exact pin, walked up from cwd)
-/// 2. `version_constraint` from `uvr.toml` (see [`r_version_satisfies`])
-/// 3. Any managed installation, then system R
+/// 2. The global pin, if it satisfies `version_constraint`
+/// 3. `version_constraint` from `uvr.toml` (see [`r_version_satisfies`])
+/// 4. Any managed installation, then system R
 pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
+    find_r_binary_with_source(version_constraint).map(|(binary, _)| binary)
+}
+
+/// Like [`find_r_binary`], and also says which rule selected the R.
+pub fn find_r_binary_with_source(version_constraint: Option<&str>) -> Result<(PathBuf, RSource)> {
+    let cwd = pin_start_dir();
+    resolve_r_binary(version_constraint, Rules::all(Some(&cwd)))
+}
+
+fn pin_start_dir() -> PathBuf {
     // If the working directory cannot be resolved (deleted, or a parent is
     // unreadable), `.` still finds a pin in the directory itself, but the
     // walk cannot go up to its parents. Say so rather than miss it silently.
-    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+    std::env::current_dir().unwrap_or_else(|e| {
         tracing::warn!(
             "Cannot determine the working directory ({e}); a .r-version pin \
              in a parent directory will not be found"
         );
         PathBuf::from(".")
-    });
-    resolve_r_binary(version_constraint, Some(&cwd))
+    })
 }
 
 /// Like [`find_r_binary`], but walks up from `dir` for the `.r-version` pin
@@ -139,7 +177,7 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
 /// in a subdirectory, and the IDE settings it writes must name the R that
 /// `uvr run` will later pick from inside that project (#321).
 pub fn find_r_binary_for_project(dir: &Path, version_constraint: Option<&str>) -> Result<PathBuf> {
-    resolve_r_binary(version_constraint, Some(dir))
+    resolve_r_binary(version_constraint, Rules::all(Some(dir))).map(|(binary, _)| binary)
 }
 
 /// Like [`find_r_binary`], but ignores any `.r-version` pin.
@@ -151,8 +189,42 @@ pub fn find_r_binary_for_project(dir: &Path, version_constraint: Option<&str>) -
 /// choose the interpreter, and with it the ephemeral environment's cache key:
 /// the same script would get a different R, and a different set of installed
 /// packages, purely because of where it was run from.
+///
+/// `UVR_R_VERSION` and the global pin still apply. They are machine state, not
+/// directory state, so they do not break that promise (#329).
 pub fn find_r_binary_ignoring_pin(version_constraint: Option<&str>) -> Result<PathBuf> {
-    resolve_r_binary(version_constraint, None)
+    resolve_r_binary(version_constraint, Rules::all(None)).map(|(binary, _)| binary)
+}
+
+/// The newest working R that satisfies `constraint`, with no other rule. For a
+/// caller that asks that exact question: `uvr r find <constraint>`, and the R
+/// that a script header just caused uvr to download.
+pub fn find_r_binary_satisfying(constraint: &str) -> Result<PathBuf> {
+    let rules = Rules {
+        env_override: false,
+        pin_dir: None,
+        global_pin: false,
+    };
+    resolve_r_binary(Some(constraint), rules).map(|(binary, _)| binary)
+}
+
+/// For `uvr run --r-version`: an explicit flag outranks `UVR_R_VERSION` and the
+/// global pin, as a flag does its environment form in uv. `honour_pin` is false
+/// in script mode, which ignores directory pins.
+///
+/// A directory pin outranks the flag, as it does a constraint, except when
+/// `UVR_R_VERSION` is set. The variable outranks the pin, so the pin must not
+/// come back only because a flag replaced the variable: the result would be an
+/// R that neither of them asked for.
+pub fn find_r_binary_for_flag(constraint: &str, honour_pin: bool) -> Result<PathBuf> {
+    let honour_pin = honour_pin && crate::env_vars::r_version().is_none();
+    let cwd = honour_pin.then(pin_start_dir);
+    let rules = Rules {
+        env_override: false,
+        pin_dir: cwd.as_deref(),
+        global_pin: false,
+    };
+    resolve_r_binary(Some(constraint), rules).map(|(binary, _)| binary)
 }
 
 /// Whether the installed R `version` satisfies a `[project] r_version`
@@ -177,17 +249,131 @@ pub fn r_version_satisfies(constraint: &str, version: &str) -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// `pin_dir` is where to start walking up for a `.r-version` pin; `None`
-/// ignores pins entirely.
-fn resolve_r_binary(version_constraint: Option<&str>, pin_dir: Option<&Path>) -> Result<PathBuf> {
+/// The rules a resolution may use, beside the constraint and the newest R.
+#[derive(Clone, Copy)]
+struct Rules<'a> {
+    env_override: bool,
+    /// Where to start walking up for a `.r-version` pin; `None` ignores
+    /// directory pins entirely.
+    pin_dir: Option<&'a Path>,
+    global_pin: bool,
+}
+
+impl<'a> Rules<'a> {
+    fn all(pin_dir: Option<&'a Path>) -> Self {
+        Rules {
+            env_override: true,
+            pin_dir,
+            global_pin: true,
+        }
+    }
+}
+
+/// The newest installed R that `keep` accepts and that responds to a version
+/// query, so a broken install is skipped and does not capture every command.
+fn newest_working(
+    installations: &[RInstallation],
+    keep: impl Fn(&RInstallation) -> bool,
+) -> Option<PathBuf> {
+    let mut matches: Vec<&RInstallation> = installations.iter().filter(|i| keep(i)).collect();
+    matches.sort_by(|a, b| version_cmp(&b.version, &a.version));
+    matches
+        .into_iter()
+        .find(|inst| query_r_version(&inst.binary).is_some())
+        .map(|inst| inst.binary.clone())
+}
+
+fn installed_versions(installations: &[RInstallation]) -> String {
+    if installations.is_empty() {
+        return "none".to_string();
+    }
+    installations
+        .iter()
+        .map(|i| i.version.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Tier 0: `UVR_R_VERSION` chose this, so nothing else may stand in for it.
+fn select_env_override(installations: &[RInstallation], wanted: &str) -> Result<PathBuf> {
+    r_version_satisfies(wanted, "0.0.0").map_err(|e| {
+        UvrError::Other(format!(
+            "UVR_R_VERSION=`{wanted}` is not a valid R version or constraint: {e}"
+        ))
+    })?;
+    newest_working(installations, |inst| {
+        r_version_satisfies(wanted, &inst.version).unwrap_or(false)
+    })
+    .ok_or_else(|| {
+        UvrError::Other(format!(
+            "UVR_R_VERSION=`{wanted}` matches no working R (installed: {}). Install one \
+             with `uvr r install <version>`, or unset UVR_R_VERSION.",
+            installed_versions(installations)
+        ))
+    })
+}
+
+/// Tier 2: the global pin is a preference, so anything wrong with it gives
+/// `None`, and the next rule decides. A default that is not used without a
+/// reason is hard to find, so say why, unless the constraint excludes the pin.
+fn select_global_pin(installations: &[RInstallation], constraint: Option<&str>) -> Option<PathBuf> {
+    // One command can resolve R several times.
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let warn = |message: String| WARNED.call_once(|| tracing::warn!("{message}"));
+
+    let pin = read_global_r_version_pin()?;
+    if !is_plausible_r_version(&pin) {
+        warn(format!(
+            "Ignoring the global R pin `{pin}`: it is not a valid R version. Set it again \
+             with `uvr r pin --global <version>`."
+        ));
+        return None;
+    }
+    let is_pinned = |inst: &RInstallation| version_matches_prefix(&pin, &inst.version);
+    if !installations.iter().any(is_pinned) {
+        if !constraint.is_some_and(|c| pin_conflicts_with_constraint(&pin, c)) {
+            warn(format!(
+                "The global R pin {pin} is not installed, so it is not used. Run \
+                 `uvr r install {pin}`, or clear it with `uvr r pin --global --unset`."
+            ));
+        }
+        return None;
+    }
+    let usable = |inst: &RInstallation| {
+        is_pinned(inst)
+            && constraint.is_none_or(|c| r_version_satisfies(c, &inst.version).unwrap_or(false))
+    };
+    let selected = newest_working(installations, usable);
+    if selected.is_none() && installations.iter().any(usable) {
+        warn(format!(
+            "The global R pin {pin} is installed but does not work (no version response), so \
+             it is not used. Reinstall it, or clear it with `uvr r pin --global --unset`."
+        ));
+    }
+    selected
+}
+
+fn resolve_r_binary(
+    version_constraint: Option<&str>,
+    rules: Rules<'_>,
+) -> Result<(PathBuf, RSource)> {
     let installations = find_all();
+
+    // 0. UVR_R_VERSION overrides every rule below. Its error names the variable,
+    // also if there is no R at all.
+    if rules.env_override {
+        if let Some(wanted) = crate::env_vars::r_version() {
+            return select_env_override(&installations, &wanted)
+                .map(|bin| (bin, RSource::EnvOverride));
+        }
+    }
 
     if installations.is_empty() {
         return Err(UvrError::RNotFound);
     }
 
     // 1. Honour .r-version exact pin
-    let pin = pin_dir.and_then(read_r_version_pin_from);
+    let pin = rules.pin_dir.and_then(read_r_version_pin_from);
     if let Some(pinned) = pin {
         let bin = find_exact_version(&installations, &pinned)?;
         // Validate the pinned install — a broken managed R (one whose binary
@@ -201,55 +387,51 @@ fn resolve_r_binary(version_constraint: Option<&str>, pin_dir: Option<&Path>) ->
                 bin.display()
             )));
         };
-        // The pin always wins over the uvr.toml constraint, but silent drift
-        // between the two is confusing (`uvr r use 4.3.0` after setting
-        // `r_version = "^4.5"`, #156) — surface it without changing precedence.
+        // The pin always wins over the constraint (from uvr.toml or from
+        // `uvr run --r-version`), but silent drift between the two is confusing
+        // (`uvr r use 4.3.0` after setting `r_version = "^4.5"`, #156) — surface
+        // it without changing precedence.
         if let Some(constraint) = version_constraint {
             if pin_conflicts_with_constraint(&resolved, constraint) {
                 tracing::warn!(
                     ".r-version pins R {pinned} (resolved to {resolved}), which does not \
-                     satisfy the uvr.toml constraint `{constraint}`; the pin takes \
-                     precedence. Update .r-version or uvr.toml to bring them back in sync."
+                     satisfy the constraint `{constraint}`; the pin takes precedence. \
+                     Update .r-version or the constraint to bring them back in sync."
                 );
             }
         }
-        return Ok(bin);
+        return Ok((bin, RSource::ProjectPin));
     }
 
-    // 2. Honour the constraint from uvr.toml
+    // Validate once up front so an unparseable constraint is an error,
+    // not "no installation matches".
     if let Some(constraint) = version_constraint {
-        // Validate once up front so an unparseable constraint is an error,
-        // not "no installation matches".
         r_version_satisfies(constraint, "0.0.0")?;
-        // Probe matches in version-descending order and skip broken installs,
-        // mirroring case (3) below.
-        let mut matches: Vec<&RInstallation> = installations
-            .iter()
-            .filter(|inst| r_version_satisfies(constraint, &inst.version).unwrap_or(false))
-            .collect();
-        matches.sort_by(|a, b| version_cmp(&b.version, &a.version));
-        for inst in matches {
-            if query_r_version(&inst.binary).is_some() {
-                return Ok(inst.binary.clone());
-            }
+    }
+
+    // 2. The global pin, within any constraint
+    if rules.global_pin {
+        if let Some(bin) = select_global_pin(&installations, version_constraint) {
+            return Ok((bin, RSource::GlobalPin));
         }
-        let installed = installations
-            .iter()
-            .map(|i| i.version.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let installed = if installed.is_empty() {
-            "none".to_string()
-        } else {
-            installed
-        };
+    }
+
+    // 3. Honour the constraint from uvr.toml
+    if let Some(constraint) = version_constraint {
+        // Probe matches in version-descending order and skip broken installs,
+        // mirroring case (4) below.
+        if let Some(bin) = newest_working(&installations, |inst| {
+            r_version_satisfies(constraint, &inst.version).unwrap_or(false)
+        }) {
+            return Ok((bin, RSource::Constraint));
+        }
         return Err(UvrError::RVersionUnsatisfied {
             constraint: constraint.to_string(),
-            installed,
+            installed: installed_versions(&installations),
         });
     }
 
-    // 3. Prefer managed installation, fall back to first system R.
+    // 4. Prefer managed installation, fall back to first system R.
     //    Validate each candidate via `query_r_version` so a broken managed
     //    install (one whose R binary doesn't respond to a version query)
     //    isn't silently selected and doesn't capture every uvr command.
@@ -260,7 +442,7 @@ fn resolve_r_binary(version_constraint: Option<&str>, pin_dir: Option<&Path>) ->
     system.sort_by(|a, b| version_cmp(&b.version, &a.version));
     for inst in managed.into_iter().chain(system) {
         if query_r_version(&inst.binary).is_some() {
-            return Ok(inst.binary.clone());
+            return Ok((inst.binary.clone(), RSource::Newest));
         }
     }
     Err(UvrError::RNotFound)
@@ -732,8 +914,9 @@ mod tests {
 
     #[test]
     fn find_r_binary_impossible_constraint() {
-        // A constraint for R 99.0.0 should fail (no such version exists)
-        let result = find_r_binary(Some(">=99.0.0"));
+        // A constraint for R 99.0.0 should fail (no such version exists). This
+        // function reads no `UVR_R_VERSION` or pin from the developer's machine.
+        let result = find_r_binary_satisfying(">=99.0.0");
         if !find_all().is_empty() {
             assert!(result.is_err());
         }

@@ -289,8 +289,9 @@ or to the repository root.
 | `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
 | `uvr r use <ver>` | Set R version constraint in `uvr.toml` |
 | `uvr r pin <ver>` | Write exact version to `.r-version` |
+| `uvr r pin --global [ver]` | Set the per-user default R, which applies where no project pin does (`--global --unset` removes it) |
 | `uvr r dir` | Print the managed R install directory (`~/.uvr/r-versions/`, or `UVR_R_INSTALL_DIR`) |
-| `uvr r find [constraint]` | Print the path to the newest R that satisfies the constraint; with no constraint, the R the project uses. Exits non-zero if none matches |
+| `uvr r find [constraint]` | Print the path to the newest R that satisfies the constraint; with no constraint, the R the project uses (the rule that selected it goes to stderr). Exits non-zero if none matches |
 | `uvr export` | Export lockfile to renv.lock format |
 | `uvr export -o renv.lock` | Export to a file |
 | `uvr import` | Import packages from an renv.lock file |
@@ -399,7 +400,9 @@ never silently ignored.
 
 Scripts run isolated from any project you happen to be standing in: the
 project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,
-so a script behaves the same wherever it is invoked from.
+so a script behaves the same wherever it is invoked from. `UVR_R_VERSION` and
+the global pin (see [R version management](#r-version-management)) still apply:
+they are machine state, not directory state.
 
 A header can also say which R the script needs:
 
@@ -538,7 +541,38 @@ uvr r use ">=4.3.0"
 
 # Pin exact version (writes .r-version file)
 uvr r pin 4.4.2
+
+# Set a default for this user, in or out of a project
+uvr r pin --global 4.5
 ```
+
+uvr selects R with the first of these rules that applies:
+
+0. `UVR_R_VERSION`, when set: `4.5`, `4.5.3` or a constraint like `>=4.4`. It
+   overrides everything below for every command that selects an R, and that
+   command fails if no installed R matches. This includes `uvr init`, except
+   with `--bare`. Commands that select no R, such as `uvr r install`, ignore it.
+   `uvr run --r-version` outranks it, also when it installs packages, and it
+   never downloads an R. If you set the flag and the variable, uvr does not use
+   a `.r-version`. If you set only the flag, a `.r-version` wins over the flag in
+   a project. The project `.Rprofile` gives no pin mismatch message under the
+   variable.
+1. A `.r-version` in the working directory or a parent.
+2. The global pin, `$XDG_CONFIG_HOME/uvr/.r-version` or
+   `~/.config/uvr/.r-version` (`%APPDATA%\uvr\.r-version` on Windows). The
+   global pin is a preference: it is used only if it satisfies the `uvr.toml`
+   constraint or a script's `r`, and `uvr run --r-version` ignores it. If it is
+   not installed or does not work, uvr warns and goes on to the next rule. `4.5`
+   selects the newest installed 4.5.x, and `4.5.3` selects exactly that one.
+3. The newest installed R that satisfies the `uvr.toml` constraint.
+4. The newest installed R.
+
+`uvr r find` with no constraint and `uvr doctor` say which rule selected the R.
+
+A change of R minor version changes what `uvr sync` installs: the next sync
+re-resolves and rewrites `uvr.lock`, and `uvr sync --frozen` fails instead. This
+applies to a CI matrix that sets `UVR_R_VERSION`, and to a new global pin in a
+project with no `.r-version`.
 
 R versions are installed to `~/.uvr/r-versions/` and managed independently of any system R installation. uvr downloads **portable, relocatable R builds** from the [rstudio/r-builds](https://github.com/rstudio/r-builds) project ([`cdn.posit.co/r`](https://cdn.posit.co/r/versions.json)): each is a self-contained archive that detects its own location at runtime — no system-wide install, no admin/`sudo`, and no post-install patching. This makes it ideal for corporate and university environments where users cannot install software system-wide.
 

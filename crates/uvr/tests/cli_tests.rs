@@ -10,9 +10,20 @@ fn uvr_cmd() -> Command {
     // exported — would change these tests' results. Strip the vars that drive
     // IDE detection and headless mode. Tests that need them set them
     // explicitly afterwards; a later `.env()` overrides this.
-    for var in ["POSITRON", "RSTUDIO", "UVR_UNATTENDED", "UVR_NO_COMPANION"] {
+    for var in [
+        "POSITRON",
+        "RSTUDIO",
+        "UVR_UNATTENDED",
+        "UVR_NO_COMPANION",
+        "UVR_R_VERSION",
+    ] {
         cmd.env_remove(var);
     }
+    // A developer's real global R pin must not change the results either. This
+    // directory is never created: a test that pins sets its own.
+    let no_config = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-user-config");
+    cmd.env("XDG_CONFIG_HOME", &no_config);
+    cmd.env("APPDATA", &no_config);
     cmd
 }
 
@@ -3270,9 +3281,9 @@ fn test_headered_script_ignores_a_surrounding_r_version_pin() {
 ///
 /// Each stand-in prints `FAKE-R <version>` and then its version, whatever it
 /// is asked: uvr's version probe reads the last version-shaped line, and a
-/// script run shows which R was chosen. The 3.0.x series keeps them clear of
-/// any real R on the machine, and a script with no dependencies never makes
-/// uvr ask them to install anything.
+/// script run shows which R was chosen. It also adds its arguments to
+/// `<version>/calls.log`, which shows which R was asked to install packages. The
+/// 3.0.x series keeps them clear of any real R on the machine.
 #[cfg(unix)]
 fn fake_r_installs(versions: &[&str]) -> TempDir {
     use std::os::unix::fs::PermissionsExt;
@@ -3281,14 +3292,700 @@ fn fake_r_installs(versions: &[&str]) -> TempDir {
         let bin = dir.path().join(version).join("bin");
         fs::create_dir_all(&bin).unwrap();
         let r = bin.join("R");
+        let log = dir.path().join(version).join("calls.log");
         fs::write(
             &r,
-            format!("#!/bin/sh\necho FAKE-R {version}\necho {version}\n"),
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\necho FAKE-R {version}\necho {version}\n",
+                log.display()
+            ),
         )
         .unwrap();
         fs::set_permissions(&r, fs::Permissions::from_mode(0o755)).unwrap();
     }
     dir
+}
+
+/// Stand-in managed Rs and a private config directory for the global pin. The
+/// real R on the machine is still found, so a constraint here has an upper
+/// bound.
+#[cfg(unix)]
+struct RFinder {
+    installs: TempDir,
+    config: TempDir,
+}
+
+#[cfg(unix)]
+impl RFinder {
+    fn new(versions: &[&str]) -> Self {
+        RFinder {
+            installs: fake_r_installs(versions),
+            config: TempDir::new().unwrap(),
+        }
+    }
+
+    fn cmd(&self, cwd: &std::path::Path) -> Command {
+        let mut cmd = uvr_cmd();
+        cmd.current_dir(cwd)
+            .env("UVR_R_INSTALL_DIR", self.installs.path())
+            .env("XDG_CONFIG_HOME", self.config.path());
+        cmd
+    }
+
+    fn pin_globally(&self, version: &str) {
+        let dir = self.config.path().join("uvr");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".r-version"), format!("{version}\n")).unwrap();
+    }
+
+    /// Make the stand-in for `version` fail, as a broken install does.
+    fn break_install(&self, version: &str) {
+        let r = self.installs.path().join(version).join("bin").join("R");
+        fs::write(r, "#!/bin/sh\nexit 1\n").unwrap();
+    }
+
+    /// The `R CMD` calls that the stand-in for `version` received.
+    fn cmd_calls(&self, version: &str) -> Vec<String> {
+        let log = self.installs.path().join(version).join("calls.log");
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("CMD "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Run `uvr r find` and return the version directory it chose and stderr.
+    fn find(&self, cwd: &std::path::Path, env: Option<&str>) -> (String, String) {
+        let mut cmd = self.cmd(cwd);
+        if let Some(value) = env {
+            cmd.env("UVR_R_VERSION", value);
+        }
+        let out = cmd
+            .args(["r", "find"])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        // stdout holds the path and nothing else, for `$(uvr r find)`.
+        assert_eq!(stdout.lines().count(), 1, "{stdout}");
+        let path = std::path::PathBuf::from(stdout.trim());
+        let version = path
+            .strip_prefix(self.installs.path())
+            .unwrap_or_else(|_| panic!("{} is not a stand-in R", path.display()))
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .to_string();
+        (version, String::from_utf8(out.stderr).unwrap())
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_pin_applies_outside_home_and_outside_a_project() {
+    // #329: `~/.r-version` is not seen from outside `$HOME`. This pin is.
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let home = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    r.pin_globally("3.0.1");
+    r.cmd(elsewhere.path())
+        .env("HOME", home.path())
+        .args(["r", "find"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3.0.1"))
+        .stderr(predicate::str::contains("global pin"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_pin_is_a_preference_within_the_constraint() {
+    let r = RFinder::new(&["3.0.1", "3.1.0", "3.1.2"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0.1");
+
+    // No constraint: the pin wins over the newest R.
+    assert_eq!(r.find(dir.path(), None).0, "3.0.1");
+
+    // The constraint allows the pin: the pin wins over the newest match.
+    let manifest = "[project]\nname = \"p\"\nr_version = \">=3.0, <4\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.0.1");
+    assert!(stderr.contains("global pin"), "{stderr}");
+
+    // The constraint forbids the pin: no error, and the constraint decides.
+    let manifest = "[project]\nname = \"p\"\nr_version = \">=3.1, <4\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.1.2");
+    assert!(stderr.contains("constraint"), "{stderr}");
+    assert!(!stderr.contains("not installed"), "{stderr}");
+
+    // A minor pin stays within the constraint too.
+    r.pin_globally("3.1");
+    let manifest = "[project]\nname = \"p\"\nr_version = \">=3.0, <3.1.2\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    assert_eq!(r.find(dir.path(), None).0, "3.1.0");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_pin_minor_picks_newest_and_exact_picks_that_one() {
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0");
+    assert_eq!(r.find(dir.path(), None).0, "3.0.2");
+    r.pin_globally("3.0.1");
+    assert_eq!(r.find(dir.path(), None).0, "3.0.1");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_directory_pin_beats_global_pin_and_env_beats_directory_pin() {
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0.1");
+    fs::write(dir.path().join(".r-version"), "3.0.2\n").unwrap();
+
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.0.2");
+    assert!(stderr.contains("project pin"), "{stderr}");
+
+    let (version, stderr) = r.find(dir.path(), Some("3.1.0"));
+    assert_eq!(version, "3.1.0");
+    assert!(stderr.contains("UVR_R_VERSION"), "{stderr}");
+
+    // The other value forms that `--r-version` takes.
+    assert_eq!(r.find(dir.path(), Some("3.0")).0, "3.0.2");
+    assert_eq!(r.find(dir.path(), Some(">=3.0, <3.1")).0, "3.0.2");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uvr_r_version_overrides_a_constraint_and_has_no_fallback() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    let manifest = "[project]\nname = \"p\"\nr_version = \">=3.1, <4\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    assert_eq!(r.find(dir.path(), Some("3.0")).0, "3.0.1");
+
+    // Commands that treat "no R" as "carry on without R" fail too, and write
+    // nothing.
+    for args in [&["r", "find"][..], &["lock"][..], &["sync"][..]] {
+        let out = r
+            .cmd(dir.path())
+            .env("UVR_R_VERSION", "3.2")
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("UVR_R_VERSION"), "{args:?}: {stderr}");
+    }
+    assert!(!dir.path().join("uvr.lock").exists());
+
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "not-a-version")
+        .args(["r", "find"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a valid R version"));
+
+    // An explicit constraint keeps its meaning.
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "3.0")
+        .args(["r", "find", ">=3.1, <4"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3.1.0"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_find_with_a_constraint_ignores_the_global_pin() {
+    let r = RFinder::new(&["3.0.1", "3.0.2"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0.1");
+    r.cmd(dir.path())
+        .args(["r", "find", ">=3.0, <4"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3.0.2"))
+        .stderr(predicate::str::contains("selected by").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_pin_not_installed_warns_and_falls_through() {
+    let r = RFinder::new(&["3.0.1"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0.9");
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.0.1");
+    assert!(stderr.contains("not installed"), "{stderr}");
+    assert!(stderr.contains("newest"), "{stderr}");
+
+    // A file that was edited by hand is the same: a preference, not an error.
+    r.pin_globally("garbage");
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.0.1");
+    assert!(stderr.contains("not a valid R version"), "{stderr}");
+
+    // A project pin that is not installed stays a hard error.
+    r.pin_globally("3.0.1");
+    fs::write(dir.path().join(".r-version"), "3.0.9\n").unwrap();
+    r.cmd(dir.path())
+        .args(["r", "find"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not installed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_global_pin_that_is_broken_warns_and_falls_through() {
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    r.break_install("3.0.2");
+    r.pin_globally("3.0.2");
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.1.0");
+    assert!(stderr.contains("does not work"), "{stderr}");
+    assert!(stderr.contains("newest"), "{stderr}");
+
+    // A minor pin with one working install uses it, and has nothing to say.
+    r.pin_globally("3.0");
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.0.1");
+    assert!(!stderr.contains("does not work"), "{stderr}");
+
+    // A pin that the constraint excludes gets no warning, broken or not.
+    r.pin_globally("3.0.2");
+    let manifest = "[project]\nname = \"p\"\nr_version = \">=3.1, <4\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    let (version, stderr) = r.find(dir.path(), None);
+    assert_eq!(version, "3.1.0");
+    assert!(!stderr.contains("does not work"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_ephemeral_environment_is_built_by_the_r_that_runs_the_script() {
+    // The temporary `__with__` manifest has no constraint, so the install must
+    // get the selected R from `uvr run`, and must not select one again. Without
+    // this, the script runs under one R and its packages are built by another.
+    let tarballs = TempDir::new().unwrap();
+    fs::write(
+        tarballs.path().join("urlpkg_0.1.0.tar.gz"),
+        urlpkg_tarball("0.1.0"),
+    )
+    .unwrap();
+    let (base, _server) = spawn_stub(tarballs.path().to_path_buf(), None);
+    let header = |r_line: &str| {
+        format!("# /// script\n{r_line}# dependencies = [\"{base}/urlpkg_0.1.0.tar.gz\"]\n# ///\n")
+    };
+    let script = header("# r = \">=3.1, <4\"\n");
+    let plain = header("");
+
+    // Each case: the script, the flag, the global pin, the directory pin, the
+    // variable.
+    #[allow(clippy::type_complexity)]
+    let cases: [(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>); 5] = [
+        // The header excludes the global pin.
+        (&script, None, Some("3.0"), None, None),
+        // The header excludes a directory pin, which script mode ignores.
+        (&script, None, None, Some("3.0.1"), None),
+        // The flag beats the global pin.
+        (&plain, Some("==3.1.0"), Some("3.0"), None, None),
+        // The flag beats the variable, and the variable may match nothing.
+        (&plain, Some("==3.1.0"), None, None, Some("3.0")),
+        (&plain, Some("==3.1.0"), None, None, Some("9.9")),
+    ];
+    for (source, flag, global, directory, variable) in cases {
+        let r = RFinder::new(&["3.0.1", "3.1.0"]);
+        let cache = TempDir::new().unwrap();
+        // With a cached index and no `.meta` file, uvr does not fetch the CRAN
+        // index.
+        fs::write(cache.path().join("cran-packages.txt"), "").unwrap();
+        let dir = script_dir(source);
+        if let Some(version) = global {
+            r.pin_globally(version);
+        }
+        if let Some(version) = directory {
+            fs::write(dir.path().join(".r-version"), format!("{version}\n")).unwrap();
+        }
+        let mut cmd = r.cmd(dir.path());
+        cmd.env("UVR_CACHE_DIR", cache.path())
+            .env("UVR_PACKAGES_DIR", cache.path().join("packages"))
+            .env("UVR_NO_BINARY", "1")
+            .env("UVR_NO_COMPANION", "1")
+            .env("UVR_R_DOWNLOADS", "never")
+            .env_remove("R_HOME")
+            .arg("run");
+        if let Some(flag) = flag {
+            cmd.args(["--r-version", flag]);
+        }
+        if let Some(variable) = variable {
+            cmd.env("UVR_R_VERSION", variable);
+        }
+        // The stand-in installs nothing, so the run itself may fail after this.
+        let out = cmd.arg("script.R").output().unwrap();
+        let context = format!(
+            "{flag:?} {global:?} {directory:?} {variable:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(r.cmd_calls("3.0.1"), Vec::<String>::new(), "{context}");
+        assert!(
+            r.cmd_calls("3.1.0").iter().any(|c| c.contains("urlpkg")),
+            "{context}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uvr_r_version_that_matches_nothing_fails_init() {
+    let r = RFinder::new(&["3.0.1"]);
+    let dir = TempDir::new().unwrap();
+    for args in [
+        &["init", "--here", "--no-ide"][..],
+        &["init", "sub", "--no-ide"][..],
+    ] {
+        r.cmd(dir.path())
+            .env("UVR_R_VERSION", "9.9")
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("UVR_R_VERSION"));
+    }
+    assert!(!dir.path().join("uvr.toml").exists());
+    assert!(!dir.path().join("sub").exists());
+
+    // A bare project selects no R, and a variable that matches is no error.
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "9.9")
+        .args(["init", "bare", "--bare"])
+        .assert()
+        .success();
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "3.0")
+        .env("UVR_NO_COMPANION", "1")
+        .args(["init", "matches", "--no-ide"])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_headered_script_uses_the_global_pin_and_ignores_a_directory_pin() {
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# dependencies = []\n# ///\n");
+    fs::write(dir.path().join(".r-version"), "3.0.2\n").unwrap();
+    r.pin_globally("3.0.1");
+    let run = |script: &str, extra: Option<(&str, &str)>| {
+        let mut cmd = r.cmd(dir.path());
+        cmd.args(["run", script])
+            .env("UVR_CACHE_DIR", cache.path())
+            .env("UVR_R_DOWNLOADS", "never");
+        if let Some((key, value)) = extra {
+            cmd.env(key, value);
+        }
+        cmd.assert()
+    };
+
+    run("script.R", None)
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.0.1"));
+
+    // UVR_R_VERSION applies to scripts too.
+    run("script.R", Some(("UVR_R_VERSION", "3.1")))
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"));
+
+    // A header `r` works like a uvr.toml constraint. This one allows the pin.
+    fs::write(
+        dir.path().join("allows.R"),
+        "# /// script\n# r = \">=3.0, <4\"\n# dependencies = []\n# ///\n",
+    )
+    .unwrap();
+    run("allows.R", None)
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.0.1"));
+
+    // This one forbids it.
+    fs::write(
+        dir.path().join("forbids.R"),
+        "# /// script\n# r = \">=3.1, <4\"\n# dependencies = []\n# ///\n",
+    )
+    .unwrap();
+    run("forbids.R", None)
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"));
+
+    // UVR_R_VERSION does not download an R, even for a header that may.
+    run("forbids.R", Some(("UVR_R_VERSION", "3.9")))
+        .failure()
+        .stderr(predicate::str::contains("UVR_R_VERSION"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_version_flag_beats_uvr_r_version() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let cache = TempDir::new().unwrap();
+    let dir = script_dir("# /// script\n# dependencies = []\n# ///\n");
+    r.cmd(dir.path())
+        .args(["run", "--r-version", "==3.1.0", "script.R"])
+        .env("UVR_CACHE_DIR", cache.path())
+        .env("UVR_R_VERSION", "3.0")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"));
+
+    // The flag asks for the newest match, and a global pin does not change that.
+    r.pin_globally("3.0.1");
+    r.cmd(dir.path())
+        .args(["run", "--r-version", ">=3.0, <4", "script.R"])
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"));
+
+    // Also when the variable matches nothing, in a project.
+    let plain = TempDir::new().unwrap();
+    fs::write(plain.path().join("plain.R"), "").unwrap();
+    let manifest = "[project]\nname = \"p\"\n\n[dependencies]\n";
+    fs::write(plain.path().join("uvr.toml"), manifest).unwrap();
+    r.cmd(plain.path())
+        .args(["run", "--r-version", "==3.1.0", "plain.R"])
+        .env("UVR_R_VERSION", "3.9")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_uvr_r_version_gives_no_pin_mismatch_warning() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    let manifest = "[project]\nname = \"p\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    fs::write(dir.path().join(".r-version"), "3.0.1\n").unwrap();
+    fs::write(dir.path().join("plain.R"), "").unwrap();
+    r.cmd(dir.path())
+        .args(["run", "plain.R"])
+        .env("UVR_R_VERSION", "3.1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"))
+        .stderr(predicate::str::contains("mismatch").not());
+}
+
+/// The variable outranks a directory pin, so a flag that replaces the variable
+/// must not bring the pin back. Without the variable, the pin beats the flag.
+#[cfg(unix)]
+#[test]
+fn test_r_version_flag_with_uvr_r_version_does_not_bring_back_a_directory_pin() {
+    let r = RFinder::new(&["3.0.1", "3.0.2", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    let manifest = "[project]\nname = \"p\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    fs::write(dir.path().join(".r-version"), "3.1.0\n").unwrap();
+    fs::write(dir.path().join("plain.R"), "").unwrap();
+
+    // The flag agrees with the variable.
+    r.cmd(dir.path())
+        .args(["run", "--r-version", "==3.0.1", "plain.R"])
+        .env("UVR_R_VERSION", "3.0")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.0.1"))
+        .stderr(predicate::str::contains("takes precedence").not());
+
+    // The flag does not agree with the variable. The flag wins, and the pin
+    // still does not.
+    r.cmd(dir.path())
+        .args(["run", "--r-version", "==3.0.2", "plain.R"])
+        .env("UVR_R_VERSION", "3.0.1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.0.2"));
+
+    // No variable: the pin wins, and the warning does not blame uvr.toml.
+    r.cmd(dir.path())
+        .args(["run", "--r-version", "==3.0.1", "plain.R"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE-R 3.1.0"))
+        .stderr(predicate::str::contains("takes precedence"))
+        .stderr(predicate::str::contains("uvr.toml").not());
+}
+
+/// `.Rprofile` runs inside R, so a stand-in R cannot test it. A pin of 0.1 is
+/// different from any real R, and `uvr init` writes the real `.Rprofile`.
+#[test]
+fn test_rprofile_gives_no_pin_mismatch_message_under_uvr_r_version() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("rprofile");
+    fs::write(dir.path().join(".r-version"), "0.1\n").unwrap();
+    let r_stderr = |variable: Option<&str>| {
+        let mut rscript = std::process::Command::new("Rscript");
+        rscript
+            .args(["-e", "invisible(NULL)"])
+            .current_dir(dir.path())
+            .env_remove("R_PROFILE_USER")
+            .env_remove("UVR_R_VERSION");
+        if let Some(value) = variable {
+            rscript.env("UVR_R_VERSION", value);
+        }
+        let output = rscript.output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let message = "active but .r-version pins 0.1";
+
+    assert!(r_stderr(None).contains(message));
+    assert!(!r_stderr(Some("4.5")).contains(message));
+    // uvr treats a blank variable as unset, so the pin still applies.
+    assert!(r_stderr(Some(" ")).contains(message));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_frozen_sync_fails_when_uvr_r_version_changes_the_r_minor() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    let manifest = "[project]\nname = \"p\"\n\n[dependencies]\n";
+    fs::write(dir.path().join("uvr.toml"), manifest).unwrap();
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "3.0")
+        .arg("lock")
+        .assert()
+        .success();
+    let locked = fs::read_to_string(dir.path().join("uvr.lock")).unwrap();
+
+    r.cmd(dir.path())
+        .env("UVR_R_VERSION", "3.1")
+        .args(["sync", "--frozen"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "uvr.lock was resolved for R 3.0, but the active R is 3.1",
+        ));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("uvr.lock")).unwrap(),
+        locked
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_doctor_names_the_rule_that_selected_r() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    r.pin_globally("3.0.1");
+    r.cmd(dir.path())
+        .arg("doctor")
+        .assert()
+        .stdout(predicate::str::contains("global pin"));
+    r.cmd(dir.path())
+        .arg("doctor")
+        .env("UVR_R_VERSION", "3.1")
+        .assert()
+        .stdout(predicate::str::contains("UVR_R_VERSION"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_pin_global_with_no_version_pins_the_active_r() {
+    let r = RFinder::new(&["3.0.1", "3.1.0"]);
+    let dir = TempDir::new().unwrap();
+    r.cmd(dir.path())
+        .args(["r", "pin", "--global"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(r.config.path().join("uvr").join(".r-version")).unwrap(),
+        "3.1.0\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_r_pin_global_defaults_to_dot_config_under_home() {
+    let r = RFinder::new(&["3.0.1"]);
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    r.cmd(dir.path())
+        .args(["r", "pin", "--global", "3.0.1"])
+        .env("HOME", home.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(home.path().join(".config/uvr/.r-version")).unwrap(),
+        "3.0.1\n"
+    );
+}
+
+#[test]
+fn test_r_pin_global_writes_and_unsets_outside_a_project() {
+    let config = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let pin = config.path().join("uvr").join(".r-version");
+    let cmd = || {
+        let mut cmd = uvr_cmd();
+        cmd.current_dir(dir.path())
+            .env("XDG_CONFIG_HOME", config.path())
+            .env("APPDATA", config.path());
+        cmd
+    };
+
+    // The local form still needs a project.
+    cmd().args(["r", "pin", "4.5"]).assert().failure();
+
+    cmd()
+        .args(["r", "pin", "--global", "4.5"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&pin).unwrap(), "4.5\n");
+
+    cmd()
+        .args(["r", "pin", "--global", "not-a-version"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a valid R version"));
+    assert_eq!(fs::read_to_string(&pin).unwrap(), "4.5\n");
+
+    cmd()
+        .args(["r", "pin", "--global", "--unset"])
+        .assert()
+        .success();
+    assert!(!pin.exists());
+
+    // Nothing to remove is not an error.
+    cmd()
+        .args(["r", "pin", "--global", "--unset"])
+        .assert()
+        .success();
+
+    // `--unset` needs `--global` and takes no version.
+    cmd().args(["r", "pin", "--unset"]).assert().failure();
+    cmd()
+        .args(["r", "pin", "--global", "--unset", "4.5"])
+        .assert()
+        .failure();
 }
 
 #[cfg(unix)]

@@ -204,6 +204,36 @@ pub fn r_install_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"))
 }
 
+/// UVR_R_VERSION
+///
+/// Selects the R for every command that uses one, above a project's `.r-version` (#329). It
+/// is the environment form of `uvr run --r-version`, and takes the same
+/// values: `4.5`, `4.5.3` or a constraint like `>=4.4`. If no installed R
+/// matches, the command fails: this variable has no fallback, and it does not
+/// make `uvr run` download an R.
+pub fn r_version() -> Option<String> {
+    read_env_var("UVR_R_VERSION").map(|v| v.trim().to_string())
+}
+
+/// The directory for uvr's per-user configuration.
+///
+/// `$XDG_CONFIG_HOME/uvr`, else `~/.config/uvr`, on Linux and macOS. This is
+/// not `dirs::config_dir`, which on macOS is `~/Library/Application Support`.
+/// The XDG spec says to ignore a relative value. `%APPDATA%\uvr` on Windows.
+pub fn user_config_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        read_env_var("APPDATA")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+    } else {
+        read_env_var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+    };
+    base.map(|b| b.join("uvr"))
+}
+
 /// UVR_R_DOWNLOADS
 ///
 /// Whether `uvr run` may download R when no installed R satisfies a script
@@ -335,6 +365,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_config_dir_honours_xdg_and_ignores_a_relative_value() {
+        let _env = env_lock();
+        // HOME stays as it is: tests that do not hold the lock read it.
+        let _guard = EnvGuard::new(&["XDG_CONFIG_HOME"]);
+        let default = dirs::home_dir().map(|h| h.join(".config").join("uvr"));
+        assert_eq!(user_config_dir(), default);
+        env::set_var("XDG_CONFIG_HOME", "/fake/xdg");
+        assert_eq!(user_config_dir(), Some(PathBuf::from("/fake/xdg/uvr")));
+        env::set_var("XDG_CONFIG_HOME", "relative/xdg");
+        assert_eq!(user_config_dir(), default);
     }
 
     // We run all env var checks in a single test to avoid race conditions
