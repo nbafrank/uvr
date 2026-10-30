@@ -904,6 +904,7 @@ async fn install_from_lockfile_with_r(
         .chain(project.manifest.sources.iter().cloned())
         .collect();
 
+    let mut p3m_index_available = false;
     let plans: Vec<PkgPlan> = if cache_misses.iter().any(|p| !is_local(p)) {
         // Re-fetch each [[sources]] (HTTP-cached → 304 normally) and partition
         // into binary-capable vs. source-only. A registry is "binary-capable"
@@ -959,6 +960,7 @@ async fn install_from_lockfile_with_r(
             }
             None
         };
+        p3m_index_available = p3m.as_ref().is_some_and(|index| !index.is_empty());
 
         cache_misses
             .iter()
@@ -1172,9 +1174,11 @@ async fn install_from_lockfile_with_r(
             runtime_source.saturating_sub(plans.iter().filter(|p| is_local(p.pkg)).count());
         // A binary plan means a repo exists; it just served source (#225).
         if runtime_binary == 0 && remote_source > 0 && !plans.iter().any(|p| p.is_binary) {
-            ui::line(format!(
-                "  i  No binary repo for {} on R {}; compiling {} package(s) from source.",
-                host_info.distro_label, r_minor_str, remote_source
+            ui::line(source_build_hint(
+                &host_info.distro_label,
+                &r_minor_str,
+                remote_source,
+                p3m_index_available,
             ));
         }
 
@@ -1529,7 +1533,7 @@ async fn install_from_lockfile_with_r(
                     };
                     installer
                         .install_streaming(source_path, &library, &plan.pkg.name, timeout, |line| {
-                            let short: String = line.chars().take(50).collect();
+                            let short = shorten_build_line(line);
                             pb_for_closure
                                 .set_message(format!("compiling {name} {version} ({short})"));
                         })
@@ -2758,6 +2762,54 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
             // Fall back to empty if somehow missing.
             String::new()
         }
+    }
+}
+
+/// The note before a source build where no package has a binary. A P3M index
+/// with packages means that the repo exists but lacks the locked versions, for
+/// example because a newer release replaced them in the index (#272).
+fn source_build_hint(
+    distro: &str,
+    r_minor: &str,
+    count: usize,
+    p3m_index_available: bool,
+) -> String {
+    if p3m_index_available {
+        format!(
+            "  i  No binary for the locked version of {count} package(s) on {distro}, \
+             R {r_minor}; compiling from source. This can take many minutes."
+        )
+    } else {
+        format!(
+            "  i  No binary repo for {distro} on R {r_minor}; compiling {count} package(s) \
+             from source."
+        )
+    }
+}
+
+/// Shorten a build output line for the progress bar. All compiler lines of a
+/// package start with the same long prefix of flags, so show the source file. Any
+/// other line is short or is best known by its start.
+fn shorten_build_line(line: &str) -> String {
+    const MAX_CHARS: usize = 50;
+    const SOURCE_EXTENSIONS: [&str; 10] =
+        ["c", "cc", "cpp", "cxx", "f", "f90", "f95", "m", "mm", "s"];
+
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let source = tokens.contains(&"-c").then(|| {
+        tokens.iter().rev().find(|token| {
+            std::path::Path::new(token)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| SOURCE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        })
+    });
+    match source.flatten() {
+        Some(source) => {
+            let skip = source.chars().count().saturating_sub(MAX_CHARS);
+            source.chars().skip(skip).collect()
+        }
+        None => line.chars().take(MAX_CHARS).collect(),
     }
 }
 
@@ -4230,6 +4282,52 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
         assert!(!root.join(".Rprofile").exists());
         assert!(!root.join(".vscode").exists());
         assert!(!root.join(".uvr").exists());
+    }
+}
+
+#[cfg(test)]
+mod build_progress_tests {
+    use super::*;
+
+    #[test]
+    fn compiler_line_shows_the_source_file() {
+        let line = "g++ -std=gnu++17 -I\"/opt/R/4.6.1/lib/R/include\" -DNDEBUG -I. -fpic -O2 \
+                    -c icu74/common/ubidi.cpp -o icu74/common/ubidi.o";
+        assert_eq!(shorten_build_line(line), "icu74/common/ubidi.cpp");
+    }
+
+    #[test]
+    fn compiler_line_keeps_the_end_of_a_long_path() {
+        let path = format!("{}/ubidi.cpp", "x".repeat(60));
+        let short = shorten_build_line(&format!("g++ -c {path} -o ubidi.o"));
+        assert_eq!(short.chars().count(), 50);
+        assert!(short.ends_with("/ubidi.cpp"), "{short}");
+    }
+
+    #[test]
+    fn other_lines_keep_their_start() {
+        assert_eq!(shorten_build_line("** byte-compile"), "** byte-compile");
+        // A link line has `.o` inputs and no `-c`: there is no source file to show.
+        let link = format!("g++ -shared -o stringi.so {}", "a.o ".repeat(40));
+        assert!(shorten_build_line(&link).starts_with("g++ -shared -o stringi.so"));
+        assert_eq!(shorten_build_line(&link).chars().count(), 50);
+    }
+
+    #[test]
+    fn hint_names_a_repo_only_when_the_index_is_empty() {
+        let no_repo = source_build_hint("Alpine", "4.6", 2, false);
+        assert!(
+            no_repo.contains("No binary repo for Alpine on R 4.6"),
+            "{no_repo}"
+        );
+
+        let stale = source_build_hint("Ubuntu", "4.6", 1, true);
+        assert!(!stale.contains("No binary repo"), "{stale}");
+        assert!(
+            stale.contains("No binary for the locked version"),
+            "{stale}"
+        );
+        assert!(stale.contains("many minutes"), "{stale}");
     }
 }
 

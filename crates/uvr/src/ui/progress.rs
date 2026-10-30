@@ -93,8 +93,12 @@ pub fn make_spinner(msg: &str) -> ProgressBar {
     pb
 }
 
-/// Aggregate progress bar that shows `{bar} {pos}/{len} · {msg}`.
+/// Aggregate progress bar that shows `{bar} {pos}/{len} · {elapsed} · {msg}`.
 /// Use when installing a known number of packages.
+///
+/// The bar ticks only to move the elapsed time: one source file can compile for
+/// minutes with no output, and a static line then looks like a freeze (#272).
+/// There is no spinner, because a spinner would move even if the build stops.
 pub fn make_aggregate_bar(total: u64) -> ProgressBar {
     let mode = progress_mode();
     if mode == ProgressMode::Off {
@@ -103,7 +107,7 @@ pub fn make_aggregate_bar(total: u64) -> ProgressBar {
     let pb = ProgressBar::new(total);
     apply_draw_target(&pb, mode);
     let tmpl = format!(
-        "  {{bar:28.cyan/blue.dim}} {{pos:>3}}/{{len}} {sep} {{msg:.dim}}",
+        "  {{bar:28.cyan/blue.dim}} {{pos:>3}}/{{len}} {sep} {{elapsed_precise}} {sep} {{msg:.dim}}",
         sep = glyph::bullet(),
     );
     pb.set_style(
@@ -116,6 +120,7 @@ pub fn make_aggregate_bar(total: u64) -> ProgressBar {
                 glyph::bar_empty()
             )),
     );
+    pb.enable_steady_tick(std::time::Duration::from_secs(1));
     pb
 }
 

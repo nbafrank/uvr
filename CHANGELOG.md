@@ -76,6 +76,14 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **Source builds show that they are alive** (#272). Compiler lines from
+  `R CMD INSTALL` come on stdout, and uvr read only stderr for progress, so a
+  long build of a package such as stringi kept one static line for minutes. The
+  install bar now shows each source file as it compiles and a running elapsed
+  time. When the P3M index has packages but not the locked version, sync no longer
+  says "No binary repo"; it says that the locked version has no binary and that
+  the build can take many minutes. This makes the wait visible and does not
+  shorten it.
 
 ## v0.4.8 (2026-10-22)
 

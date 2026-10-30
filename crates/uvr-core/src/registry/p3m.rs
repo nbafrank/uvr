@@ -102,6 +102,12 @@ impl P3MBinaryIndex {
         P3MBinaryIndex { packages }
     }
 
+    /// True when no index could be used: the platform is not supported or the
+    /// fetch failed. Differs from an index without the wanted package version.
+    pub fn is_empty(&self) -> bool {
+        self.packages.is_empty()
+    }
+
     /// Return the binary download URL if P3M has a binary for the exact (name, version).
     pub fn binary_url(&self, name: &str, version: &str) -> Option<&str> {
         self.packages

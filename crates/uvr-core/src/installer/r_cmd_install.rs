@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +57,33 @@ fn combine_logs(stdout: &str, stderr: &str) -> String {
         (true, false) => stderr.to_string(),
         (false, true) => stdout.to_string(),
         (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
+/// Read `reader` to EOF, pass each non-empty line to `on_line`, and return all
+/// the output for the error log. Reads bytes and not `lines()`: a build can print
+/// text that is not UTF-8, and to stop at that line would close the pipe and kill
+/// the build with SIGPIPE.
+fn drain_lines<R, F>(reader: R, on_line: &F) -> String
+where
+    R: Read,
+    F: Fn(&str),
+{
+    let mut reader = BufReader::new(reader);
+    let mut all = String::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return all,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&buf);
+        all.push_str(&line);
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            on_line(trimmed);
+        }
     }
 }
 
@@ -152,9 +179,10 @@ impl RCmdInstall {
         result
     }
 
-    /// Like `install`, but streams stderr line-by-line to a callback so the
-    /// caller can update a progress spinner with compilation output. The
-    /// subprocess is killed if it runs longer than `timeout` (or
+    /// Like `install`, but streams stdout and stderr line-by-line to a callback
+    /// so the caller can update a progress spinner with compilation output (#272).
+    /// The callback runs on two threads, and the order between the streams is not
+    /// kept. The subprocess is killed if it runs longer than `timeout` (or
     /// `UVR_INSTALL_TIMEOUT`, or 30m default) — see #52. On any failure
     /// the `00LOCK-<package>/` dir is cleaned up.
     pub fn install_streaming<F>(
@@ -166,7 +194,7 @@ impl RCmdInstall {
         on_line: F,
     ) -> Result<()>
     where
-        F: Fn(&str),
+        F: Fn(&str) + Sync,
     {
         let timeout = effective_install_timeout(timeout);
         let result = self.install_streaming_inner(tarball, library, package_name, timeout, on_line);
@@ -186,7 +214,7 @@ impl RCmdInstall {
         on_line: F,
     ) -> Result<()>
     where
-        F: Fn(&str),
+        F: Fn(&str) + Sync,
     {
         let mut cmd = self.build_cmd(tarball, library);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -266,39 +294,34 @@ impl RCmdInstall {
             })
         };
 
-        // Collect all output for error reporting
-        let mut all_stderr = String::new();
+        let (status, all_stdout, all_stderr) = std::thread::scope(|scope| {
+            let on_line = &on_line;
 
-        // Drain stdout on a dedicated thread. `R CMD INSTALL` writes to both
-        // stdout and stderr; if we only read stderr (below) the stdout pipe
-        // fills its ~64KB kernel buffer on a verbose build and the child blocks
-        // forever on write(2), deadlocking against our own `child.wait()` (#52).
-        let stdout_drain = child.stdout.take().map(|stdout| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut BufReader::new(stdout), &mut s);
-                s
-            })
+            // Drain stdout on a dedicated thread. `R CMD INSTALL` writes to both
+            // stdout and stderr; if we only read stderr (below) the stdout pipe
+            // fills its ~64KB kernel buffer on a verbose build and the child blocks
+            // forever on write(2), deadlocking against our own `child.wait()` (#52).
+            // Compiler lines come on stdout, so they also update progress (#272).
+            let stdout_drain = child
+                .stdout
+                .take()
+                .map(|stdout| scope.spawn(move || drain_lines(stdout, on_line)));
+
+            // When the watchdog kills the child, the pipe closes and this read
+            // exits naturally.
+            let all_stderr = child
+                .stderr
+                .take()
+                .map(|stderr| drain_lines(stderr, on_line))
+                .unwrap_or_default();
+
+            let status = child.wait();
+            completed.store(true, Ordering::SeqCst);
+            let _ = watchdog.join();
+            let all_stdout = stdout_drain.and_then(|h| h.join().ok()).unwrap_or_default();
+            (status, all_stdout, all_stderr)
         });
-
-        // Read stderr line-by-line to update progress. When the watchdog kills
-        // the child, the pipe closes and this loop exits naturally.
-        if let Some(stderr) = child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(|l| l.ok()) {
-                all_stderr.push_str(&line);
-                all_stderr.push('\n');
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    on_line(trimmed);
-                }
-            }
-        }
-
-        let status = child.wait()?;
-        completed.store(true, Ordering::SeqCst);
-        let _ = watchdog.join();
-        let all_stdout = stdout_drain.and_then(|h| h.join().ok()).unwrap_or_default();
+        let status = status?;
 
         // Once the OS reaps the child, the PID can be recycled. Drop the
         // registration immediately so a concurrent SIGINT handler can't snapshot
@@ -653,6 +676,89 @@ mod tests {
             |_| {},
         );
         assert!(result.is_ok(), "deadlocked or failed: {result:?}");
+    }
+
+    /// #272: compiler lines come on stdout and stage lines on stderr. The
+    /// callback must get both, and a failure log must keep both.
+    #[cfg(unix)]
+    #[test]
+    fn streaming_reports_lines_from_both_streams() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fake_r = tmp.path().join("R");
+        std::fs::write(
+            &fake_r,
+            "#!/bin/sh\n\
+             echo 'gcc -c fake.c -o fake.o'\n\
+             echo '** libs' 1>&2\n\
+             exit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_r, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let tarball = tmp.path().join("fake_1.0.tar.gz");
+        std::fs::write(&tarball, b"not a real tarball").unwrap();
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let installer = RCmdInstall::new(fake_r.to_string_lossy().to_string());
+        let err = installer
+            .install_streaming(
+                &tarball,
+                &lib,
+                "fake",
+                Some(Duration::from_secs(20)),
+                |line| seen.lock().unwrap().push(line.to_string()),
+            )
+            .unwrap_err()
+            .to_string();
+
+        let seen = seen.into_inner().unwrap();
+        for expected in ["gcc -c fake.c -o fake.o", "** libs"] {
+            assert!(seen.iter().any(|l| l == expected), "{expected}: {seen:?}");
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
+    }
+
+    /// #272: stdout now goes through a line reader. A line that is not UTF-8 must
+    /// not stop the read: that closes the pipe and kills the build with SIGPIPE.
+    #[cfg(unix)]
+    #[test]
+    fn streaming_survives_output_that_is_not_utf8() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fake_r = tmp.path().join("R");
+        std::fs::write(
+            &fake_r,
+            "#!/bin/sh\n\
+             printf 'caf\\351\\n'\n\
+             for i in $(seq 1 5000); do\n\
+             echo \"stdout line $i ........................................\"\n\
+             done\n\
+             echo 'last line'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_r, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let lib = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let tarball = tmp.path().join("fake_1.0.tar.gz");
+        std::fs::write(&tarball, b"not a real tarball").unwrap();
+
+        let last = std::sync::Mutex::new(String::new());
+        let installer = RCmdInstall::new(fake_r.to_string_lossy().to_string());
+        let result = installer.install_streaming(
+            &tarball,
+            &lib,
+            "fake",
+            Some(Duration::from_secs(20)),
+            |line| *last.lock().unwrap() = line.to_string(),
+        );
+        assert!(result.is_ok(), "build killed: {result:?}");
+        assert_eq!(last.into_inner().unwrap(), "last line");
     }
 
     /// #255: a successful `R CMD INSTALL` stamps the package as uvr-installed,
