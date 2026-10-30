@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use regex::Regex;
 
+use uvr_core::dcf::parse_dcf_fields;
 use uvr_core::project::Project;
 use uvr_core::resolver::is_base_package;
 
@@ -22,7 +23,19 @@ use crate::ui::palette;
 /// `--all` reports every package referenced regardless of manifest
 /// presence; without it we only report the missing set, which is the
 /// signal for "you need to `uvr add` these".
-pub fn run(all: bool) -> Result<()> {
+///
+/// `--add` stops making the user retype that signal and hands the missing
+/// set straight to `uvr add` (#78, #251). Migrating an unmanaged project is
+/// the case both issues describe, and the scanner already knew the answer —
+/// what was missing was a writer.
+///
+/// It composes with `add` rather than writing the manifest itself, so
+/// resolution, the manifest write, the lockfile update, the install and the
+/// rollback-on-failure are all one implementation. That does mean `add`'s
+/// all-or-nothing semantics apply: one name that will not resolve fails the
+/// batch. See the PR discussion on #78 for why a tolerant mode needs
+/// resolver support and is not this change.
+pub async fn run(all: bool, add: bool) -> Result<()> {
     let project = Project::find_cwd().context("Not inside a uvr project")?;
     let manifest_deps: BTreeSet<String> = project
         .manifest
@@ -65,9 +78,15 @@ pub fn run(all: bool) -> Result<()> {
         }
     }
 
+    // A package project refers to itself (`library(mypkg)` in tests and
+    // vignettes). It cannot depend on itself, and `add` would fail on the name
+    // or, worse, resolve a different CRAN package that has it.
+    let own_names = own_package_names(&project);
     let missing: BTreeMap<&str, &Vec<PathBuf>> = found
         .iter()
-        .filter(|(name, _)| !manifest_deps.contains(name.as_str()))
+        .filter(|(name, _)| {
+            !manifest_deps.contains(name.as_str()) && !own_names.contains(name.as_str())
+        })
         .map(|(n, p)| (n.as_str(), p))
         .collect();
 
@@ -123,22 +142,65 @@ pub fn run(all: bool) -> Result<()> {
             palette::dim(&extra)
         );
     }
+    // `--all` is a report of everything, including what is already declared,
+    // so there is nothing to add from it. Only the missing set is actionable.
+    let actionable: Vec<String> = missing.keys().map(|n| (*n).to_string()).collect();
+
+    if add {
+        println!();
+        if !confirm_add(&actionable)? {
+            ui::info("Nothing added.");
+            return Ok(());
+        }
+        // Defaults chosen to match a plain `uvr add <names>`: the jobs
+        // default from `AddArgs`, no dev/bioc/source (a scan cannot tell),
+        // and lock + install left on, since populating a manifest without
+        // resolving it is not the migration anyone asked for.
+        return crate::commands::add::run(
+            actionable, false, false, None, 50, None, false, false, None,
+        )
+        .await;
+    }
+
     if !all && !to_report.is_empty() {
         println!();
         ui::hint(format!(
             "Run {} to add them.",
-            palette::bold(&format!(
-                "uvr add {}",
-                to_report
-                    .iter()
-                    .map(|(n, _)| *n)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )),
+            palette::bold(&format!("uvr add {}", actionable.join(" "))),
         ));
     }
 
     Ok(())
+}
+
+/// The names this project goes by: its manifest name and, in a package source
+/// tree, the `Package:` field of its DESCRIPTION.
+fn own_package_names(project: &Project) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([project.manifest.project.name.clone()]);
+    if let Ok(description) = std::fs::read_to_string(project.root.join("DESCRIPTION")) {
+        names.extend(parse_dcf_fields(&description).remove("Package"));
+    }
+    names
+}
+
+/// Ask before the scan's list goes to `uvr add`: the detectors read text, not
+/// parsed R, so a name can be wrong. Skipped when stdin is not a TTY so CI and
+/// scripts run with the flag alone. The default on Enter is "no".
+fn confirm_add(names: &[String]) -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Ok(true);
+    }
+    eprint!("  Add {}? [y/N] ", names.join(" "));
+    io::stderr().flush().ok();
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 fn is_scannable(path: &Path) -> bool {
@@ -160,9 +222,20 @@ fn has_scannable_extension(path: &Path) -> bool {
 /// the quotes stay. Raw strings (`r"(...)"`, `R"-[...]-"`) are handled; `\`
 /// escapes in ordinary strings are honoured, and those end at the line.
 fn strip_comments_and_strings(input: &str) -> String {
+    strip_r(input, true)
+}
+
+/// [`strip_comments_and_strings`] with the string contents kept, for the
+/// detectors that must see `library("pkg")`. A `#` inside a string stays, and
+/// a commented-out `library(oldpkg)` goes.
+fn strip_comments(input: &str) -> String {
+    strip_r(input, false)
+}
+
+fn strip_r(input: &str, blank_strings: bool) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len());
-    let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+    let blank = |c: char| if !blank_strings || c == '\n' { c } else { ' ' };
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
@@ -221,7 +294,8 @@ fn strip_comments_and_strings(input: &str) -> String {
             while i < chars.len() {
                 let c = chars[i];
                 if c == '\\' && chars.get(i + 1).is_some_and(|&n| n != '\n') {
-                    out.push_str("  ");
+                    out.push(blank(c));
+                    out.push(blank(chars[i + 1]));
                     i += 2;
                     continue;
                 }
@@ -233,7 +307,7 @@ fn strip_comments_and_strings(input: &str) -> String {
                     out.push(c);
                     break;
                 }
-                out.push(' ');
+                out.push(blank(c));
             }
             continue;
         }
@@ -246,10 +320,8 @@ fn strip_comments_and_strings(input: &str) -> String {
 /// Compiled regexes for the R-package name patterns we recognise.
 ///
 /// Patterns are intentionally conservative — we want few false positives
-/// even at the cost of a few false negatives. Comment lines that contain
-/// `library(pkg)` will still match (R doesn't have inline-comment escape
-/// for code mid-string), but that's an acceptable trade-off for a tool
-/// the user re-runs and visually scans.
+/// even at the cost of a few false negatives: `--add` writes what they find
+/// to the manifest, so a wrong name costs more than one extra line of report.
 struct PackageDetector {
     library_or_require: Regex,
     namespace_op: Regex,
@@ -265,7 +337,7 @@ impl PackageDetector {
         // because `library()` uses NSE. `requireNamespace` and
         // `loadNamespace` use the same convention.
         let library_or_require = Regex::new(
-            r#"\b(?:library|require|requireNamespace|loadNamespace)\s*\(\s*["']?([A-Za-z][A-Za-z0-9._]*)["']?"#,
+            r#"\b(?:library|require|requireNamespace|loadNamespace)\s*\(\s*(["']?)([A-Za-z][A-Za-z0-9._]*)["']?([^)]*)"#,
         )
         .expect("library/require regex compiles");
 
@@ -311,16 +383,21 @@ impl PackageDetector {
 
     fn extract(&self, content: &str) -> BTreeSet<String> {
         let mut found = BTreeSet::new();
-        for cap in self.library_or_require.captures_iter(content) {
+        let code = strip_comments(content);
+        for cap in self.library_or_require.captures_iter(&code) {
+            // `library(p, character.only = TRUE)` names a variable, not a
+            // package. A quoted first argument is still a literal name.
+            if cap[1].is_empty() && cap[3].contains("character.only") {
+                continue;
+            }
+            found.insert(cap[2].to_string());
+        }
+        for cap in self.namespace_op.captures_iter(&code) {
             if let Some(name) = cap.get(1) {
                 found.insert(name.as_str().to_string());
             }
         }
-        for cap in self.namespace_op.captures_iter(content) {
-            if let Some(name) = cap.get(1) {
-                found.insert(name.as_str().to_string());
-            }
-        }
+        // Roxygen tags live in comments, so this pass needs the raw text.
         for cap in self.roxygen_import.captures_iter(content) {
             if let Some(name) = cap.get(1) {
                 found.insert(name.as_str().to_string());
@@ -328,9 +405,7 @@ impl PackageDetector {
         }
         // Scan `box::use` on comment-stripped source so a commented-out
         // import block can't sweep the live code after it into the
-        // argument list. The other detectors keep running on raw content
-        // (roxygen needs `#'`, and `library`/`::` in comments is an
-        // accepted trade-off).
+        // argument list. Strings go too, so `"box::use(x)"` is no import.
         let decommented = strip_comments_and_strings(content);
         for cap in self.box_use.captures_iter(&decommented) {
             if let Some(args) = cap.get(1) {
@@ -471,6 +546,56 @@ box::use(
     }
 
     #[test]
+    fn extract_skips_commented_out_references() {
+        let detector = PackageDetector::new();
+        let found = detector.extract(concat!(
+            "# library(oldpkg)  # removed in 2021\n",
+            "x <- 1 # gone::fn()\n",
+            "x <- \"#1\"; library(afterhash)\n",
+            "library(kept)\n",
+        ));
+        assert!(found.contains("kept"), "got {found:?}");
+        assert!(found.contains("afterhash"), "got {found:?}");
+        assert!(!found.contains("oldpkg"), "got {found:?}");
+        assert!(!found.contains("gone"), "got {found:?}");
+    }
+
+    #[test]
+    fn extract_skips_character_only_variables() {
+        let detector = PackageDetector::new();
+        let found = detector.extract(concat!(
+            "for (p in pkgs) library(p, character.only = TRUE)\n",
+            "require(q,\n  character.only = T)\n",
+            "library(\"literal\", character.only = TRUE)\n",
+            "library(plain, quietly = TRUE)\n",
+        ));
+        assert!(found.contains("literal"), "got {found:?}");
+        assert!(found.contains("plain"), "got {found:?}");
+        assert!(!found.contains("p"), "got {found:?}");
+        assert!(!found.contains("q"), "got {found:?}");
+    }
+
+    #[test]
+    fn own_names_include_the_description_package() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("uvr.toml"),
+            "[project]\nname = \"tomlname\"\n\n[dependencies]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("DESCRIPTION"),
+            "Package: descname\nVersion: 1.0.0\n",
+        )
+        .unwrap();
+        let project = Project::find(dir.path()).unwrap();
+        assert_eq!(
+            own_package_names(&project),
+            BTreeSet::from(["tomlname".to_string(), "descname".to_string()])
+        );
+    }
+
+    #[test]
     fn extract_box_use_ignores_imports_inside_strings() {
         let detector = PackageDetector::new();
         let src = concat!(
@@ -517,8 +642,7 @@ box::use(
     fn extract_box_use_ignores_commented_out_block() {
         // A whole `box::use` block that is commented out must not leak its
         // package names, nor sweep the live code after it into the
-        // argument list. (`box` itself still appears via the namespace
-        // operator detector, which runs on raw source.)
+        // argument list.
         let detector = PackageDetector::new();
         let src = "# box::use(dplyr,\n#   tidyr)\nresult <- transform(df)\n";
         let found = detector.extract(src);

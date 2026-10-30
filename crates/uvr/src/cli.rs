@@ -511,6 +511,13 @@ pub struct ScanArgs {
     /// from uvr.toml.
     #[arg(long)]
     pub all: bool,
+
+    /// Add the missing packages to uvr.toml, then lock and install them —
+    /// equivalent to running `uvr add` with the names this scan reports. Asks
+    /// first in a terminal. For `uvr add`'s install flags, set
+    /// UVR_INSTALL_SYSREQS, UVR_NO_BINARY or UVR_INSTALL_TIMEOUT.
+    #[arg(long, conflicts_with = "all")]
+    pub add: bool,
 }
 
 // ────────────────────────────────────────────────────────────

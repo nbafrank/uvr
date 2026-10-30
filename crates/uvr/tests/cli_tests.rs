@@ -3883,3 +3883,47 @@ fn test_sysdeps_outside_a_project_fails() {
         .assert()
         .failure();
 }
+
+// ─── uvr scan --add (#78, #251) ───────────────────────────────────
+
+#[test]
+fn test_scan_add_conflicts_with_all() {
+    // `--all` reports what is already declared too, so there is nothing
+    // actionable in it. Rejecting the combination beats silently adding
+    // only the missing subset of a listing that claimed to be everything.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "scanproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    uvr_cmd()
+        .args(["scan", "--add", "--all"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn test_scan_add_ignores_the_project_itself() {
+    // No network involved: the project's own name is not a dependency, so
+    // nothing is left to resolve and the command must succeed offline.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["init", "--here", "scanproj"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    fs::write(
+        dir.path().join("own.R"),
+        "library(scanproj)\n# library(removedpkg)\nx <- utils::head(1:3)\n",
+    )
+    .unwrap();
+    uvr_cmd()
+        .args(["scan", "--add"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("are declared in uvr.toml"));
+}
