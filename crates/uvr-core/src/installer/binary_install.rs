@@ -80,11 +80,16 @@ fn rename_or_copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// `libr_path`: when set (uvr-managed R on macOS), the `.so` files inside the
 /// extracted package are patched so their `libR.dylib` reference points to the
 /// managed R installation rather than the CRAN framework path.
+///
+/// `r_arch`: architecture of the R the package is for (`aarch64` /
+/// `x86_64`, see `Platform::of_r`); macOS rejects shared objects of any other.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn install_binary_package(
     tarball: &Path,
     library: &Path,
     package_name: &str,
     libr_path: Option<&Path>,
+    r_arch: &str,
 ) -> Result<()> {
     let is_zip = tarball
         .extension()
@@ -107,7 +112,7 @@ pub fn install_binary_package(
     #[cfg(target_os = "macos")]
     {
         let pkg_dir = library.join(package_name);
-        if let Err(e) = verify_mach_o_arch_in_libs(&pkg_dir, package_name) {
+        if let Err(e) = verify_mach_o_arch_in_libs(&pkg_dir, package_name, r_arch) {
             // Roll back the extracted package so a stale wrong-arch tree
             // doesn't sit in the library for downstream commands to trip on.
             // remove_dir_with_retry is best-effort (Spotlight indexer / NFS /
@@ -168,23 +173,42 @@ pub fn install_binary_package(
 // CPU type constants from `<mach/machine.h>`:
 //   CPU_TYPE_X86_64 = CPU_TYPE_X86 (7) | CPU_ARCH_ABI64 (0x01000000)
 //   CPU_TYPE_ARM64  = CPU_TYPE_ARM (12) | CPU_ARCH_ABI64
-#[cfg(target_os = "macos")]
 const CPU_TYPE_X86_64: u32 = 0x01000007;
-#[cfg(target_os = "macos")]
 const CPU_TYPE_ARM64: u32 = 0x0100000c;
 // Mach-O magic numbers (Mach-O is LE on modern macOS; fat headers are BE):
-#[cfg(target_os = "macos")]
 const MH_MAGIC_64: u32 = 0xfeedfacf;
 #[cfg(target_os = "macos")]
 const FAT_MAGIC: u32 = 0xcafebabe;
 
+/// Architecture (`aarch64` / `x86_64`) of a thin 64-bit Mach-O file, or
+/// `None` for anything else — missing, universal, or not Mach-O at all.
+pub(crate) fn macho_arch(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let mut header = [0u8; 8];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    let [m0, m1, m2, m3, c0, c1, c2, c3] = header;
+    if u32::from_le_bytes([m0, m1, m2, m3]) != MH_MAGIC_64 {
+        return None;
+    }
+    match u32::from_le_bytes([c0, c1, c2, c3]) {
+        CPU_TYPE_ARM64 => Some("aarch64"),
+        CPU_TYPE_X86_64 => Some("x86_64"),
+        _ => None,
+    }
+}
+
+/// `r_arch` is the architecture of the R the package is installed for
+/// ([`crate::r_version::downloader::Platform::of_r`]), not uvr's own: under
+/// Rosetta the two differ (#155).
 #[cfg(target_os = "macos")]
-fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> {
-    let host_arch = std::env::consts::ARCH;
-    let (expected_cpu_type, expected_arch_name) = match host_arch {
+fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str, r_arch: &str) -> Result<()> {
+    let (expected_cpu_type, expected_arch_name) = match r_arch {
         "aarch64" | "arm64" => (CPU_TYPE_ARM64, "arm64"),
         "x86_64" => (CPU_TYPE_X86_64, "x86_64"),
-        // Unknown host arch — don't have a baseline to compare against.
+        // Unknown arch — don't have a baseline to compare against.
         _ => return Ok(()),
     };
 
@@ -198,7 +222,7 @@ fn verify_mach_o_arch_in_libs(pkg_dir: &Path, package_name: &str) -> Result<()> 
         package_name,
         expected_cpu_type,
         expected_arch_name,
-        host_arch,
+        r_arch,
         0,
     )
 }
@@ -214,7 +238,7 @@ fn verify_mach_o_arch_in_dir(
     package_name: &str,
     expected_cpu_type: u32,
     expected_arch_name: &str,
-    host_arch: &str,
+    r_arch: &str,
     depth: usize,
 ) -> Result<()> {
     use std::io::Read;
@@ -240,7 +264,7 @@ fn verify_mach_o_arch_in_dir(
                 package_name,
                 expected_cpu_type,
                 expected_arch_name,
-                host_arch,
+                r_arch,
                 depth + 1,
             )?;
             continue;
@@ -272,7 +296,7 @@ fn verify_mach_o_arch_in_dir(
                 };
                 return Err(UvrError::Other(format!(
                     "Binary package '{}' contains a {} shared object, \
-                     but uvr is running on {} ({}). The upstream binary \
+                     but the R it is for is {} ({}). The upstream binary \
                      repository likely served a wrong-architecture tarball. \
                      File: {}. \
                      Workaround: prefer CRAN by setting \
@@ -281,7 +305,7 @@ fn verify_mach_o_arch_in_dir(
                     package_name,
                     found,
                     expected_arch_name,
-                    host_arch,
+                    r_arch,
                     path.display()
                 )));
             }
@@ -963,7 +987,7 @@ mod tests {
         let zip_file = dir.path().join("mypkg_1.0.0.zip");
         std::fs::rename(&zip_path, &zip_file).unwrap();
 
-        install_binary_package(&zip_file, &library, "mypkg", None).unwrap();
+        install_binary_package(&zip_file, &library, "mypkg", None, std::env::consts::ARCH).unwrap();
         assert!(library.join("mypkg").join("DESCRIPTION").exists());
         assert!(crate::installer::install_marker::is_marked(
             &library.join("mypkg")
@@ -1002,7 +1026,7 @@ mod tests {
             .unwrap();
         assert!(status.success());
 
-        install_binary_package(&tarball, &library, "tarpkg", None).unwrap();
+        install_binary_package(&tarball, &library, "tarpkg", None, std::env::consts::ARCH).unwrap();
         assert!(library.join("tarpkg").join("DESCRIPTION").exists());
         assert!(crate::installer::install_marker::is_marked(
             &library.join("tarpkg")
@@ -1598,7 +1622,8 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_thin_macho_so(&libs.join("pkg.so"), host_cpu);
 
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect("host-arch .so should pass the check");
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
+            .expect("host-arch .so should pass the check");
     }
 
     #[cfg(target_os = "macos")]
@@ -1617,7 +1642,7 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_thin_macho_so(&libs.join("pkg.so"), wrong_cpu);
 
-        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect_err("wrong-arch .so should be rejected");
         let msg = err.to_string();
         assert!(
@@ -1656,7 +1681,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         write_thin_macho_so(&nested.join("pkg.so"), wrong_host_cpu());
 
-        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect_err("wrong-arch .so in libs subdir should be rejected");
         assert!(err.to_string().contains("#102"));
     }
@@ -1671,7 +1696,7 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_thin_macho_so(&libs.join("helper.dylib"), wrong_host_cpu());
 
-        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect_err("wrong-arch .dylib should be rejected");
         assert!(err.to_string().contains("#102"));
     }
@@ -1688,7 +1713,7 @@ mod tests {
         write_thin_macho_so(&nested.join("helper.dylib"), host_cpu());
         write_thin_macho_so(&pkg_dir.join("libs").join("pkg.so"), host_cpu());
 
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect("host-arch files at any depth should pass");
     }
 
@@ -1699,7 +1724,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pkg_dir = dir.path().join("pkg");
         std::fs::create_dir_all(&pkg_dir).unwrap();
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect("pure-R package without libs/ should pass");
     }
 
@@ -1730,7 +1755,7 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_fat_macho_so(&libs.join("pkg.so"), &[0x01000007, 0x0100000c]);
 
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect("universal Mach-O with host slice should pass");
     }
 
@@ -1750,7 +1775,7 @@ mod tests {
         std::fs::create_dir_all(&libs).unwrap();
         write_fat_macho_so(&libs.join("pkg.so"), &[wrong_only]);
 
-        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg")
+        let err = verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
             .expect_err("fat binary missing host slice should be rejected");
         assert!(err.to_string().contains("#102"));
     }
@@ -1764,6 +1789,7 @@ mod tests {
         let libs = pkg_dir.join("libs");
         std::fs::create_dir_all(&libs).unwrap();
         std::fs::write(libs.join("README"), "not a Mach-O").unwrap();
-        verify_mach_o_arch_in_libs(&pkg_dir, "pkg").expect("non-.so files should be ignored");
+        verify_mach_o_arch_in_libs(&pkg_dir, "pkg", std::env::consts::ARCH)
+            .expect("non-.so files should be ignored");
     }
 }

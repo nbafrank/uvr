@@ -121,10 +121,11 @@ jobs:
 
   # macOS x86_64 (Intel): no free native runner since GitHub retired macos-13.
   # Build uvr for x86_64-apple-darwin on the arm64 runner and run it under
-  # Rosetta 2 — the binary is compiled with target_arch = "x86_64", so
-  # Platform::detect() selects the Intel portable tarball, and Rosetta executes
-  # both uvr and the downloaded Intel R. This gives real coverage of the Intel
-  # download/extract path without a native Intel runner.
+  # Rosetta 2. On its own that uvr now installs arm64 R, because the hardware
+  # is Apple Silicon (#155), so the Intel step sets UVR_R_ARCH=x86_64 to keep
+  # covering the Intel download/extract path; Rosetta executes both uvr and
+  # the Intel R. The second step covers #155 itself: the same Intel uvr,
+  # with no override, installs native R and syncs arm64 packages for it.
   test-macos-x86_64:
     name: Test (macos-x86_64, Rosetta)
     runs-on: macos-latest
@@ -154,6 +155,8 @@ jobs:
 
       - name: Smoke test Intel R install under Rosetta
         shell: bash
+        env:
+          UVR_R_ARCH: x86_64
         run: |
           set -euxo pipefail
           bin=./target/x86_64-apple-darwin/debug/uvr
@@ -161,6 +164,29 @@ jobs:
             "$bin" r install "$v"
           done
           "$bin" r list --all
+          latest="${R_VERSIONS##* }"
+          test "$(lipo -archs "$HOME/.uvr/r-versions/$latest/lib/libR.dylib")" = x86_64
+
+      - name: Smoke test native R and packages from the Rosetta uvr (#155)
+        shell: bash
+        env:
+          # Separate from the Intel installs above, which share version names.
+          UVR_R_INSTALL_DIR: ${{ runner.temp }}/r-native
+        run: |
+          set -euxo pipefail
+          bin="$PWD/target/x86_64-apple-darwin/debug/uvr"
+          latest="${R_VERSIONS##* }"
+          "$bin" doctor | grep -E 'R install architecture +aarch64'
+          "$bin" r install "$latest"
+          test "$(lipo -archs "$UVR_R_INSTALL_DIR/$latest/lib/libR.dylib")" = arm64
+          work="$(mktemp -d)"
+          cd "$work"
+          "$bin" init --here pkg-smoke --r-version "$latest"
+          "$bin" add "$SMOKE_PKG"
+          "$bin" sync
+          test "$(lipo -archs .uvr/library/"$SMOKE_PKG"/libs/"$SMOKE_PKG".so)" = arm64
+          printf 'library(%s); cat("pkg-smoke-ok\\n")\n' "$SMOKE_PKG" > check.R
+          "$bin" run check.R
 
   # musllinux_1_2 x86_64 portable build: no GitHub-hosted musl runner exists.
   # Check out on the glibc host (node-based actions don't run on pure Alpine)

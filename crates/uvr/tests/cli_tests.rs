@@ -1455,6 +1455,7 @@ fn test_sync_after_cache_prune_still_hits_the_cache() {
         "1.0",
         Some("md5:0123"),
         "4.5",
+        std::env::consts::ARCH,
         false,
         Some(&libr),
         None,

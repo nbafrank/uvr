@@ -76,6 +76,22 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **macOS: an Intel uvr under Rosetta 2 now installs native arm64 R on
+  Apple Silicon** (#155). The R architecture came from uvr's own build, so
+  an `x86_64` uvr downloaded Intel R and ran it translated forever. `uvr r
+  install` now asks the hardware (`sysctl hw.optional.arm64`), and the new
+  `UVR_R_ARCH=x86_64|arm64` env var picks one explicitly. `uvr sync` now
+  takes the architecture from the R it installs into (the Mach-O header of
+  its `lib/libR.dylib`) for the P3M channel, the wrong-architecture check,
+  the package-cache key, and the Homebrew prefix for source builds — so an
+  Intel R installed before this change keeps getting Intel packages, and an
+  arm64 CRAN R used from an Intel uvr gets arm64 ones. `uvr doctor` shows
+  the R architecture when it differs from uvr's. Existing installs are not
+  replaced (`uvr r install` warns when it keeps one); to move one to arm64,
+  `uvr r uninstall <ver> && uvr r install <ver>`, then delete each affected
+  project's `.uvr/library/` before its next `uvr sync` (sync does not yet
+  notice packages built for the other architecture). `uvr upgrade` still
+  fetches the uvr build you already run.
 
 ## v0.4.8 (2026-10-22)
 
