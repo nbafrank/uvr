@@ -207,15 +207,57 @@ local({
 # <<< uvr <<<
 "#;
 
+// `UVR_USER_PROFILE=1` (#249) sources `~/.Rprofile` from the block. These
+// lines go in only for a user who opted in, or a block that already has them,
+// so an upgrade leaves every other committed `.Rprofile` byte-identical (the
+// #309 churn) and a teammate without the switch does not strip them again.
+// They sit after the paths are anchored to the project (a `setwd()` in the
+// profile must not move them) and before `.libPaths()`, so the project
+// library still ends up first. `source`, not `sys.source`: that one restores
+// `keep.source` on exit, so the option would not survive from the profile.
+const RPROFILE_USER_PROFILE_ANCHOR: &str = "  rver_file <- file.path(getwd(), \".r-version\")\n";
+const RPROFILE_USER_PROFILE: &str = r#"  if (Sys.getenv("UVR_USER_PROFILE") %in% c("1", "true", "yes", "TRUE", "YES")) {
+    user <- normalizePath("~/.Rprofile", mustWork = FALSE)
+    if (file.exists(user) && user != normalizePath(".Rprofile", mustWork = FALSE))
+      try(source(user, local = globalenv()))
+  }
+"#;
+
+fn rprofile_snippet(user_profile: bool) -> String {
+    if !user_profile {
+        return RPROFILE_SNIPPET.to_string();
+    }
+    RPROFILE_SNIPPET.replacen(
+        RPROFILE_USER_PROFILE_ANCHOR,
+        &format!("{RPROFILE_USER_PROFILE_ANCHOR}{RPROFILE_USER_PROFILE}"),
+        1,
+    )
+}
+
+/// Whether the uvr block in `existing` already sources the user's profile.
+fn block_has_user_profile(existing: &str) -> bool {
+    let Some(start) = existing.find(RPROFILE_START) else {
+        return false;
+    };
+    let rest = &existing[start..];
+    let block = rest.find(RPROFILE_END).map_or(rest, |end| &rest[..end]);
+    block.contains(r#"Sys.getenv("UVR_USER_PROFILE")"#)
+}
+
 pub fn ensure_rprofile(dir: &Path) -> std::io::Result<()> {
+    ensure_rprofile_with(dir, uvr_core::env_vars::user_profile())
+}
+
+fn ensure_rprofile_with(dir: &Path, user_profile: bool) -> std::io::Result<()> {
     let path = dir.join(".Rprofile");
 
     if !path.exists() {
-        return std::fs::write(&path, RPROFILE_SNIPPET);
+        return std::fs::write(&path, rprofile_snippet(user_profile));
     }
 
     let existing = std::fs::read_to_string(&path)?;
-    if let Some(updated) = refresh_uvr_block(&existing, RPROFILE_SNIPPET) {
+    let snippet = rprofile_snippet(user_profile || block_has_user_profile(&existing));
+    if let Some(updated) = refresh_uvr_block(&existing, &snippet) {
         if updated != existing {
             std::fs::write(&path, updated)?;
         }
@@ -228,7 +270,7 @@ pub fn ensure_rprofile(dir: &Path) -> std::io::Result<()> {
         content.push('\n');
     }
     content.push('\n');
-    content.push_str(RPROFILE_SNIPPET);
+    content.push_str(&snippet);
     std::fs::write(&path, content)
 }
 
@@ -555,6 +597,53 @@ mod rprofile_tests {
         // packages RStudio/Positron sessions never see.
         assert!(RPROFILE_SNIPPET.contains(r#"Sys.getenv("UVR_LIBRARY")"#));
         assert!(RPROFILE_SNIPPET.contains(r#"file.path(getwd(), ".uvr", "library")"#));
+    }
+
+    #[test]
+    fn rprofile_snippet_sources_the_user_profile_on_opt_in() {
+        // #249: R reads `./.Rprofile` *instead of* `~/.Rprofile`, so in a uvr
+        // project the snippet is the only place that can bring the user's
+        // profile back: after the paths are anchored, before `.libPaths()`.
+        assert_eq!(rprofile_snippet(false), RPROFILE_SNIPPET);
+        let on = rprofile_snippet(true);
+        let opt_in = on.find(r#"Sys.getenv("UVR_USER_PROFILE")"#).unwrap();
+        let anchored = on.find("rver_file <- ").unwrap();
+        let lib_paths = on.find(".libPaths(").unwrap();
+        assert!(anchored < opt_in && opt_in < lib_paths);
+        assert!(on.contains(r#"normalizePath("~/.Rprofile""#));
+        assert!(on.contains("source(user, local = globalenv())"));
+        assert!(!on.contains("sys.source"));
+        // The R side accepts the same values as `env_vars::truthy`.
+        assert!(on.contains(r#"%in% c("1", "true", "yes", "TRUE", "YES")"#));
+    }
+
+    #[test]
+    fn rprofile_gains_user_profile_lines_only_on_opt_in_and_keeps_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".Rprofile");
+        let read = || std::fs::read_to_string(&path).unwrap();
+
+        // Not opted in: a block from before #249 is left byte-identical.
+        let before = format!("options(foo = 1)\n\n{RPROFILE_SNIPPET}");
+        std::fs::write(&path, &before).unwrap();
+        ensure_rprofile_with(tmp.path(), false).unwrap();
+        assert_eq!(read(), before);
+
+        // Opted in: the lines are added inside the block.
+        ensure_rprofile_with(tmp.path(), true).unwrap();
+        let with = read();
+        assert!(with.starts_with("options(foo = 1)\n"));
+        assert!(block_has_user_profile(&with));
+
+        // A teammate without the switch keeps them, so the file does not
+        // flip-flop between collaborators.
+        ensure_rprofile_with(tmp.path(), false).unwrap();
+        assert_eq!(read(), with);
+
+        // A mention outside the block does not count.
+        assert!(!block_has_user_profile(
+            "# Sys.getenv(\"UVR_USER_PROFILE\")\n# >>> uvr >>>\n# <<< uvr <<<\n"
+        ));
     }
 
     #[test]

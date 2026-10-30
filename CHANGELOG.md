@@ -19,6 +19,21 @@ Pure tracking section — fixes and small features land here between tags.
   `GITHUB_PAT`, proxy settings, TZ and locale went with it, while
   `R CMD INSTALL` kept them. The opt-out is off by default and leaves the
   *site* Renviron blanked either way.
+- **`UVR_USER_PROFILE=1` loads the user's `~/.Rprofile` in a uvr project,
+  a headered `uvr run` script, and `R CMD INSTALL`** (#249, #261). R reads
+  only one user profile and takes `./.Rprofile` first, so uvr's project block
+  hid a personal profile in every project session, and the null-device
+  `R_PROFILE_USER` hid it from scripts and installs. With the switch on,
+  scripts and installs point `R_PROFILE_USER` at the user's own value or
+  `~/.Rprofile` by explicit path, never at the project file. A relative
+  `R_PROFILE_USER` is made absolute first, so it reaches the lazy-load and
+  byte-compile sessions of an install too, which is where a libomp preload
+  for #261 has to run. The project block sources `~/.Rprofile` before it
+  adds the project library; `uvr sync` with the switch set adds those lines
+  once, and a project nobody opted in for keeps its `.Rprofile`
+  byte-identical. Off by default, and an environment variable rather than a
+  `uvr.toml` key because the profile belongs to the user, not the project.
+  Requested by @AliSajid; thanks @gdevenyi.
 - **Linux attaches cached packages with per-file hardlinks instead of a
   directory symlink** (#248). `uvr cache clean` no longer leaves every
   existing project library pointing at deleted targets — a hardlinked file

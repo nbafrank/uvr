@@ -500,6 +500,46 @@ a `~/.Renviron` that sets `R_LIBS_USER` does override the project library —
 that is the trade the switch makes. `R CMD INSTALL` has always read the user
 file, so `uvr add` and `uvr sync` are unaffected by this setting.
 
+### The user's `.Rprofile`
+
+R reads only one user profile, and it takes `./.Rprofile` over
+`~/.Rprofile`. Inside a uvr project that is uvr's own `.Rprofile`, so your
+personal profile (prompt, options, helper functions) does not load. A
+headered script and `R CMD INSTALL` (`uvr add`, `uvr sync`) skip both. To
+load `~/.Rprofile` in all of these:
+
+```sh
+export UVR_USER_PROFILE=1
+```
+
+A script or an install then reads `R_PROFILE_USER` if you set it, else
+`~/.Rprofile`, and never the project's `.Rprofile`. A session in the project
+sources `~/.Rprofile` from uvr's block, before the block adds the project
+library. uvr adds those lines to the block the first time `uvr init` or
+`uvr sync` runs with the switch set, so run one of them once that way. A
+project nobody opted in for keeps its `.Rprofile` unchanged, and a teammate
+without the switch keeps the lines (they do nothing in a session without it).
+For an IDE session that does not start from your shell, put
+`UVR_USER_PROFILE=1` in `~/.Renviron` too.
+
+With the switch on, a `~/.Rprofile` that changes `.libPaths()` also changes
+the library a headered script sees. That is the trade the switch makes.
+
+Installs stay reproducible by default: without the switch, `R CMD INSTALL`
+reads no user or project profile. With the switch, the profile runs in every
+R session of the install, including the lazy-load and byte-compile sessions.
+You can use this for a startup fix that a package build needs, for example a
+libomp preload (#261). Put the fix in `~/.Rprofile`, or in its own file:
+
+```sh
+export UVR_USER_PROFILE=1
+export R_PROFILE_USER=~/.config/R/install-fix.Rprofile
+```
+
+uvr makes a relative `R_PROFILE_USER` absolute against the directory where
+you run uvr. Do not point it at the project's `.Rprofile`: that file is uvr's
+block, and the install sessions run it from a temporary directory.
+
 ---
 
 ## Shell completions
