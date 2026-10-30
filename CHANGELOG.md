@@ -76,6 +76,21 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **The project `.Rprofile` tells a collaborator without uvr how to install
+  it** (#87). Someone who clones a uvr project and opens R without the CLI
+  now sees `uvr: uvr command not found. Install it in a terminal with:`
+  followed by the README's one-line install command for their platform
+  (`curl … install.sh | sh`, or `irm … install.ps1 | iex` on Windows), and
+  `uvr::install_uvr()` as an alternative when the companion package is
+  installed. The block reports state and downloads nothing. It checks only in
+  interactive sessions, so `Rscript`, knitr and child R processes stay
+  silent, and it looks for the binary with a `file.exists()` scan of `PATH`
+  plus the default install directories (`~/.local/bin`, `~/.cargo/bin`,
+  `/usr/local/bin`, `/opt/homebrew/bin`; on Windows `.local\bin` and
+  `.cargo\bin` under `%USERPROFILE%`, and `%LOCALAPPDATA%\Programs\uvr`), so
+  an R started from a GUI with a shorter `PATH` does not raise a false alarm.
+  Because the managed block changed, the next `uvr sync` / `uvr init` rewrites
+  it once in every existing project.
 
 ## v0.4.8 (2026-10-22)
 
