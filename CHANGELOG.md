@@ -76,6 +76,15 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **A companion R package download that fails its pinned SHA-256 check is
+  now an error, not a warning** (#162). The tarball is pinned to a commit
+  and a hash, so a fresh download that does not match means the bytes were
+  tampered with (or GitHub regenerated the archive); `uvr init`,
+  `uvr import` and `uvr sync` now stop there and print the URL, the
+  expected and actual hashes, and how to go on with `--no-companion` or
+  install the companion from R. A mismatching cached tarball is still
+  deleted and downloaded again, and network failures, `R CMD INSTALL` failures
+  and the missing `Meta/package.rds` check still only warn.
 
 ## v0.4.8 (2026-10-22)
 

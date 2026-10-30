@@ -366,6 +366,19 @@ fn hint_for(msg: &str) -> Option<String> {
              trust store — uvr validates against it — or point SSL_CERT_FILE at the \
              certificate file.",
         )
+    } else if m.contains("companion package download failed its sha-256 check") {
+        // #162: pinned bytes that changed are a tamper signal, not a
+        // network blip — say so, and give the way around uvr's download.
+        Some(
+            "The download does not match the SHA-256 pinned in this uvr release, so uvr \
+             did not install it: the tarball was tampered with, or GitHub regenerated it. \
+             Please report this at https://github.com/nbafrank/uvr/issues. To go on without \
+             the companion, run the command again with --no-companion (or set \
+             UVR_NO_COMPANION=1). To install it by hand, use \
+             remotes::install_github(\"nbafrank/uvr-r\", lib = .libPaths()[1]); uvr then \
+             skips its own download. If this was `uvr init`, the project files are already \
+             written. `uvr import` finished its other steps before this error.",
+        )
     } else if m.contains("not inside a uvr project") {
         Some("Run `uvr init` to create uvr.toml in this directory.")
     } else if m.contains("no lockfile") {
@@ -444,6 +457,18 @@ mod tests {
         let hint = hint_for(msg).expect("certificate failure should carry a hint");
         assert!(hint.contains("trust store"), "{hint}");
         assert!(hint.contains("SSL_CERT_FILE"), "{hint}");
+    }
+
+    #[test]
+    fn companion_checksum_failure_gets_the_manual_install_hint() {
+        // #162: the headline and context `ensure_companion_package` returns.
+        let msg = "The uvr R companion package download failed its SHA-256 check\n\
+                   URL:      https://api.github.com/repos/nbafrank/uvr-r/tarball/abc\n\
+                   expected: 1bc6\nactual:   dead";
+        let hint = hint_for(msg).expect("checksum failure should carry a hint");
+        assert!(hint.contains("remotes::install_github"), "{hint}");
+        assert!(hint.contains("--no-companion"), "{hint}");
+        assert!(hint.contains("UVR_NO_COMPANION=1"), "{hint}");
     }
 
     #[test]

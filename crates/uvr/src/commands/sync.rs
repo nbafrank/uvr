@@ -685,7 +685,7 @@ async fn install_from_lockfile_with_r(
     let companion_installed = library.join("uvr").join("DESCRIPTION").exists();
     if companion_wanted && (!companion_installed || !to_install.is_empty()) {
         if let Some((ref r_bin, ref current_r)) = r_info {
-            ensure_companion_package(&library, current_r, r_bin);
+            ensure_companion_package(&library, current_r, r_bin)?;
         }
     }
 
@@ -1709,29 +1709,70 @@ fn prune_unused_packages(
 /// Both are gzipped tarballs of the same tree but use different compression
 /// settings → different SHA-256. To compute a new hash:
 ///   curl -sL "https://api.github.com/repos/nbafrank/uvr-r/tarball/<sha>" | shasum -a 256
-/// Mismatch is silently fatal: `ensure_companion_package` swallows install
-/// failures and the user just doesn't get the companion R package.
+/// A wrong hash here is loudly fatal: a freshly downloaded tarball that does
+/// not match fails `uvr init`, `uvr import` and `uvr sync` outright (#162).
 const COMPANION_SHA: &str = "f20019c39d8ab16dd360632c0f44b7e6a947162d";
 const COMPANION_HASH: &str = "1bc618215ad80666eea815d88f6bf53ca1c201f7883b970647c96eb18b677ffe";
 
+/// Why one companion install attempt failed. A checksum mismatch is kept
+/// apart from everything else so the caller can treat a tampered download
+/// as fatal while transport and install failures stay best-effort (#162).
+#[derive(Debug)]
+enum CompanionError {
+    /// `fresh`: the tarball was downloaded in this attempt, not read from cache.
+    ChecksumMismatch {
+        expected: &'static str,
+        actual: String,
+        fresh: bool,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for CompanionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChecksumMismatch {
+                expected, actual, ..
+            } => write!(
+                f,
+                "companion tarball checksum mismatch (expected {expected}, got {actual})"
+            ),
+            Self::Other(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl From<std::io::Error> for CompanionError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
+impl From<ureq::Error> for CompanionError {
+    fn from(e: ureq::Error) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
 /// Install the uvr R companion package from GitHub into the project library
-/// if it's not already installed. Failures are silently ignored — the companion
-/// package is a convenience, not a requirement.
+/// if it's not already installed. Transport and install failures only warn —
+/// the companion package is a convenience, not a requirement.
 ///
 /// Security: the download is pinned to an immutable commit SHA and verified
 /// against a hardcoded SHA-256 hash, preventing supply-chain attacks via the
-/// companion repo.
+/// companion repo. A freshly downloaded tarball that fails the hash check is
+/// an error, not a warning (#162).
 pub fn ensure_companion_package(
     library: &std::path::Path,
     current_r_version: &str,
     r_binary: &std::path::Path,
-) {
+) -> Result<()> {
     let desc_path = library.join("uvr").join("DESCRIPTION");
     if desc_path.exists() {
         // Check if the companion was built with a different R major.minor.
         // If so, reinstall to avoid "built under R x.y.z" warnings.
         if !companion_needs_rebuild(&desc_path, current_r_version) {
-            return;
+            return Ok(());
         }
         // Remove stale companion before reinstalling
         let _ = std::fs::remove_dir_all(library.join("uvr"));
@@ -1749,25 +1790,41 @@ pub fn ensure_companion_package(
     });
     let _ = std::fs::create_dir_all(&cache_dir);
     let tarball = cache_dir.join(format!("uvr-r-{}.tar.gz", &COMPANION_SHA[..8]));
+    let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
 
     // Retry once if the first attempt fails with a bad cached tarball or a
     // transient download/install failure.
     let mut last_err: Option<String> = None;
     for attempt in 0..2 {
-        match try_install_companion(library, &tarball, r_binary) {
+        match try_install_companion(library, &tarball, &url, r_binary) {
             Ok(()) => {
                 // #60: don't surface the install in the user-facing output —
                 // by the time they see uvr::sync()'s output they've already
                 // loaded the companion. Available under -v / --verbose.
                 tracing::debug!("uvr R companion package installed");
-                return;
+                return Ok(());
             }
             Err(e) => {
-                last_err = Some(e.to_string());
+                // A cached mismatch can be local corruption and gets the
+                // retry; bytes GitHub just served for a pinned SHA cannot.
+                // Those bytes never reached the cache, so a tarball there now
+                // came from another process and stays.
+                if let CompanionError::ChecksumMismatch {
+                    expected,
+                    actual,
+                    fresh: true,
+                } = &e
+                {
+                    return Err(anyhow::anyhow!(
+                        "URL:      {url}\nexpected: {expected}\nactual:   {actual}"
+                    )
+                    .context("The uvr R companion package download failed its SHA-256 check"));
+                }
                 // Force re-download on next attempt — wipe the cached tarball
                 // regardless of hash, since any failure here means the cached
                 // file is suspect (wrong hash, truncated, corrupted).
                 let _ = std::fs::remove_file(&tarball);
+                last_err = Some(e.to_string());
                 if attempt == 0 {
                     tracing::debug!("Companion install attempt 1 failed: {e}; retrying");
                 }
@@ -1780,6 +1837,7 @@ pub fn ensure_companion_package(
          Install manually from R: remotes::install_github(\"nbafrank/uvr-r\", lib = .libPaths()[1])",
         last_err.as_deref().unwrap_or("unknown error"),
     ));
+    Ok(())
 }
 
 /// Attempt the download + verify + install cycle once. Returns the first
@@ -1794,11 +1852,12 @@ pub fn ensure_companion_package(
 fn try_install_companion(
     library: &std::path::Path,
     tarball: &std::path::Path,
+    url: &str,
     r_binary: &std::path::Path,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+) -> std::result::Result<(), CompanionError> {
     // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
-    if !tarball.exists() {
-        let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
+    let fresh = !tarball.exists();
+    if fresh {
         // Platform verifier: trust the OS store (incl. corporate
         // TLS-inspection CAs) like every other uvr download does via
         // reqwest's native-roots (#201).
@@ -1810,24 +1869,12 @@ fn try_install_companion(
             )
             .build()
             .into();
-        let resp = agent.get(&url).header("User-Agent", "uvr").call()?;
+        let resp = agent.get(url).header("User-Agent", "uvr").call()?;
         let bytes = resp.into_body().read_to_vec()?;
-        std::fs::write(tarball, &bytes)?;
-    }
-
-    // Verify SHA-256 checksum on every run (cache could be corrupted or tampered with).
-    let bytes = std::fs::read(tarball)?;
-    {
-        use sha2::{Digest, Sha256};
-        let hash = hex::encode(Sha256::digest(&bytes));
-        if hash != COMPANION_HASH {
-            return Err(format!(
-                "companion tarball checksum mismatch (expected {}, got {})",
-                &COMPANION_HASH[..12],
-                &hash[..12]
-            )
-            .into());
-        }
+        publish_companion_bytes(&bytes, tarball, COMPANION_HASH)?;
+    } else {
+        // Verify SHA-256 checksum on every run (cache could be corrupted or tampered with).
+        verify_companion_bytes(&std::fs::read(tarball)?, COMPANION_HASH, false)?;
     }
 
     // R CMD INSTALL can take a tarball directly — it extracts, finds the
@@ -1839,19 +1886,52 @@ fn try_install_companion(
         uvr_core::installer::r_cmd_install::RCmdInstall::new(r_binary.to_string_lossy());
     installer
         .install(tarball, library, "uvr")
-        .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+        .map_err(|e| CompanionError::Other(e.to_string()))?;
 
     // Postcondition: Meta/package.rds is what `library()` checks first.
     let dest = library.join("uvr");
     if !dest.join("Meta").join("package.rds").exists() {
-        return Err(format!(
+        return Err(CompanionError::Other(format!(
             "R CMD INSTALL reported success but Meta/package.rds missing at {}",
             dest.display()
-        )
-        .into());
+        )));
     }
 
     Ok(())
+}
+
+/// Check downloaded bytes, then move them into the cache in one step. The
+/// check reads this process's own bytes, and the rename means no process sees
+/// a partial file: on a shared `UVR_CACHE_DIR`, a concurrent write must not
+/// look like tampering.
+fn publish_companion_bytes(
+    bytes: &[u8],
+    tarball: &std::path::Path,
+    expected: &'static str,
+) -> std::result::Result<(), CompanionError> {
+    verify_companion_bytes(bytes, expected, true)?;
+    let dir = tarball.parent().unwrap_or(std::path::Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut tmp, bytes)?;
+    tmp.persist(tarball).map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn verify_companion_bytes(
+    bytes: &[u8],
+    expected: &'static str,
+    fresh: bool,
+) -> std::result::Result<(), CompanionError> {
+    use sha2::{Digest, Sha256};
+    let actual = hex::encode(Sha256::digest(bytes));
+    if actual == expected {
+        return Ok(());
+    }
+    Err(CompanionError::ChecksumMismatch {
+        expected,
+        actual,
+        fresh,
+    })
 }
 
 /// Check if the installed companion package was built under a different R major.minor.
@@ -2762,6 +2842,41 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
 }
 
 #[cfg(test)]
+mod companion_cache_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn publish_companion_bytes_writes_only_verified_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = tmp.path().join("uvr-r.tar.gz");
+
+        // A bad download leaves no file behind, and no temporary file.
+        let err = publish_companion_bytes(b"bad", &tarball, "0000").unwrap_err();
+        assert!(matches!(
+            err,
+            CompanionError::ChecksumMismatch { fresh: true, .. }
+        ));
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+
+        let hash: &'static str = hex::encode(Sha256::digest(b"good")).leak();
+        publish_companion_bytes(b"good", &tarball, hash).unwrap();
+        assert_eq!(std::fs::read(&tarball).unwrap(), b"good");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn publish_companion_bytes_keeps_a_tarball_from_another_process() {
+        // #162: the failed check must not touch what another uvr published.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = tmp.path().join("uvr-r.tar.gz");
+        std::fs::write(&tarball, b"theirs").unwrap();
+        assert!(publish_companion_bytes(b"bad", &tarball, "0000").is_err());
+        assert_eq!(std::fs::read(&tarball).unwrap(), b"theirs");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
@@ -3566,6 +3681,49 @@ mod tests {
         assert!(kept.is_empty());
         assert!(tmp.path().join("keepme").exists());
         assert!(!tmp.path().join("dropme").exists());
+    }
+
+    // sha256("hello")
+    const HELLO_SHA256: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+    #[test]
+    fn companion_bytes_matching_the_pin_verify() {
+        assert!(verify_companion_bytes(b"hello", HELLO_SHA256, true).is_ok());
+    }
+
+    #[test]
+    fn companion_fresh_download_mismatch_is_the_fatal_kind() {
+        // #162: what `ensure_companion_package` turns into a hard error.
+        let err = verify_companion_bytes(b"tampered", HELLO_SHA256, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, CompanionError::ChecksumMismatch { fresh: true, .. }),
+            "{err:?}"
+        );
+        // Full hashes, not a 12-char prefix: the user compares them.
+        assert!(msg.contains(HELLO_SHA256), "{msg}");
+        let actual = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"tampered"));
+        assert!(msg.contains(&actual), "{msg}");
+    }
+
+    #[test]
+    fn companion_cached_tarball_mismatch_is_retryable() {
+        // A corrupt cache entry must not be read as tampering: it takes the
+        // delete-and-re-download retry. The tarball exists, so no network.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tarball = tmp.path().join("uvr-r-cached.tar.gz");
+        std::fs::write(&tarball, b"truncated").unwrap();
+        let err = try_install_companion(
+            tmp.path(),
+            &tarball,
+            "http://127.0.0.1:9/unused",
+            std::path::Path::new("/nonexistent/R"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CompanionError::ChecksumMismatch { fresh: false, .. }),
+            "{err:?}"
+        );
     }
 
     #[test]

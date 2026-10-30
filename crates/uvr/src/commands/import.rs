@@ -245,10 +245,17 @@ pub async fn run(
             }
         }
     }
+    // Returned last: a companion that fails its checksum (#162) must not skip
+    // the renv cleanup, or `--lock`.
+    let mut companion = Ok(());
     if !manifest.project.bare && !uvr_core::env_vars::no_companion() {
         if let Ok(r_binary) = find_r_binary(manifest.project.r_version.as_deref()) {
             if let Some(r_ver) = query_r_version(&r_binary) {
-                crate::commands::sync::ensure_companion_package(&library_path, &r_ver, &r_binary);
+                companion = crate::commands::sync::ensure_companion_package(
+                    &library_path,
+                    &r_ver,
+                    &r_binary,
+                );
             }
         }
     }
@@ -329,7 +336,7 @@ pub async fn run(
         ));
     }
 
-    Ok(())
+    companion
 }
 
 // ─── renv leftover detection + cleanup ─────────────────────────────
