@@ -8,6 +8,7 @@
 #   bash benchmarks/run-in-docker.sh                # default 4.5.3 / 2025-04-01
 #   R_VERSION=4.6.0 bash benchmarks/run-in-docker.sh
 #   PPM_SNAPSHOT=2025-05-01 BENCH_RUNS=3 bash benchmarks/run-in-docker.sh
+#   BENCH_EXTENDED=1 bash benchmarks/run-in-docker.sh   # adds pak_lockfile
 #
 # The CI workflow at .github/workflows/benchmark.yml runs the same image
 # on a clean ubuntu-latest runner — this script reproduces those numbers
@@ -51,6 +52,7 @@ docker run --rm \
     --platform "${PLATFORM}" \
     --user "$(id -u):$(id -g)" \
     -e "BENCH_RUNS=${BENCH_RUNS}" \
+    -e "BENCH_EXTENDED=${BENCH_EXTENDED:-0}" \
     -v "${REPO_ROOT}/benchmarks/out:/out" \
     "uvr-bench:r${R_VERSION}-${PPM_SNAPSHOT}"
 

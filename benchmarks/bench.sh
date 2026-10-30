@@ -422,7 +422,9 @@ library(pak)
 options(repos = c(CRAN = "${P3M_REPO}"),
         HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
             paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
-pak::lockfile_create("${scenario}", lockfile = file.path(getwd(), "pkg.lock"), lib = tempfile(), dependencies = TRUE)
+# dependencies = NA: hard dependencies only, like pkg_install in bench_pak.
+# TRUE adds Suggests: 65 lockfile entries for jsonlite, not 1 (#235).
+pak::lockfile_create("${scenario}", lockfile = file.path(getwd(), "pkg.lock"), lib = tempfile(), dependencies = NA)
 REOF
     (cd "$lockdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak_lock.R >/dev/null 2>&1) || {
         echo "  pak_lockfile ($tier):  SKIPPED (lockfile_create failed)"
@@ -594,12 +596,11 @@ for scenario in $SCENARIOS; do
         bench_install_packages "$MANIFEST" "$scenario" "$tier"
         if $HAS_PAK; then
             bench_pak "$MANIFEST" "$scenario" "$tier"
-            # Extended-only: pak's lockfile_install path shows a deterministic
-            # ~549s/run anomaly in the container (~50x plain pak on the same
-            # package — timeout-shaped, under investigation) and its numbers
-            # aren't in the README table. Every tag paying 45+ min/scenario
-            # for an unpublished figure is how this workflow spent five
-            # releases dying at the CI ceiling.
+            # Extended-only: this stage's numbers aren't in the README table,
+            # so CI doesn't pay for it. It once took ~549s/run for jsonlite in
+            # the container, and with the missing HTTPUserAgent source builds
+            # it kept this workflow at the CI ceiling for five releases. The
+            # lockfile then held jsonlite's Suggests tree (#235).
             if [ "${BENCH_EXTENDED:-0}" = "1" ]; then
                 bench_pak_lockfile "$MANIFEST" "$scenario" "$tier"
             fi

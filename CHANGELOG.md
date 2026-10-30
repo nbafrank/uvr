@@ -76,6 +76,14 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **The extended `pak_lockfile` benchmark no longer installs Suggests**
+  (#235). It created its lockfile with
+  `dependencies = TRUE`, so its one-package jsonlite stage also installed the
+  Suggests tree: 65 lockfile entries, not 1. The issue reported ~549s per run
+  for that stage; one cold run in the bench image now takes 1.60s, which also
+  includes the mirror fix in f089a01.
+  `BENCH_EXTENDED=1 bash benchmarks/run-in-docker.sh` now reaches the stage;
+  the wrapper did not pass the variable to the container.
 
 ## v0.4.8 (2026-10-22)
 
