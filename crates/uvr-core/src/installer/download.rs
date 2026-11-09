@@ -363,7 +363,7 @@ async fn download_one(
             }
         }
     };
-    let mut resp_result = match send(url).await {
+    let mut resp_result = match crate::net::retry_connect(|| send(url)).await {
         Ok(r) => r.error_for_status(),
         Err(e) => Err(e),
     };
@@ -392,7 +392,10 @@ async fn download_one(
             // override here is harmless and keeps requests symmetric. A git
             // host's token reaches the Archive URL only if it is on that
             // host (#105, #187).
-            match send(&archive_url).await.and_then(|r| r.error_for_status()) {
+            match crate::net::retry_connect(|| send(&archive_url))
+                .await
+                .and_then(|r| r.error_for_status())
+            {
                 Ok(r) => resp_result = Ok(r),
                 Err(e) => archive_error = Some(e),
             }
