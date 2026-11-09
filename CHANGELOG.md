@@ -76,6 +76,13 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **A Linux binary that cannot find a system library gets a hint** (#270).
+  When R cannot load a package's compiled code because a system library is
+  missing (`libicui18n.so.74: cannot open shared object file`), the error now
+  names the library and gives the fix: install the system package, or remove
+  the package directory and rebuild it with `UVR_NO_BINARY=1`. An R from Nix,
+  as in devbox, does not see the host's libraries, so there the source build
+  is the usual fix.
 
 ## v0.4.8 (2026-10-22)
 

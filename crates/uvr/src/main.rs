@@ -355,6 +355,17 @@ fn hint_for(msg: &str) -> Option<String> {
              toolchain."
         ));
     }
+    if let Some((package_dir, library)) = unloadable_shared_object(msg) {
+        return Some(format!(
+            "R could not load the compiled code in {package_dir}: the system library \
+             `{library}` was not found. A Linux binary package links the system libraries \
+             of the distribution that uvr detects. Install the system package that \
+             provides `{library}`, or build this package from source: \
+             `rm -rf {package_dir}`, then run the command again with `UVR_NO_BINARY=1`. \
+             An R from Nix (devbox, for example) does not search the host's library \
+             directories, so with that R a source build is usually the fix."
+        ));
+    }
     let m = msg.to_ascii_lowercase();
     // Checked before the generic network cases: a rejected certificate is
     // a trust problem, and telling the user to check their connection
@@ -412,6 +423,33 @@ fn hint_for(msg: &str) -> Option<String> {
     hint.map(String::from)
 }
 
+/// The package directory and the missing system library from R's dlopen
+/// failure on Linux (#270):
+///
+/// ```text
+/// unable to load shared object '/p/.uvr/library/stringi/libs/stringi.so':
+///   libicui18n.so.74: cannot open shared object file: No such file or directory
+/// ```
+///
+/// `None` when the object R tried to load is itself missing: then the loader
+/// names a path, not a library, and the package install is what is broken.
+fn unloadable_shared_object(msg: &str) -> Option<(&str, &str)> {
+    const LOAD: &str = "unable to load shared object '";
+    const MISSING: &str = ": cannot open shared object file";
+    let object = &msg[msg.find(LOAD)? + LOAD.len()..];
+    let (object, rest) = object.split_once('\'')?;
+    let package_dir = &object[..object.rfind("/libs/")?];
+    // The word just before the loader's text; R puts it on the next line.
+    let library = rest[..rest.find(MISSING)?]
+        .split_whitespace()
+        .last()?
+        .trim_start_matches(':');
+    if library.is_empty() || library.contains('/') {
+        return None;
+    }
+    Some((package_dir, library))
+}
+
 /// The `-std=` flag a compiler refused, from gcc's "unrecognized
 /// command-line option '-std=gnu23'" or clang's "invalid value 'gnu23' in
 /// '-std=gnu23'". Only the error line counts: the build log also echoes
@@ -431,7 +469,7 @@ fn rejected_std_flag(msg: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_for, rejected_std_flag};
+    use super::{hint_for, rejected_std_flag, unloadable_shared_object};
 
     #[test]
     fn certificate_failures_get_the_trust_hint_not_a_network_one() {
@@ -478,6 +516,38 @@ mod tests {
             !hint.contains("mac.r-project.org"),
             "misrouted to the missing-toolchain hint: {hint}"
         );
+    }
+
+    #[test]
+    fn a_binary_that_cannot_find_a_system_library_gets_the_source_build_hint() {
+        // #270: a P3M stringi binary under a devbox (Nix) R, verbatim from
+        // the report.
+        let msg = "Failed to install packages after add\n\
+                   Failed to install coefplot\n\
+                   R CMD INSTALL failed for 'coefplot' (exit 1):\n\
+                   Error in dyn.load(file, DLLpath = DLLpath, ...) :\n  \
+                   unable to load shared object '/home/jared/p/.uvr/library/stringi/libs/stringi.so':\n  \
+                   libicui18n.so.74: cannot open shared object file: No such file or directory\n\
+                   Calls: <Anonymous> ... namespaceImport -> loadNamespace -> library.dynam -> dyn.load\n\
+                   Execution halted";
+        let hint = hint_for(msg).expect("an unloadable binary should carry a hint");
+        assert!(hint.contains("`libicui18n.so.74`"), "{hint}");
+        assert!(
+            hint.contains("`rm -rf /home/jared/p/.uvr/library/stringi`"),
+            "{hint}"
+        );
+        assert!(hint.contains("UVR_NO_BINARY=1"), "{hint}");
+        assert!(hint.contains("Nix"), "{hint}");
+    }
+
+    #[test]
+    fn a_missing_package_object_is_not_blamed_on_a_system_library() {
+        // The package's own .so is gone: the loader names a path, and
+        // installing a system package would not help.
+        let msg = "unable to load shared object '/p/.uvr/library/a/libs/a.so':\n  \
+                   /p/.uvr/library/a/libs/a.so: cannot open shared object file: \
+                   No such file or directory";
+        assert_eq!(unloadable_shared_object(msg), None);
     }
 
     #[test]
