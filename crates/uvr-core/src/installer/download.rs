@@ -363,7 +363,7 @@ async fn download_one(
             }
         }
     };
-    let mut resp_result = match send(url).await {
+    let mut resp_result = match crate::net::retry_connect(|| send(url)).await {
         Ok(r) => r.error_for_status(),
         Err(e) => Err(e),
     };
@@ -377,6 +377,10 @@ async fn download_one(
             Some(git) => git.denied_error(status, url),
             None => auth::repository_for(repos, url)?.denied_error(status),
         });
+    // The Archive retry's own failure, kept beside the first one: the
+    // Archive answers 404 for a current release, so on its own it hides
+    // why the first request failed (#332).
+    let mut archive_error = None;
     if resp_result.is_err() {
         if let Some(archive_url) = cran_archive_url(url) {
             debug!(
@@ -388,15 +392,30 @@ async fn download_one(
             // override here is harmless and keeps requests symmetric. A git
             // host's token reaches the Archive URL only if it is on that
             // host (#105, #187).
-            resp_result = match send(&archive_url).await {
-                Ok(r) => r.error_for_status(),
-                Err(e) => Err(e),
-            };
+            match crate::net::retry_connect(|| send(&archive_url))
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                Ok(r) => resp_result = Ok(r),
+                Err(e) => archive_error = Some(e),
+            }
         }
     }
     let mut resp = match resp_result {
         Ok(resp) => resp,
-        Err(e) => return Err(denied.unwrap_or_else(|| e.into())),
+        Err(e) => {
+            if let Some(denied) = denied {
+                return Err(denied);
+            }
+            let first = UvrError::from(e);
+            return Err(match archive_error {
+                Some(archive) => UvrError::Other(format!(
+                    "{first}; the CRAN Archive retry also failed: {}",
+                    UvrError::from(archive)
+                )),
+                None => first,
+            });
+        }
     };
 
     let cache_dir = dest.parent().unwrap_or(std::path::Path::new("."));
@@ -1083,6 +1102,31 @@ mod tests {
             let cdn_seen = cdn_seen.lock().unwrap();
             assert_eq!(cdn_seen.len(), 1);
             assert_eq!(test_authorization(&cdn_seen[0]), None, "{cdn_seen:?}");
+        }
+
+        // #332: a current release is not in the Archive, so the retry's 404
+        // said nothing about why the first request failed.
+        #[tokio::test]
+        async fn a_failed_archive_retry_keeps_the_first_error() {
+            let (url, seen) = test_server(|head| {
+                if head.contains("/Archive/") {
+                    test_response("404 Not Found", "", b"")
+                } else {
+                    test_response("503 Service Unavailable", "", b"")
+                }
+            });
+            let err = fetch(&format!("{url}/src/contrib/a_1.0.tar.gz"), &[])
+                .await
+                .unwrap_err()
+                .to_string();
+            let (first, archive) = err
+                .split_once("the CRAN Archive retry also failed")
+                .unwrap_or_else(|| panic!("no Archive part: {err}"));
+            assert!(first.contains("503 Service Unavailable"), "{err}");
+            assert!(first.contains("/src/contrib/a_1.0.tar.gz"), "{err}");
+            assert!(archive.contains("404 Not Found"), "{err}");
+            assert!(archive.contains("/Archive/a/a_1.0.tar.gz"), "{err}");
+            assert_eq!(seen.lock().unwrap().len(), 2, "primary + Archive retry");
         }
 
         #[tokio::test]

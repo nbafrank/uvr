@@ -7,6 +7,7 @@ pub mod error;
 pub mod installer;
 pub mod lockfile;
 pub mod manifest;
+mod net;
 pub mod os_release;
 pub mod package_name;
 pub mod process;

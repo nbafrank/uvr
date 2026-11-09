@@ -76,6 +76,12 @@ Pure tracking section — fixes and small features land here between tags.
   every resolved dependency whether or not it is installed here, and exits 0:
   an image being built has none of it yet, so filtering against the current
   host is the wrong question. Linux-only, like the check it wraps.
+- **A failed CRAN download reports its first error** (#332). When a source
+  download failed and the CRAN Archive retry failed too, the error gave only
+  the Archive's answer, a 404 for a current release, and hid the cause. Now
+  it gives both. A request that cannot connect (a refused connection or a
+  connect timeout) is tried up to three times, for package downloads and for
+  a first `PACKAGES.gz` fetch.
 
 ## v0.4.8 (2026-10-22)
 

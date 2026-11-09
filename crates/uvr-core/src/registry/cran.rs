@@ -613,7 +613,7 @@ impl CranRegistry {
 
         // No cache or force refresh — full download
         debug!("Downloading {} PACKAGES.gz...", cache_key);
-        let resp = get(packages_url).send().await?;
+        let resp = crate::net::retry_connect(|| get(packages_url).send()).await?;
         if !resp.status().is_success() {
             if let Some(e) = denied(resp.status()) {
                 return Err(e);
